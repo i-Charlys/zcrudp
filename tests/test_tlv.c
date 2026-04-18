@@ -13,7 +13,7 @@ int main() {
     packet.flags = 15;
     packet.value = 4096;
     printf("type: %u, flags: %u, value: %u\n", packet.type, packet.flags, packet.value);
-    printf("Taille memoire : %zu octets\n", sizeof(tlv_packet_u));
+    printf("lenght memoire : %zu octets\n", sizeof(tlv_packet_u));
     printf("raw: %x\n", packet.raw);
     
     return 0;
