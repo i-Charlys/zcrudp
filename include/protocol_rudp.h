@@ -5,6 +5,17 @@
 #define RUDP_WINDOW_SIZE 64
 #endif
 
+
+#ifdef RUDP_PACKED_STRUCTURES
+    #define RUDP_PACKED __attribute__((packed))
+#else
+    #define RUDP_PACKED
+#endif
+
+#define RUDP_SLOT_FREE      0
+#define RUDP_SLOT_IN_FLIGHT 1
+
+
 #include "protocol_tlv.h"
 #include <stdint.h>
 
@@ -32,7 +43,7 @@ typedef struct  {
  */
 typedef struct {
     rudp_frame_s frame;
-    uint8_t state;
+    uint8_t state; /** 0 : RUDP_SLOT_FREE, 1 : RUDP_SLOT_IN_FLIGHT */
     uint32_t timestamp;
     
 } rudp_slot_s ; 
@@ -47,9 +58,20 @@ typedef struct {
 
 
 int rudp_init(rudp_context_s *ctx);
-int rudp_send(rudp_context_s *ctx, tlv_packet_u packet);
+int rudp_send(rudp_context_s *ctx, tlv_packet_u packet, uint32_t now);
 int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num);
-int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout);
+
+
+/**
+ * @brief Handles retransmissions for timed-out packets.
+ * * @param ctx The RUDP context.
+ * @param now Current time in milliseconds.
+ * @param timeout Retransmission timeout in milliseconds.
+ * @param out_indices Array provided by the caller to be filled with expired slot indices.
+ * @param max_indices The maximum number of indices the array can hold.
+ * @return The number of packets marked for retransmission, or -1 on error.
+ */
+int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out_indices, int max_indices);
 
 
 #endif // PROTOCOL_RUDP_H
