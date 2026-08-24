@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 /**
- * @brief TLV packet structure (32-bit fixed frame)
+ * @brief TFV (Type-Flags-Value) packet structure (32-bit fixed frame)
  */
 typedef union {
     uint32_t raw;

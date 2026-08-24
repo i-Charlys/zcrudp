@@ -6,8 +6,8 @@ This document describes the design and implementation details of the `zcrudp` (Z
 
 The protocol is designed to be lightweight and efficient, fitting within a fixed-size 8-byte frame.
 
-### 32-bit TLV
-The data payload is a 32-bit Type-Length-Value (TLV) packet, represented by the `tlv_packet_u` union in `include/protocol_tlv.h`. It uses a bitfield to pack information into 4 bytes:
+### 32-bit TFV (Type-Flags-Value)
+The data payload is a 32-bit Type-Flags-Value (TFV) packet, represented by the `tlv_packet_u` union in `include/protocol_tlv.h`. It uses a bitfield to pack information into 4 bytes:
 - **Type**: 8 bits
 - **Flags**: 4 bits
 - **Value**: 20 bits

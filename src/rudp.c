@@ -2,42 +2,41 @@
 #include <string.h>
 
 /*
- * RUDP_CONTEXT (The "Engine")
- * +-------------------------------------------+
- * | current_seq_num | head | tail | tx_buffer |
- * +-------------------------------------------+
- *                                 |
- *                                 v
- * TX_BUFFER (Circular Array - 64 Slots)
- * +---------+---------+---------+---------+
- * | Slot 0  | Slot 1  | Slot 2  |  ...    |
- * +---------+---------+---------+---------+
- * |
- * v
- * RUDP_SLOT_S (The "Storage Container")
- * +-------------------------------------------------------+
- * | state (1B) | timestamp (4B) |       FRAME (8B)        |
- * +-------------------------------------------------------+
- * (Local management)           (Network payload)
- *                               |
- *                               v
- * RUDP_FRAME_S (The "Wire Packet")
- * +---------------------------------------+
- * |      HEADER (4B)      |  PACKET (4B)  |
- * +-----------------------+---------------+
- * | type | len | seq_num  |   TLV UNION   |
- * +---------------------------------------+
- * (Protocol Control)     (Actual Data)
+ * ============================================================================
+ * RUDP MEMORY & PACKET ARCHITECTURE
+ * ============================================================================
+ *
+ * 1. RUDP_CONTEXT_S (The "Engine" - Full Protocol State Machine)
+ * +-------------------+------------+------------+---------------------------+
+ * | current_seq_num   | head (2B)  | tail (2B)  | tx_buffer (64 Slots)      |
+ * | (Next seq to use) | (Write idx)| (Read idx) | (~1 KB Ring Buffer)       |
+ * +-------------------+------------+------------+---------------------------+
+ *                                                              |
+ *                                                              v
+ * 2. TX_BUFFER (Circular Array - 64 Slots / Sliding Window)
+ * +---------------+---------------+---------------+ ... +---------------+
+ * |    Slot 0     |    Slot 1     |    Slot 2     |     |    Slot 63    |
+ * +---------------+---------------+---------------+ ... +---------------+
+ *         |
+ *         v
+ * 3. RUDP_SLOT_S (The "Storage Container" - 16B aligned)
+ * +---------------------+-----------------------+-----------------------------+
+ * | state (1B)          | timestamp (4B)        | FRAME (8B)                  |
+ * | (FREE / IN_FLIGHT)  | (Sent time in ms)     | (Network Wire Packet)       |
+ * +---------------------+-----------------------+-----------------------------+
+ *   <------------- Local Memory ------------->    <------ Wire Payload ------>
+ *                                                              |
+ *                                                              v
+ * 4. RUDP_FRAME_S (The "Wire Packet" - Exactly 8 Bytes on Network)
+ * +-------------------------------------+-------------------------------------+
+ * |             HEADER (4B)             |             PACKET (4B)             |
+ * +------------------+------------------+---------+-----------+---------------+
+ * | seq_num (2B)     | ack (2B)         | type    | flags     | value         |
+ * | (16-bit sequence)| (Cumulative ACK) | (8-bit) | (4-bit)   | (20-bit val)  |
+ * +------------------+------------------+---------+-----------+---------------+
+ *   <------- Protocol Control ------->    <-------- TFV Data Payload ------->
+ * ============================================================================
  */
-
-
-
-
-
-
-
-
-
 /**
  * @brief Initializes a RUDP context.
  *

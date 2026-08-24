@@ -12,7 +12,7 @@ A zero-malloc, 32-bit fixed-frame Reliable UDP library in pure C.
 - **Fixed-frame RUDP**: Optimized for 32-bit architectures with a total frame size of 8 bytes (4-byte header + 4-byte payload).
 - **Cumulative ACKs**: Implements a sliding window (default 64 slots) with cumulative acknowledgment logic.
 - **Retransmission**: Built-in timeout handling and retransmission tracking.
-- **TLV Integration**: Uses a Type-Length-Value (TLV) structure for the 32-bit payload.
+- **TFV Integration**: Uses a 32-bit Type-Flags-Value (TFV) structure for the payload.
 - **Sequence Rollover**: Robust handling of 16-bit sequence number wraparound.
 
 ## Project Structure
@@ -21,7 +21,7 @@ A zero-malloc, 32-bit fixed-frame Reliable UDP library in pure C.
 .
 ├── include/
 │   ├── protocol_rudp.h    # Core RUDP definitions and context
-│   └── protocol_tlv.h     # 32-bit TLV packet structure
+│   └── protocol_tlv.h     # 32-bit TFV packet structure
 ├── src/
 │   └── rudp.c             # RUDP implementation logic
 └── tests/

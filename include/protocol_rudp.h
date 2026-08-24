@@ -30,11 +30,11 @@ typedef struct  {
 
 
 /**
- * @brief Represents a RUDP frame, containing a header and a TLV packet. Length : 8 octets.
+ * @brief Represents a RUDP frame, containing a header and a TFV packet. Length : 8 octets.
  */
 typedef struct  { 
     rudp_header_s header; /** Length : 4 octets */
-    tlv_packet_u packet; /** Length : variable , max : 4 octets */
+    tlv_packet_u packet; /** TFV packet : 4 octets */
 } rudp_frame_s;
 
 
