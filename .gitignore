@@ -54,3 +54,6 @@ dkms.conf
 # debug information files
 *.dwo
 build/
+
+# IDE and Editor configurations
+.vscode/
