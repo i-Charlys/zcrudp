@@ -167,3 +167,45 @@ int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out
 
     return count; // Return how many packets need to be resent
 }
+
+
+int rudp_pack_frame(const rudp_frame_s *frame, uint8_t *out_buf, size_t max_len) {
+    if (!frame || !out_buf) {
+        return -1; // Error: NULL pointer
+    }
+
+    if (max_len < RUDP_WIRE_FRAME_SIZE) {
+        return -1; // Error: Buffer too small
+    }
+
+    out_buf[0] = (uint8_t)(frame->header.seq_num >> 8);
+    out_buf[1] = (uint8_t)(frame->header.seq_num & 0xFF);
+    out_buf[2] = (uint8_t)(frame->header.ack >> 8);
+    out_buf[3] = (uint8_t)(frame->header.ack & 0xFF);
+
+    out_buf[4] = frame->packet.type;
+    out_buf[5] = frame->packet.flags;
+    out_buf[6] = (uint8_t)(frame->packet.value >> 8);
+    out_buf[7] = (uint8_t)(frame->packet.value & 0xFF);
+    
+    return RUDP_WIRE_FRAME_SIZE; // Success: 8 bytes written
+}
+
+int rudp_unpack_frame(const uint8_t *in_buf, size_t in_len, rudp_frame_s *out_frame) {
+    if (!in_buf || !out_frame) {
+        return -1; // Error: NULL pointer
+    }
+
+    if (in_len < RUDP_WIRE_FRAME_SIZE) {
+        return -1; // Error: Buffer too small
+    }
+
+    out_frame->header.seq_num = ((uint16_t)in_buf[0] << 8) | in_buf[1];
+    out_frame->header.ack     = ((uint16_t)in_buf[2] << 8) | in_buf[3];
+
+    out_frame->packet.type    = in_buf[4];
+    out_frame->packet.flags   = in_buf[5];
+    out_frame->packet.value   = ((uint16_t)in_buf[6] << 8) | in_buf[7];
+
+    return 0; // Success
+}

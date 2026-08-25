@@ -125,6 +125,53 @@ void test_buffer_full_and_wrap() {
     printf("[EXTREME OK] Buffer Full & Wrap-Around (RAM limit is respected)\n");
 }
 
+// --- 5. Wire Serialization & Portability Test (Pack / Unpack) ---
+void test_wire_serialization() {
+    rudp_frame_s original_frame;
+    original_frame.header.seq_num = 0x1234;
+    original_frame.header.ack     = 0x5678;
+    original_frame.packet.type    = 42;
+    original_frame.packet.flags   = 0x0F;
+    original_frame.packet.value   = 0xABCD;
+
+    uint8_t wire_buffer[RUDP_WIRE_FRAME_SIZE];
+
+    // 1. Test de l'empaquetage (Pack)
+    int written = rudp_pack_frame(&original_frame, wire_buffer, sizeof(wire_buffer));
+    assert(written == RUDP_WIRE_FRAME_SIZE);
+
+    // 2. Vérification binaire exacte sur le câble (Big-Endian)
+    assert(wire_buffer[0] == 0x12 && wire_buffer[1] == 0x34); // seq_num
+    assert(wire_buffer[2] == 0x56 && wire_buffer[3] == 0x78); // ack
+    assert(wire_buffer[4] == 42);                             // type
+    assert(wire_buffer[5] == 0x0F);                           // flags
+    assert(wire_buffer[6] == 0xAB && wire_buffer[7] == 0xCD); // value
+
+    // 3. Test du dépaquetage (Unpack)
+    rudp_frame_s restored_frame;
+    assert(rudp_unpack_frame(wire_buffer, sizeof(wire_buffer), &restored_frame) == 0);
+
+    // Vérification de l'intégrité complète
+    assert(restored_frame.header.seq_num == original_frame.header.seq_num);
+    assert(restored_frame.header.ack     == original_frame.header.ack);
+    assert(restored_frame.packet.type    == original_frame.packet.type);
+    assert(restored_frame.packet.flags   == original_frame.packet.flags);
+    assert(restored_frame.packet.value   == original_frame.packet.value);
+
+    // 4. Tests de sécurité (Pointeurs NULL et tailles invalides)
+    assert(rudp_pack_frame(NULL, wire_buffer, sizeof(wire_buffer)) == -1);
+    assert(rudp_pack_frame(&original_frame, NULL, sizeof(wire_buffer)) == -1);
+    assert(rudp_pack_frame(&original_frame, wire_buffer, 7) == -1); // Trop petit
+
+    assert(rudp_unpack_frame(NULL, sizeof(wire_buffer), &restored_frame) == -1);
+    assert(rudp_unpack_frame(wire_buffer, sizeof(wire_buffer), NULL) == -1);
+    assert(rudp_unpack_frame(wire_buffer, 7, &restored_frame) == -1); // Trop petit
+
+    printf("[OK] Wire Serialization & Security Limits (Pack/Unpack validated)\n");
+}
+
+
+
 int main(void) {
     printf("--- MEMORY SIZE TESTS ---\n");
     printf("Header Size : %zu bytes\n", sizeof(rudp_header_s));
@@ -135,6 +182,7 @@ int main(void) {
     test_cumulative_ack();
     test_seq_num_rollover();
     test_buffer_full_and_wrap();
+    test_wire_serialization();
 
     printf("\n>>> ALL TESTS PASSED SUCCESSFULLY! <<<\n");
 
