@@ -21,9 +21,12 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 
 - [ ] **Endianness & Byte Order**: Use `htons`/`ntohs` (16-bit) and `htonl`/`ntohl` (32-bit) to guarantee consistent Big-Endian Network Byte Order across Little/Big-Endian CPUs.
 - [ ] **Wire Pack / Unpack Functions**:
+- [x] **Endianness & Byte Order**: Implemented zero-dependency `rudp_htons`/`rudp_ntohs` (16-bit) and `rudp_htonl`/`rudp_ntohl` (32-bit) with compiler builtins and Big-Endian Network Byte Order support.
+- [x] **Wire Pack / Unpack Functions**:
   - `rudp_pack_frame(const rudp_frame_s *frame, uint8_t *out_buf, size_t max_len)`
   - `rudp_unpack_frame(const uint8_t *in_buf, size_t in_len, rudp_frame_s *out_frame)`
 - [ ] **TFV endianness tests**: Verify serialized values on little-endian and big-endian targets after adding pack/unpack support.
+- [x] **TFV endianness & wire tests**: Added automated roundtrip tests, wire byte verification, security bounds, and NULL checks in `tests/test_rudp.c` and `tests/test_tfv.c`.
 
 ---
 

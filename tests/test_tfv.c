@@ -3,6 +3,12 @@
 #include <assert.h>
 #include <stddef.h>
 
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    #define IS_LITTLE_ENDIAN 1
+#else
+    #define IS_LITTLE_ENDIAN 0
+#endif
+
 /**
  * @brief Main function
  */
@@ -23,16 +29,11 @@ int main() {
     assert(sizeof(packet.value) == 2);
 
 
-    uint16_t detect_endianness = 0x0123;
-    uint8_t *bytes = (uint8_t *)&detect_endianness;
-    if (bytes[0] == 0x23 && bytes[1] == 0x01) {
+    #if IS_LITTLE_ENDIAN
         printf("System is little-endian\n");
-    } else if (bytes[0] == 0x01 && bytes[1] == 0x23) {
+    #else
         printf("System is big-endian\n");
-    } else {
-        printf("Unknown endianness\n");
-        assert(0); // Fail the test if endianness is unknown
-    }
+    #endif
 
     assert(offsetof(tfv_packet_u, type) == 0);
     assert(offsetof(tfv_packet_u, flags) == 1);
@@ -45,8 +46,18 @@ int main() {
     assert(packet.flags == UINT8_MAX);
     assert(packet.value == UINT16_MAX);
 
+    /* Test zero-dependency byte swap macros */
+    assert(rudp_bswap16(0x1234) == 0x3412);
+    assert(rudp_bswap32(0x12345678) == 0x78563412);
 
+    /* Test network byte order conversions roundtrip */
+    uint16_t host16 = 0xABCD;
+    uint16_t net16 = rudp_htons(host16);
+    assert(rudp_ntohs(net16) == host16);
 
+    uint32_t host32 = 0xDEADBEEF;
+    uint32_t net32 = rudp_htonl(host32);
+    assert(rudp_ntohl(net32) == host32);
 
     return 0;
 }
