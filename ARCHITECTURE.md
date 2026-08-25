@@ -7,17 +7,17 @@ This document describes the design and implementation details of the `zcrudp` (Z
 The protocol is designed to be lightweight and efficient, fitting within a fixed-size 8-byte frame.
 
 ### 32-bit TFV (Type-Flags-Value)
-The data payload is a 32-bit Type-Flags-Value (TFV) packet, represented by the `tlv_packet_u` union in `include/protocol_tlv.h`. It uses a bitfield to pack information into 4 bytes:
+The data payload is a 32-bit Type-Flags-Value (TFV) packet, represented by the `tfv_packet_u` union in `include/protocol_tfv.h`. It uses a byte-aligned layout occupying 4 bytes:
 - **Type**: 8 bits
-- **Flags**: 4 bits
-- **Value**: 20 bits
+- **Flags**: 8 bits
+- **Value**: 16 bits
 
 ### RUDP Frame
 The RUDP frame (`rudp_frame_s`) is exactly 8 bytes long:
 - **Header (4 bytes)**: `rudp_header_s`
     - `seq_num` (16 bits): Sequence number of the packet.
     - `ack` (16 bits): Acknowledgment number (cumulative).
-- **Payload (4 bytes)**: `tlv_packet_u`
+- **Payload (4 bytes)**: `tfv_packet_u`
 
 ## Sliding Window
 

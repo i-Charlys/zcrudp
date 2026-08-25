@@ -5,7 +5,7 @@
 // --- 1. Basic Happy Path Test ---
 void test_happy_path() {
     rudp_context_s ctx;
-    tlv_packet_u dummy_packet;
+    tfv_packet_u dummy_packet;
     dummy_packet.raw = 0;
     uint16_t expired_slots[64];
 
@@ -35,7 +35,7 @@ void test_happy_path() {
 // --- 2. Extreme Test: Domino Effect (Cumulative ACK) ---
 void test_cumulative_ack() {
     rudp_context_s ctx;
-    tlv_packet_u dummy;
+    tfv_packet_u dummy;
     dummy.raw = 0;
 
     rudp_init(&ctx);
@@ -62,7 +62,7 @@ void test_cumulative_ack() {
 // --- 3. Extreme Test: The 65535 Crash (Rollover) ---
 void test_seq_num_rollover() {
     rudp_context_s ctx;
-    tlv_packet_u dummy;
+    tfv_packet_u dummy;
     dummy.raw = 0;
 
     rudp_init(&ctx);
@@ -92,7 +92,7 @@ void test_seq_num_rollover() {
 // --- 4. Extreme Test: Buffer Full and Memory Wrap-Around ---
 void test_buffer_full_and_wrap() {
     rudp_context_s ctx;
-    tlv_packet_u dummy;
+    tfv_packet_u dummy;
     dummy.raw = 0;
 
     rudp_init(&ctx);

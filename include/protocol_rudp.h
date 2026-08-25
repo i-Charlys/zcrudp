@@ -5,6 +5,11 @@
 #define RUDP_WINDOW_SIZE 64
 #endif
 
+#if RUDP_WINDOW_SIZE == 0 || \
+    (RUDP_WINDOW_SIZE & (RUDP_WINDOW_SIZE - 1)) != 0
+#error "RUDP_WINDOW_SIZE must be a non-zero power of 2"
+#endif
+
 
 #ifdef RUDP_PACKED_STRUCTURES
     #define RUDP_PACKED __attribute__((packed))
@@ -16,7 +21,7 @@
 #define RUDP_SLOT_IN_FLIGHT 1
 
 
-#include "protocol_tlv.h"
+#include "protocol_tfv.h"
 #include <stdint.h>
 
 
@@ -34,7 +39,7 @@ typedef struct  {
  */
 typedef struct  { 
     rudp_header_s header; /** Length : 4 octets */
-    tlv_packet_u packet; /** TFV packet : 4 octets */
+    tfv_packet_u packet; /** TFV packet : 4 octets */
 } rudp_frame_s;
 
 
@@ -58,7 +63,7 @@ typedef struct {
 
 
 int rudp_init(rudp_context_s *ctx);
-int rudp_send(rudp_context_s *ctx, tlv_packet_u packet, uint32_t now);
+int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now);
 int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num);
 
 

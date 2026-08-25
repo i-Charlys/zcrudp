@@ -12,7 +12,7 @@ This document outlines the coding standards and conventions used in the `zcrudp`
 - **Functions**: Use `snake_case` (e.g., `rudp_init`, `rudp_send`).
 - **Variables**: Use `snake_case` (e.g., `seq_num`, `ack_num`).
 - **Structs**: Use `snake_case` with a `_s` suffix (e.g., `rudp_header_s`, `rudp_context_s`).
-- **Unions**: Use `snake_case` with a `_u` suffix (e.g., `tlv_packet_u`).
+- **Unions**: Use `snake_case` with a `_u` suffix (e.g., `tfv_packet_u`).
 - **Constants/Macros**: Use `UPPER_SNAKE_CASE` (e.g., `RUDP_WINDOW_SIZE`).
 
 ## Formatting

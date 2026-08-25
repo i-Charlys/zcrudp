@@ -21,12 +21,12 @@ A zero-malloc, 32-bit fixed-frame Reliable UDP library in pure C.
 .
 ├── include/
 │   ├── protocol_rudp.h    # Core RUDP definitions and context
-│   └── protocol_tlv.h     # 32-bit TFV packet structure
+│   └── protocol_tfv.h     # 32-bit TFV packet structure
 ├── src/
 │   └── rudp.c             # RUDP implementation logic
 └── tests/
     ├── test_rudp.c        # RUDP engine and extreme case tests
-    └── test_tlv.c         # TLV structure validation
+    └── test_tfv.c         # TFV structure validation
 ```
 
 ## Quick Start / Usage
@@ -39,7 +39,7 @@ A zero-malloc, 32-bit fixed-frame Reliable UDP library in pure C.
 rudp_context_s ctx;
 rudp_init(&ctx);
 
-tlv_packet_u packet;
+tfv_packet_u packet;
 packet.type = 1;
 packet.flags = 0;
 packet.value = 123;
@@ -75,14 +75,14 @@ make test
 ### Build individual tests
 ```bash
 make test_rudp
-make test_tlv
+make test_tfv
 ```
 
 ### Manual compilation (alternative)
 If you don't have `make`, you can compile manually (ensure the `build/` directory exists):
 ```bash
 mkdir -p build
-gcc -Iinclude src/rudp.c tests/test_rudp.c -o build/test_rudp
+gcc -Iinclude -Wall -Wextra -O2 src/rudp.c tests/test_rudp.c -o build/test_rudp
 ./build/test_rudp
 ```
 

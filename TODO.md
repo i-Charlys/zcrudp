@@ -8,10 +8,11 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 *Prerequisite for all subsequent network and serialization work.*
 
 - [x] **Documentation sync**: Update the ASCII diagram in `src/rudp.c` to match `rudp_header_s`.
-- [ ] **TFV 8/8/16 Layout Refactoring**: Refactor `tlv_packet_u` from 8/4/20 to byte-aligned `uint8_t type` (8b), `uint8_t flags` (8b), `uint16_t value` (16b) in `include/protocol_tlv.h` (eliminates bitfield ambiguity and standardizes 16-bit payload resolution).
-- [ ] **Window size compile check**: Add `#if (RUDP_WINDOW_SIZE & (RUDP_WINDOW_SIZE - 1)) != 0` check in `include/protocol_rudp.h` ensuring window size is strictly a power of 2.
-- [ ] **Initialization order**: Fix variable initialization order relative to `memset` in `rudp_init` (`src/rudp.c`).
-- [ ] **Unit assertions update**: Replace `printf` in `tests/test_tlv.c` with automated `assert()` checks for the new 8/8/16 layout.
+- [x] **TFV 8/8/16 Layout Refactoring**: Refactor `tfv_packet_u` from 8/4/20 to byte-aligned `uint8_t type` (8b), `uint8_t flags` (8b), `uint16_t value` (16b) in `include/protocol_tfv.h` (eliminates bitfield ambiguity and standardizes 16-bit payload resolution).
+- [x] **Window size compile check**: Add `#if (RUDP_WINDOW_SIZE & (RUDP_WINDOW_SIZE - 1)) != 0` check in `include/protocol_rudp.h` ensuring window size is strictly a power of 2.
+- [x] **Initialization order**: Fix variable initialization order relative to `memset` in `rudp_init` (`src/rudp.c`).
+- [x] **Unit assertions update**: Replace `printf` in `tests/test_tfv.c` with automated `assert()` checks for the new 8/8/16 layout.
+- [x] **TFV test coverage**: Assert representative values up to `UINT8_MAX` and `UINT16_MAX`, and verify the complete 4-byte packet layout.
 
 ---
 
@@ -22,6 +23,7 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 - [ ] **Wire Pack / Unpack Functions**:
   - `rudp_pack_frame(const rudp_frame_s *frame, uint8_t *out_buf, size_t max_len)`
   - `rudp_unpack_frame(const uint8_t *in_buf, size_t in_len, rudp_frame_s *out_frame)`
+- [ ] **TFV endianness tests**: Verify serialized values on little-endian and big-endian targets after adding pack/unpack support.
 
 ---
 
@@ -31,6 +33,8 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 - [ ] **ACK N+1 Convention & In-Window Check**:
   - Adopt `ACK = expected_seq` ($N+1$) convention so `(int16_t)(ack - seq) > 0` safely validates in-flight packets and prevents $t=0$ race conditions without using flag bits.
   - Reject corrupted or out-of-window ACKs in `rudp_recv_ack`.
+- [ ] **Reliability edge-case tests**: Cover timeout boundaries, repeated `rudp_tick()` calls, empty-window ACKs, stale ACKs, and ACK rollover around `65535 -> 0`.
+- [ ] **Window-size tests**: Verify `RUDP_WINDOW_SIZE=0`, `1`, non-powers of two, and a valid small window at compile time and runtime.
 - [ ] **Reception Engine (RX)**:
   - Track `expected_seq` on the receiver side.
   - Detect and discard duplicate packets while re-emitting ACKs to calm the sender.

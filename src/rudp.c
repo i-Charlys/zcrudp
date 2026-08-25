@@ -32,7 +32,7 @@
  * |             HEADER (4B)             |             PACKET (4B)             |
  * +------------------+------------------+---------+-----------+---------------+
  * | seq_num (2B)     | ack (2B)         | type    | flags     | value         |
- * | (16-bit sequence)| (Cumulative ACK) | (8-bit) | (4-bit)   | (20-bit val)  |
+ * | (16-bit sequence)| (Cumulative ACK) | (8-bit) | (8-bit)   | (16-bit val)  |
  * +------------------+------------------+---------+-----------+---------------+
  *   <------- Protocol Control ------->    <-------- TFV Data Payload ------->
  * ============================================================================
@@ -48,11 +48,12 @@ int rudp_init(rudp_context_s *ctx) {
   if (!ctx)
     return -1;
 
+  memset(ctx->tx_buffer, 0, sizeof(ctx->tx_buffer)); // Initialize the tx_buffer to zero
+
   ctx->current_seq_num = 0;
   ctx->head = 0;
   ctx->tail = 0;
 
-  memset(ctx, 0, sizeof(rudp_context_s)); // Initialize the tx_buffer to zero
 
   return 0;
 }
@@ -64,7 +65,7 @@ int rudp_init(rudp_context_s *ctx) {
  * @param packet The packet to send.
  * @return 0 on success, -1 on failure.
  */
-int rudp_send(rudp_context_s *ctx, tlv_packet_u packet, uint32_t now) {
+int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now) {
 
   /** Check if the context is valid */
 
