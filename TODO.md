@@ -40,7 +40,7 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
   - Detect and discard duplicate packets while re-emitting ACKs to calm the sender.
 - [x] **Full-Duplex Context**: Combine TX sliding window and RX state within `rudp_context_s` to enable automatic ACK piggybacking on outgoing data frames.
 - [x] **Fast Retransmit (Tri-ACK)**: If 3 duplicate ACKs arrive for the same sequence without tail moving, immediately retransmit the slot at `tail` without waiting for the timeout timer to expire.
-- [ ] **Retransmission Limit & Dead Peer**: Add per-slot retry counter (`slot->retries > MAX_RETRIES`) to detect disconnected peers.
+- [x] **Retransmission Limit & Dead Peer**: Added per-slot retry counter (`slot->retries > RUDP_MAX_RETRIES`) and connection state machine (`RUDP_STATE_CONNECTED` / `RUDP_STATE_DISCONNECTED`) in `rudp_tick()`.
 
 ---
 

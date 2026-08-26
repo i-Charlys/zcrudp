@@ -24,6 +24,16 @@
 #define RUDP_WIRE_FRAME_SIZE  8 /**< Standard frame size (Tier 2: Header + TFV Packet) */
 #define RUDP_WIRE_DYNAMIC_SIZE -1 /**< Dynamic stream frame size (Tier 3) */
 
+#define RUDP_STATE_DISCONNECTED 0 /**< Peer is disconnected or timed out */
+#define RUDP_STATE_CONNECTED    1 /**< Active healthy connection */
+
+#ifndef RUDP_MAX_RETRIES
+#define RUDP_MAX_RETRIES        10 /**< Max retransmissions before declaring dead peer */
+#endif
+
+
+
+
 
 #include "protocol_tfv.h"
 #include <stdint.h>
@@ -53,8 +63,10 @@ typedef struct {
  */
 typedef struct {
     rudp_frame_s frame;
-    uint8_t state; /**< 0: RUDP_SLOT_FREE, 1: RUDP_SLOT_IN_FLIGHT */
     uint32_t timestamp;
+    uint8_t state; /**< 0: RUDP_SLOT_FREE, 1: RUDP_SLOT_IN_FLIGHT */
+    uint8_t retries; /**< Number of retransmission attempts for this slot */
+    uint8_t reserved[2]; /**< Padding for alignment */
     
 } rudp_slot_s; 
 

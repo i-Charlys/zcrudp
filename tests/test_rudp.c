@@ -349,10 +349,44 @@ void test_fast_retransmit_tri_ack() {
     printf("[OK] Fast Retransmit (Tri-ACK detected, immediate loss recovery triggered)\n");
 }
 
+// --- 9. Dead Peer Detection & Retransmission Limit Test ---
+void test_dead_peer_detection() {
+    rudp_context_s ctx;
+    tfv_packet_u dummy;
+    dummy.raw = 0;
+    uint16_t expired[64];
+
+    assert(rudp_init(&ctx) == 0);
+    assert(ctx.state == RUDP_STATE_CONNECTED);
+
+    // Send a packet at t=1000ms with a 100ms timeout
+    assert(rudp_send(&ctx, dummy, 1000) == 0);
+    assert(ctx.tx_buffer[0].retries == 0);
+
+    uint32_t current_time = 1000;
+
+    // Simulate 10 consecutive timeouts (RUDP_MAX_RETRIES) without receiving an ACK
+    for (int retry = 1; retry <= RUDP_MAX_RETRIES; retry++) {
+        current_time += 110; // Advance past the 100ms timeout
+        assert(rudp_tick(&ctx, current_time, 100, expired, 64) == 1);
+        assert(ctx.tx_buffer[0].retries == retry);
+        assert(ctx.state == RUDP_STATE_CONNECTED); // Still connected while retrying
+    }
+
+    // 11th timeout: Exceeds RUDP_MAX_RETRIES -> Dead peer declared!
+    current_time += 110;
+    assert(rudp_tick(&ctx, current_time, 100, expired, 64) == -1); // Fatal error returned
+    assert(ctx.state == RUDP_STATE_DISCONNECTED);                  // State switched to DISCONNECTED
+
+    printf("[OK] Dead Peer Detection (Exceeding max retries triggers RUDP_STATE_DISCONNECTED)\n");
+}
+
 int main(void) {
     printf("--- MEMORY SIZE TESTS ---\n");
-    printf("Header Size : %zu bytes\n", sizeof(rudp_header_s));
-    printf("Frame Size : %zu bytes\n\n", sizeof(rudp_frame_s));
+    printf("Header Size  : %zu bytes\n", sizeof(rudp_header_s));
+    printf("Frame Size   : %zu bytes\n", sizeof(rudp_frame_s));
+    printf("Slot Size    : %zu bytes\n", sizeof(rudp_slot_s));
+    printf("Context Size : %zu bytes\n\n", sizeof(rudp_context_s));
 
     printf("--- RUDP ENGINE TESTS ---\n");
     test_happy_path();
@@ -363,6 +397,7 @@ int main(void) {
     test_reliability_edge_cases();
     test_rx_and_full_duplex();
     test_fast_retransmit_tri_ack();
+    test_dead_peer_detection();
 
     printf("\n>>> ALL TESTS PASSED SUCCESSFULLY! <<<\n");
 

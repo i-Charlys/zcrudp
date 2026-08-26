@@ -74,7 +74,7 @@ int rudp_init(rudp_context_s *ctx) {
     ctx->expected_seq_num = 0;
     ctx->last_ack_received = 0;
     ctx->duplicate_ack_count = 0;
-    ctx->state = 0;
+    ctx->state = RUDP_STATE_CONNECTED;
 
     return 0;
 }
@@ -98,6 +98,7 @@ int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now) {
     slot->frame.header.seq_num = ctx->current_seq_num;
     slot->frame.header.ack = ctx->expected_seq_num; // Automatic ACK piggybacking
     slot->state = RUDP_SLOT_IN_FLIGHT;
+    slot->retries = 0;
     slot->timestamp = now;
 
     ctx->current_seq_num = (ctx->current_seq_num + 1);
@@ -210,6 +211,14 @@ int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out
 
         // If the packet is in-flight AND the timeout duration has elapsed
         if (slot->state == RUDP_SLOT_IN_FLIGHT && (now - slot->timestamp > timeout)) {
+
+            slot->retries++; // Increment the retry counter for this slot
+
+            if (slot->retries > RUDP_MAX_RETRIES) {
+                // Mark the connection as disconnected if retries exceed the limit
+                ctx->state = RUDP_STATE_DISCONNECTED;
+                return -1; // Indicate a fatal error due to dead peer
+            }
             
             // Reset the timer for this packet to prevent spamming
             slot->timestamp = now;
