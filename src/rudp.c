@@ -35,6 +35,23 @@
  * | (16-bit sequence)| (Cumulative ACK) | (8-bit) | (8-bit)   | (16-bit val)  |
  * +------------------+------------------+---------+-----------+---------------+
  *   <------- Protocol Control ------->    <-------- TFV Data Payload ------->
+ *
+ * ============================================================================
+ * 5. PROTOCOL DATA FLOW & SYMMETRY (TX / RX PIPELINE)
+ * ============================================================================
+ *
+ *  SENDER WORKFLOW (Game -> Network)         RECEIVER WORKFLOW (Network -> Game)
+ *  ─────────────────────────────────         ───────────────────────────────────
+ *  1. Game Data: tfv_packet_u                1. Raw Bytes from UDP socket
+ *          │                                         │
+ *          ▼                                         ▼
+ *  2. rudp_send(ctx, packet, now);           2. rudp_unpack_frame(buf, len, &frame);
+ *     (Assigns seq, ack, queues in tx_buf)      (Converts raw bytes to rudp_frame_s)
+ *          │                                         │
+ *          ▼                                         ▼
+ *  3. rudp_pack_frame(&frame, buf, 8);       3. rudp_recv(ctx, &frame, &out_packet);
+ *     (Serializes 8B Big-Endian for socket)     (Processes incoming ACK, drops dups,
+ *                                                and delivers tfv_packet_u to game!)
  * ============================================================================
  */
 /**
@@ -45,17 +62,21 @@
  */
 
 int rudp_init(rudp_context_s *ctx) {
-  if (!ctx)
-    return -1;
+    if (!ctx) {
+        return -1;
+    }
 
-  memset(ctx->tx_buffer, 0, sizeof(ctx->tx_buffer)); // Initialize the tx_buffer to zero
+    memset(ctx->tx_buffer, 0, sizeof(ctx->tx_buffer));
 
-  ctx->current_seq_num = 0;
-  ctx->head = 0;
-  ctx->tail = 0;
+    ctx->head = 0;
+    ctx->tail = 0;
+    ctx->current_seq_num = 0;
+    ctx->expected_seq_num = 0;
+    ctx->last_ack_received = 0;
+    ctx->duplicate_ack_count = 0;
+    ctx->state = 0;
 
-
-  return 0;
+    return 0;
 }
 
 /**
@@ -63,68 +84,105 @@ int rudp_init(rudp_context_s *ctx) {
  *
  * @param ctx The RUDP context.
  * @param packet The packet to send.
- * @return 0 on success, -1 on failure.
+ * @param now Current timestamp in milliseconds.
+ * @return 0 on success, -1 on failure (e.g. buffer full).
  */
 int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now) {
+    if (!ctx || ((ctx->head + 1) & (RUDP_WINDOW_SIZE - 1)) == ctx->tail) {
+        return -1; // Buffer full or NULL context
+    }
 
-  /** Check if the context is valid */
+    rudp_slot_s *slot = &ctx->tx_buffer[ctx->head];
 
-  if (!ctx || ((ctx->head + 1) & (RUDP_WINDOW_SIZE - 1)) == (ctx->tail))
-    return -1; // Check if the context is valid and the buffer is not full
+    slot->frame.packet = packet;
+    slot->frame.header.seq_num = ctx->current_seq_num;
+    slot->frame.header.ack = ctx->expected_seq_num; // Automatic ACK piggybacking
+    slot->state = RUDP_SLOT_IN_FLIGHT;
+    slot->timestamp = now;
 
-  /** Get the next slot and fill it with the packet and update the context */
-  rudp_slot_s *slot = &ctx->tx_buffer[ctx->head];
+    ctx->current_seq_num = (ctx->current_seq_num + 1);
+    ctx->head = (ctx->head + 1) & (RUDP_WINDOW_SIZE - 1);
 
-  /** Fill the slot with the packet and update the context */
-  slot->frame.packet = packet;
-  slot->frame.header.seq_num = ctx->current_seq_num;
-  slot->state = RUDP_SLOT_IN_FLIGHT;
-  slot->timestamp = now;
-
-  /** Update the sequence number and head pointer */
-  ctx->current_seq_num = (ctx->current_seq_num + 1);
-  ctx->head = (ctx->head + 1) & (RUDP_WINDOW_SIZE - 1);
-
-  return 0;
+    return 0;
 }
 
+int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_packet) {
+    if (!ctx || !frame || !out_packet) {
+        return -1; // Error: NULL pointer
+    }
+
+    rudp_recv_ack(ctx, frame->header.ack); // Process the cumulative ACK from incoming frame
+
+    /* Check if the incoming sequence number matches the expected sequence number */
+    if (frame->header.seq_num == ctx->expected_seq_num) {
+        *out_packet = frame->packet; // Deliver packet payload to application
+        ctx->expected_seq_num++;     // Advance expected sequence number (automatic 16-bit rollover)
+        return 1;                    // Success: New packet delivered
+    }
+
+    return 0; // Duplicate or out-of-order packet ignored
+}
 
 /**
- * @brief Receives an ACK over RUDP.
+ * @brief Receives and processes a cumulative ACK over RUDP (N+1 convention).
+ *        Implements Fast Retransmit (Tri-ACK) to detect packet loss before timeout.
  *
  * @param ctx The RUDP context.
- * @param ack_num The sequence number of the ACK.
- * @return 0 on success, -1 on failure.
+ * @param ack_num The sequence number of the next expected packet (N+1).
+ * @return 0 on success, -1 on failure (e.g. corrupted/future ACK).
  */
 int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
-  if (!ctx)
-    return -1;
-
-  /**
-   * Iterate through the buffer and mark slots as acknowledged.
-   * We use modular arithmetic to handle sequence number wraparound (65535 -> 0).
-   */
-  while (ctx->tail != ctx->head) {
-    rudp_slot_s *current_slot = &ctx->tx_buffer[ctx->tail];
-
-    /* * Distance check: If (ack_num - seq_num) is positive in 16-bit signed logic,
-     * it means the ACK is "ahead" of or equal to our current tail.
-     */
-    if ((int16_t)(ack_num - current_slot->frame.header.seq_num) >= 0) {
-
-      // Mark the slot as free for future use
-      current_slot->state = RUDP_SLOT_FREE;
-
-      // Move the tail forward in the circular buffer (0 to 63)
-      ctx->tail = (ctx->tail + 1) & (RUDP_WINDOW_SIZE - 1);
-
-    } else {
-      /** Stop at the first slot that is still ahead of the received ACK */
-      break;
+    if (!ctx) {
+        return -1;
     }
-  }
 
-  return 0;
+    /* Out-of-window check: Reject ACKs referencing sequences strictly ahead of what was sent */
+    if ((int16_t)(ack_num - ctx->current_seq_num) > 0) {
+        return -1;
+    }
+
+    uint16_t old_tail = ctx->tail;
+
+    /**
+     * Iterate through the sliding window and free slots acknowledged by ack_num.
+     * Modular signed arithmetic (int16_t) handles sequence number wraparound (65535 -> 0).
+     */
+    while (ctx->tail != ctx->head) {
+        rudp_slot_s *current_slot = &ctx->tx_buffer[ctx->tail];
+
+        /* N+1 Convention: if (ack_num - seq_num) > 0, the slot has been successfully delivered */
+        if ((int16_t)(ack_num - current_slot->frame.header.seq_num) > 0) {
+            current_slot->state = RUDP_SLOT_FREE;
+            ctx->tail = (ctx->tail + 1) & (RUDP_WINDOW_SIZE - 1);
+        } else {
+            /* Stop at the first unacknowledged slot */
+            break;
+        }
+    }
+
+    /* Fast Retransmit (Tri-ACK) State Machine */
+    if (ctx->tail != old_tail) {
+        // Window moved: this is a new ACK acknowledging fresh packets
+        ctx->last_ack_received = ack_num;
+        ctx->duplicate_ack_count = 0;
+    } else if (ctx->tail != ctx->head) {
+        // Window is stalled and packets are still in-flight
+        if (ack_num == ctx->last_ack_received) {
+            ctx->duplicate_ack_count++;
+
+            // Fast Retransmit Trigger: 3 duplicate ACKs signify packet loss
+            if (ctx->duplicate_ack_count >= 3) {
+                // Force immediate timeout for the oldest in-flight packet at tail
+                ctx->tx_buffer[ctx->tail].timestamp = 0;
+            }
+        } else {
+            // Different ACK arrived that did not advance the tail
+            ctx->last_ack_received = ack_num;
+            ctx->duplicate_ack_count = 1;
+        }
+    }
+
+    return 0;
 }
 
 
