@@ -19,6 +19,23 @@ The RUDP frame (`rudp_frame_s`) is exactly 8 bytes long:
     - `ack` (16 bits): Acknowledgment number (cumulative).
 - **Payload (4 bytes)**: `tfv_packet_u`
 
+## Protocol Data Flow & Symmetry (TX / RX Pipeline)
+
+```text
+ SENDER WORKFLOW (Game -> Network)         RECEIVER WORKFLOW (Network -> Game)
+ ─────────────────────────────────         ───────────────────────────────────
+ 1. Game Data: tfv_packet_u                1. Raw Bytes from UDP socket
+         │                                         │
+         ▼                                         ▼
+ 2. rudp_send(ctx, packet, now);           2. rudp_unpack_frame(buf, len, &frame);
+    (Assigns seq, ack, queues in tx_buf)      (Converts raw bytes to rudp_frame_s)
+         │                                         │
+         ▼                                         ▼
+ 3. rudp_pack_frame(&frame, buf, 8);       3. rudp_recv(ctx, &frame, &out_packet);
+    (Serializes 8B Big-Endian for socket)     (Processes incoming ACK, drops dups,
+                                               and delivers tfv_packet_u to game!)
+```
+
 ## Sliding Window
 
 Reliability is managed using a sliding window mechanism implemented with a circular buffer.

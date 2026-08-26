@@ -30,17 +30,17 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 ## 📌 Phase 3: Reliability Engine & Full-Duplex (TX / RX Loop)
 *Depends on Phase 1 & 2.*
 
-- [ ] **ACK N+1 Convention & In-Window Check**:
+- [x] **ACK N+1 Convention & In-Window Check**:
   - Adopt `ACK = expected_seq` ($N+1$) convention so `(int16_t)(ack - seq) > 0` safely validates in-flight packets and prevents $t=0$ race conditions without using flag bits.
   - Reject corrupted or out-of-window ACKs in `rudp_recv_ack`.
-- [ ] **Reliability edge-case tests**: Cover timeout boundaries, repeated `rudp_tick()` calls, empty-window ACKs, stale ACKs, and ACK rollover around `65535 -> 0`.
-- [ ] **Window-size tests**: Verify `RUDP_WINDOW_SIZE=0`, `1`, non-powers of two, and a valid small window at compile time and runtime.
-- [ ] **Reception Engine (RX)**:
+- [x] **Reliability edge-case tests**: Cover timeout boundaries, repeated `rudp_tick()` calls, empty-window ACKs, stale ACKs, and ACK rollover around `65535 -> 0`.
+- [x] **Window-size tests**: Verify `RUDP_WINDOW_SIZE=0`, `1`, non-powers of two, and a valid small window at compile time and runtime (`tests/test_window.c`).
+- [x] **Reception Engine (RX)**:
   - Track `expected_seq` on the receiver side.
   - Detect and discard duplicate packets while re-emitting ACKs to calm the sender.
-- [ ] **Full-Duplex Context**: Combine TX sliding window and RX state within `rudp_context_s` to enable automatic ACK piggybacking on outgoing data frames.
-- [ ] **Fast Retransmit (Tri-ACK)**: If 3 duplicate ACKs arrive for the same sequence without tail moving, immediately retransmit the slot at `tail` without waiting for the timeout timer to expire.
-- [ ] **Retransmission Limit & Dead Peer**: Add per-slot retry counter (`slot->retries > MAX_RETRIES`) to detect disconnected peers.
+- [x] **Full-Duplex Context**: Combine TX sliding window and RX state within `rudp_context_s` to enable automatic ACK piggybacking on outgoing data frames.
+- [x] **Fast Retransmit (Tri-ACK)**: If 3 duplicate ACKs arrive for the same sequence without tail moving, immediately retransmit the slot at `tail` without waiting for the timeout timer to expire.
+- [x] **Retransmission Limit & Dead Peer**: Added per-slot retry counter (`slot->retries > RUDP_MAX_RETRIES`) and connection state machine (`RUDP_STATE_CONNECTED` / `RUDP_STATE_DISCONNECTED`) in `rudp_tick()`.
 
 ---
 
