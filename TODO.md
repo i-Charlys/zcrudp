@@ -44,6 +44,28 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 
 ---
 
+## 📌 Phase 3.5: Protocol Hardening & Audit Remediation
+*Directly addresses the findings from the multi-agent architectural audit before scaling.*
+
+- [ ] **Fast Retransmit Hardening & Storm Prevention**:
+  - Fix startup off-by-one: Initialize `last_ack_received = 0xFFFF` (sentinel) so valid `ACK=0` is not counted as a duplicate.
+  - Prevent duplicate storm: Trigger Fast Retransmit strictly on `duplicate_ack_count == 3` (single trigger with `fast_retransmit_done` lock, cleared when `tail` advances).
+  - Use an explicit flag (`slot->fast_retransmit`) to guarantee immediate retransmission even near clock origin (`now <= timeout`).
+  - Reset `duplicate_ack_count = 0` when the window empties (`head == tail`).
+- [ ] **Standalone ACK (Tier 1 - 4B) & Dynamic Refresh**:
+  - Implement `rudp_pack_ack(uint16_t ack_num, uint8_t *out_buf, size_t max_len)` and `rudp_unpack_ack(const uint8_t *in_buf, size_t in_len, uint16_t *out_ack)`.
+  - Fix unidirectional traffic: Allow receivers to send pure ACK control frames without requiring dummy application data.
+  - In `rudp_tick()`, dynamically refresh `slot->frame.header.ack = ctx->expected_seq_num` on every retransmission.
+- [ ] **ACK Window Boundary & Error Propagation**:
+  - Reject stale ACKs older than `tail` so network reordering does not pollute the duplicate ACK counter.
+  - Propagate errors in `rudp_recv()` when an incoming frame carries an invalid/corrupted piggybacked ACK.
+- [ ] **Safety Bounds, Error Codes & Doc Sync**:
+  - Differentiate return codes in `rudp_tick()` (`-1` = invalid arguments, `-2` = dead peer).
+  - Enforce compile-time safety check `#if RUDP_MAX_RETRIES > 254` to avoid `uint8_t` counter overflow.
+  - Update `README.md` and `ARCHITECTURE.md` (clarify 63 usable in-flight capacity for 64-slot ring buffer, align $N+1$ ACK examples).
+
+---
+
 ## 📌 Phase 4: Multi-Resolution Architecture & Scalability
 *Depends on Phase 3 working bidirectional engine.*
 
