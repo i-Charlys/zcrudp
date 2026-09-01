@@ -20,6 +20,9 @@
 #define RUDP_SLOT_FREE      0
 #define RUDP_SLOT_IN_FLIGHT 1
 
+#define RUDP_FAST_RETRANSMIT_OFF     0 /**< Normal timer-based transmission */
+#define RUDP_FAST_RETRANSMIT_PENDING 1 /**< Fast retransmit flag raised by Tri-ACK */
+
 #define RUDP_WIRE_HEADER_SIZE 4 /**< Standalone header size (Tier 1: seq_num + ack) */
 #define RUDP_WIRE_FRAME_SIZE  8 /**< Standard frame size (Tier 2: Header + TFV Packet) */
 #define RUDP_WIRE_DYNAMIC_SIZE -1 /**< Dynamic stream frame size (Tier 3) */
@@ -30,6 +33,13 @@
 #ifndef RUDP_MAX_RETRIES
 #define RUDP_MAX_RETRIES        10 /**< Max retransmissions before declaring dead peer */
 #endif
+
+/* Standardized Return & Error Codes */
+#define RUDP_OK                  0  /**< Success / operation completed */
+#define RUDP_ERR_INVALID_ARG    -1  /**< NULL pointer or invalid argument */
+#define RUDP_ERR_DISCONNECTED   -2  /**< Connection dead or disconnected */
+#define RUDP_ERR_BUFFER_FULL    -3  /**< Transmission buffer is full */
+#define RUDP_ERR_OUT_OF_WINDOW  -4  /**< Sequence or ACK is outside active window boundaries */
 
 
 
@@ -66,8 +76,9 @@ typedef struct {
     uint32_t timestamp;
     uint8_t state; /**< 0: RUDP_SLOT_FREE, 1: RUDP_SLOT_IN_FLIGHT */
     uint8_t retries; /**< Number of retransmission attempts for this slot */
-    uint8_t reserved[2]; /**< Padding for alignment */
-    
+    uint8_t fast_retransmit; /**< Flag indicating if fast retransmit is needed */
+    uint8_t reserved; /**< Padding for alignment */
+
 } rudp_slot_s; 
 
 /**
@@ -92,6 +103,14 @@ typedef struct {
  * @return 0 on success, -1 on error.
  */
 int rudp_init(rudp_context_s *ctx);
+
+/**
+ * @brief Resets an existing RUDP context back to its initial connected state.
+ *
+ * @param ctx Pointer to the RUDP context.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_reset(rudp_context_s *ctx);
 
 /**
  * @brief Queues a packet for transmission into the sliding window.

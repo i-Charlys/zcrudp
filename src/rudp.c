@@ -63,7 +63,7 @@
 
 int rudp_init(rudp_context_s *ctx) {
     if (!ctx) {
-        return -1;
+        return RUDP_ERR_INVALID_ARG;
     }
 
     memset(ctx->tx_buffer, 0, sizeof(ctx->tx_buffer));
@@ -72,11 +72,18 @@ int rudp_init(rudp_context_s *ctx) {
     ctx->tail = 0;
     ctx->current_seq_num = 0;
     ctx->expected_seq_num = 0;
-    ctx->last_ack_received = 0;
+    ctx->last_ack_received = 0xFFFF; // Initialize to an invalid sequence number
     ctx->duplicate_ack_count = 0;
     ctx->state = RUDP_STATE_CONNECTED;
 
-    return 0;
+    return RUDP_OK;
+}
+
+int rudp_reset(rudp_context_s *ctx) {
+    if (!ctx) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    return rudp_init(ctx);
 }
 
 /**
@@ -85,11 +92,17 @@ int rudp_init(rudp_context_s *ctx) {
  * @param ctx The RUDP context.
  * @param packet The packet to send.
  * @param now Current timestamp in milliseconds.
- * @return 0 on success, -1 on failure (e.g. buffer full).
+ * @return RUDP_OK on success, or negative error code on failure.
  */
 int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now) {
-    if (!ctx || ((ctx->head + 1) & (RUDP_WINDOW_SIZE - 1)) == ctx->tail) {
-        return -1; // Buffer full or NULL context
+    if (!ctx) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (ctx->state != RUDP_STATE_CONNECTED) {
+        return RUDP_ERR_DISCONNECTED;
+    }
+    if (((ctx->head + 1) & (RUDP_WINDOW_SIZE - 1)) == ctx->tail) {
+        return RUDP_ERR_BUFFER_FULL;
     }
 
     rudp_slot_s *slot = &ctx->tx_buffer[ctx->head];
@@ -99,17 +112,18 @@ int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now) {
     slot->frame.header.ack = ctx->expected_seq_num; // Automatic ACK piggybacking
     slot->state = RUDP_SLOT_IN_FLIGHT;
     slot->retries = 0;
+    slot->fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
     slot->timestamp = now;
 
     ctx->current_seq_num = (ctx->current_seq_num + 1);
     ctx->head = (ctx->head + 1) & (RUDP_WINDOW_SIZE - 1);
 
-    return 0;
+    return RUDP_OK;
 }
 
 int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_packet) {
     if (!ctx || !frame || !out_packet) {
-        return -1; // Error: NULL pointer
+        return RUDP_ERR_INVALID_ARG;
     }
 
     rudp_recv_ack(ctx, frame->header.ack); // Process the cumulative ACK from incoming frame
@@ -130,16 +144,24 @@ int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_
  *
  * @param ctx The RUDP context.
  * @param ack_num The sequence number of the next expected packet (N+1).
- * @return 0 on success, -1 on failure (e.g. corrupted/future ACK).
+ * @return RUDP_OK on success, or negative error code on failure.
  */
 int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
     if (!ctx) {
-        return -1;
+        return RUDP_ERR_INVALID_ARG;
     }
 
     /* Out-of-window check: Reject ACKs referencing sequences strictly ahead of what was sent */
     if ((int16_t)(ack_num - ctx->current_seq_num) > 0) {
-        return -1;
+        return RUDP_ERR_OUT_OF_WINDOW;
+    }
+
+    if (ctx->tail != ctx->head) {
+        uint16_t tail_seq = ctx->tx_buffer[ctx->tail].frame.header.seq_num;
+        if ((int16_t)(ack_num - tail_seq) < 0) {
+            // ACK is for a sequence number older than the oldest in-flight packet
+            return RUDP_ERR_OUT_OF_WINDOW;
+        }
     }
 
     uint16_t old_tail = ctx->tail;
@@ -148,17 +170,11 @@ int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
      * Iterate through the sliding window and free slots acknowledged by ack_num.
      * Modular signed arithmetic (int16_t) handles sequence number wraparound (65535 -> 0).
      */
-    while (ctx->tail != ctx->head) {
-        rudp_slot_s *current_slot = &ctx->tx_buffer[ctx->tail];
-
-        /* N+1 Convention: if (ack_num - seq_num) > 0, the slot has been successfully delivered */
-        if ((int16_t)(ack_num - current_slot->frame.header.seq_num) > 0) {
-            current_slot->state = RUDP_SLOT_FREE;
-            ctx->tail = (ctx->tail + 1) & (RUDP_WINDOW_SIZE - 1);
-        } else {
-            /* Stop at the first unacknowledged slot */
-            break;
-        }
+    while (ctx->tail != ctx->head && 
+        (int16_t)(ack_num - ctx->tx_buffer[ctx->tail].frame.header.seq_num) > 0) 
+    {
+        ctx->tx_buffer[ctx->tail].state = RUDP_SLOT_FREE;
+        ctx->tail = (ctx->tail + 1) & (RUDP_WINDOW_SIZE - 1);
     }
 
     /* Fast Retransmit (Tri-ACK) State Machine */
@@ -171,19 +187,19 @@ int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
         if (ack_num == ctx->last_ack_received) {
             ctx->duplicate_ack_count++;
 
-            // Fast Retransmit Trigger: 3 duplicate ACKs signify packet loss
-            if (ctx->duplicate_ack_count >= 3) {
-                // Force immediate timeout for the oldest in-flight packet at tail
-                ctx->tx_buffer[ctx->tail].timestamp = 0;
+            // Fast Retransmit Trigger: Exactly 3 duplicate ACKs signify packet loss
+            if (ctx->duplicate_ack_count == 3) {
+                // Set explicit fast retransmit flag for immediate resend
+                ctx->tx_buffer[ctx->tail].fast_retransmit = RUDP_FAST_RETRANSMIT_PENDING;
             }
         } else {
-            // Different ACK arrived that did not advance the tail
+            // First observation of this stalled ACK reference
             ctx->last_ack_received = ack_num;
-            ctx->duplicate_ack_count = 1;
-        }
+            ctx->duplicate_ack_count = 0;
+        } 
     }
 
-    return 0;
+    return RUDP_OK;
 }
 
 
@@ -195,10 +211,12 @@ int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
  * @param timeout Retransmission timeout in milliseconds.
  * @param out_indices Array provided by the caller, to be filled with the indices of expired slots.
  * @param max_indices Maximum capacity of the out_indices array.
- * @return The number of packets marked for retransmission, or -1 on error.
+ * @return Number of packets marked for retransmission (>= 0), or negative error code.
  */
 int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out_indices, int max_indices) {
-    if (!ctx || !out_indices || max_indices <= 0) return -1;
+    if (!ctx || !out_indices || max_indices <= 0) return RUDP_ERR_INVALID_ARG;
+
+    if (ctx->state != RUDP_STATE_CONNECTED) return RUDP_ERR_DISCONNECTED; // Only process if connection is active
     
     if (ctx->head == ctx->tail) return 0; // Buffer is empty, nothing to do
 
@@ -209,15 +227,21 @@ int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out
     while (current != ctx->head && count < max_indices) {
         rudp_slot_s *slot = &ctx->tx_buffer[current];
 
-        // If the packet is in-flight AND the timeout duration has elapsed
-        if (slot->state == RUDP_SLOT_IN_FLIGHT && (now - slot->timestamp > timeout)) {
+        // Check if slot has expired or has fast_retransmit flagged
+        if (slot->state == RUDP_SLOT_IN_FLIGHT && 
+            (slot->fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING || (now - slot->timestamp > timeout))) 
+        {
+            slot->fast_retransmit = RUDP_FAST_RETRANSMIT_OFF; // Clear fast retransmit flag
+
+            // Dynamically refresh piggybacked cumulative ACK with current expected_seq_num
+            slot->frame.header.ack = ctx->expected_seq_num;
 
             slot->retries++; // Increment the retry counter for this slot
 
             if (slot->retries > RUDP_MAX_RETRIES) {
                 // Mark the connection as disconnected if retries exceed the limit
                 ctx->state = RUDP_STATE_DISCONNECTED;
-                return -1; // Indicate a fatal error due to dead peer
+                return RUDP_ERR_DISCONNECTED; // Indicate a fatal error due to dead peer
             }
             
             // Reset the timer for this packet to prevent spamming
@@ -237,12 +261,8 @@ int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out
 
 
 int rudp_pack_frame(const rudp_frame_s *frame, uint8_t *out_buf, size_t max_len) {
-    if (!frame || !out_buf) {
-        return -1; // Error: NULL pointer
-    }
-
-    if (max_len < RUDP_WIRE_FRAME_SIZE) {
-        return -1; // Error: Buffer too small
+    if (!frame || !out_buf || max_len < RUDP_WIRE_FRAME_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
     }
 
     out_buf[0] = (uint8_t)(frame->header.seq_num >> 8);
@@ -259,12 +279,8 @@ int rudp_pack_frame(const rudp_frame_s *frame, uint8_t *out_buf, size_t max_len)
 }
 
 int rudp_unpack_frame(const uint8_t *in_buf, size_t in_len, rudp_frame_s *out_frame) {
-    if (!in_buf || !out_frame) {
-        return -1; // Error: NULL pointer
-    }
-
-    if (in_len < RUDP_WIRE_FRAME_SIZE) {
-        return -1; // Error: Buffer too small
+    if (!in_buf || !out_frame || in_len < RUDP_WIRE_FRAME_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
     }
 
     out_frame->header.seq_num = ((uint16_t)in_buf[0] << 8) | in_buf[1];
@@ -274,5 +290,5 @@ int rudp_unpack_frame(const uint8_t *in_buf, size_t in_len, rudp_frame_s *out_fr
     out_frame->packet.flags   = in_buf[5];
     out_frame->packet.value   = ((uint16_t)in_buf[6] << 8) | in_buf[7];
 
-    return 0; // Success
+    return RUDP_OK;
 }

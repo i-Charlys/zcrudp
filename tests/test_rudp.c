@@ -18,7 +18,7 @@ void test_happy_path() {
     assert(ctx.tx_buffer[0].state == RUDP_SLOT_IN_FLIGHT);
 
     // Reject out-of-window / future ACK (e.g. ACK=50 when only seq 0 was sent)
-    assert(rudp_recv_ack(&ctx, 50) == -1);
+    assert(rudp_recv_ack(&ctx, 50) == RUDP_ERR_OUT_OF_WINDOW);
 
     // Tick before expiration (100ms timeout)
     assert(rudp_tick(&ctx, 1050, 100, expired_slots, 64) == 0);
@@ -109,7 +109,7 @@ void test_buffer_full_and_wrap() {
     }
 
     // The extra packet MUST be rejected
-    assert(rudp_send(&ctx, dummy, 1000) == -1);
+    assert(rudp_send(&ctx, dummy, 1000) == RUDP_ERR_BUFFER_FULL);
 
     // Free the first half (packets 0 to 31) with ACK=32 (N+1)
     assert(rudp_recv_ack(&ctx, 32) == 0);
@@ -161,13 +161,13 @@ void test_wire_serialization() {
     assert(restored_frame.packet.value   == original_frame.packet.value);
 
     // 4. Tests de sécurité (Pointeurs NULL et tailles invalides)
-    assert(rudp_pack_frame(NULL, wire_buffer, sizeof(wire_buffer)) == -1);
-    assert(rudp_pack_frame(&original_frame, NULL, sizeof(wire_buffer)) == -1);
-    assert(rudp_pack_frame(&original_frame, wire_buffer, 7) == -1); // Too small
+    assert(rudp_pack_frame(NULL, wire_buffer, sizeof(wire_buffer)) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_pack_frame(&original_frame, NULL, sizeof(wire_buffer)) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_pack_frame(&original_frame, wire_buffer, 7) == RUDP_ERR_INVALID_ARG); // Too small
 
-    assert(rudp_unpack_frame(NULL, sizeof(wire_buffer), &restored_frame) == -1);
-    assert(rudp_unpack_frame(wire_buffer, sizeof(wire_buffer), NULL) == -1);
-    assert(rudp_unpack_frame(wire_buffer, 7, &restored_frame) == -1); // Too small
+    assert(rudp_unpack_frame(NULL, sizeof(wire_buffer), &restored_frame) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_unpack_frame(wire_buffer, sizeof(wire_buffer), NULL) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_unpack_frame(wire_buffer, 7, &restored_frame) == RUDP_ERR_INVALID_ARG); // Too small
 
     printf("[OK] Wire Serialization & Security Limits (Pack/Unpack validated)\n");
 }
@@ -183,13 +183,13 @@ void test_reliability_edge_cases() {
 
     // --- A. Empty-window ACKs ---
     // At startup (0 packets sent), ACK=0 is valid (0 - 0 == 0), no-op
-    assert(rudp_recv_ack(&ctx, 0) == 0);
+    assert(rudp_recv_ack(&ctx, 0) == RUDP_OK);
     assert(ctx.head == 0 && ctx.tail == 0);
     // Future ACK=1 when nothing was sent must be rejected
-    assert(rudp_recv_ack(&ctx, 1) == -1);
+    assert(rudp_recv_ack(&ctx, 1) == RUDP_ERR_OUT_OF_WINDOW);
 
     // --- B. Timeout boundaries and anti-spam retransmission ---
-    assert(rudp_send(&ctx, dummy, 1000) == 0); // Sent at t=1000, timeout=100ms
+    assert(rudp_send(&ctx, dummy, 1000) == RUDP_OK); // Sent at t=1000, timeout=100ms
     assert(ctx.tx_buffer[0].timestamp == 1000);
 
     // Exact boundary at t=1100 (100ms elapsed, not strictly > 100): must NOT expire
@@ -208,29 +208,29 @@ void test_reliability_edge_cases() {
 
     // --- C. Stale / Duplicate ACKs ---
     // Acknowledge packet 0 with ACK=1 (N+1)
-    assert(rudp_recv_ack(&ctx, 1) == 0);
+    assert(rudp_recv_ack(&ctx, 1) == RUDP_OK);
     assert(ctx.tail == 1);
 
     // Receiving a stale duplicate ACK=1 (packet 0 already freed): safe no-op
-    assert(rudp_recv_ack(&ctx, 1) == 0);
+    assert(rudp_recv_ack(&ctx, 1) == RUDP_OK);
     assert(ctx.tail == 1);
 
     // --- D. Rollover ACK validation around 65535 -> 0 ---
     ctx.current_seq_num = 65535;
-    assert(rudp_send(&ctx, dummy, 2000) == 0); // Sends packet 65535, current_seq_num becomes 0
+    assert(rudp_send(&ctx, dummy, 2000) == RUDP_OK); // Sends packet 65535, current_seq_num becomes 0
     assert(ctx.current_seq_num == 0);
 
     // Valid ACK=0 acknowledges packet 65535 under N+1
-    assert(rudp_recv_ack(&ctx, 0) == 0);
+    assert(rudp_recv_ack(&ctx, 0) == RUDP_OK);
 
     // Future ACK=10 when current_seq_num is 0: rejected!
-    assert(rudp_recv_ack(&ctx, 10) == -1);
+    assert(rudp_recv_ack(&ctx, 10) == RUDP_ERR_OUT_OF_WINDOW);
 
     // --- E. Invalid tick arguments ---
-    assert(rudp_tick(NULL, 1000, 100, expired, 64) == -1);
-    assert(rudp_tick(&ctx, 1000, 100, NULL, 64) == -1);
-    assert(rudp_tick(&ctx, 1000, 100, expired, 0) == -1);
-    assert(rudp_tick(&ctx, 1000, 100, expired, -1) == -1);
+    assert(rudp_tick(NULL, 1000, 100, expired, 64) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_tick(&ctx, 1000, 100, NULL, 64) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_tick(&ctx, 1000, 100, expired, 0) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_tick(&ctx, 1000, 100, expired, -1) == RUDP_ERR_INVALID_ARG);
 
     printf("[OK] Reliability Edge Cases (Timeout boundaries, anti-spam tick, stale ACKs, rollover rejection)\n");
 }
@@ -294,9 +294,9 @@ void test_rx_and_full_duplex() {
     assert(alice_ctx.tx_buffer[0].state == RUDP_SLOT_FREE);
 
     // --- E. Error Handling ---
-    assert(rudp_recv(NULL, &wire_frame, &received_msg) == -1);
-    assert(rudp_recv(&alice_ctx, NULL, &received_msg) == -1);
-    assert(rudp_recv(&alice_ctx, &wire_frame, NULL) == -1);
+    assert(rudp_recv(NULL, &wire_frame, &received_msg) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_recv(&alice_ctx, NULL, &received_msg) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_recv(&alice_ctx, &wire_frame, NULL) == RUDP_ERR_INVALID_ARG);
 
     printf("[OK] Reception Engine & Full-Duplex (In-Order delivery, duplicate drop, auto-piggybacked ACK)\n");
 }
@@ -308,11 +308,11 @@ void test_fast_retransmit_tri_ack() {
     dummy.raw = 0;
     uint16_t expired[64];
 
-    assert(rudp_init(&ctx) == 0);
+    assert(rudp_init(&ctx) == RUDP_OK);
 
     // Send 5 packets (seq 0 to 4) at t=1000ms with a 100ms timeout
     for (int i = 0; i < 5; i++) {
-        assert(rudp_send(&ctx, dummy, 1000) == 0);
+        assert(rudp_send(&ctx, dummy, 1000) == RUDP_OK);
     }
     assert(ctx.head == 5 && ctx.tail == 0);
     assert(ctx.tx_buffer[0].timestamp == 1000);
@@ -320,33 +320,49 @@ void test_fast_retransmit_tri_ack() {
     // Under normal circumstances at t=1020ms (only 20ms elapsed), rudp_tick would return 0
     assert(rudp_tick(&ctx, 1020, 100, expired, 64) == 0);
 
-    // 1st Duplicate ACK (ACK=0 arrives: receiver still waiting for 0)
-    assert(rudp_recv_ack(&ctx, 0) == 0);
+    // Initial ACK 0 arrives (1st observation: baseline reference recorded)
+    assert(rudp_recv_ack(&ctx, 0) == RUDP_OK);
+    assert(ctx.duplicate_ack_count == 0);
+    assert(ctx.tx_buffer[0].timestamp == 1000);
+
+    // 1st Duplicate ACK
+    assert(rudp_recv_ack(&ctx, 0) == RUDP_OK);
     assert(ctx.duplicate_ack_count == 1);
-    assert(ctx.tx_buffer[0].timestamp == 1000); // Not expired yet
+    assert(ctx.tx_buffer[0].timestamp == 1000);
 
     // 2nd Duplicate ACK
-    assert(rudp_recv_ack(&ctx, 0) == 0);
+    assert(rudp_recv_ack(&ctx, 0) == RUDP_OK);
     assert(ctx.duplicate_ack_count == 2);
-    assert(ctx.tx_buffer[0].timestamp == 1000); // Not expired yet
+    assert(ctx.tx_buffer[0].timestamp == 1000);
 
     // 3rd Duplicate ACK: TRI-ACK TRIGGER!
-    assert(rudp_recv_ack(&ctx, 0) == 0);
+    assert(rudp_recv_ack(&ctx, 0) == RUDP_OK);
     assert(ctx.duplicate_ack_count == 3);
-    assert(ctx.tx_buffer[0].timestamp == 0); // Forced timestamp to 0!
+    assert(ctx.tx_buffer[0].fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING); // Explicit flag set!
+
+    // 4th Duplicate ACK: Anti-storm check (should NOT re-trigger if already cleared)
+    ctx.tx_buffer[0].fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
+    assert(rudp_recv_ack(&ctx, 0) == RUDP_OK);
+    assert(ctx.duplicate_ack_count == 4);
+    assert(ctx.tx_buffer[0].fast_retransmit == RUDP_FAST_RETRANSMIT_OFF); // Anti-storm verified (not re-triggered)!
+
+    // Simulate incoming data having moved our expected_seq_num to 42
+    ctx.expected_seq_num = 42;
+    ctx.tx_buffer[0].fast_retransmit = RUDP_FAST_RETRANSMIT_PENDING; // Restore flag for test
 
     // Immediate tick at t=1025ms (well before the 100ms timeout!):
-    // The slot at tail (0) MUST be reported as expired for immediate retransmission!
     assert(rudp_tick(&ctx, 1025, 100, expired, 64) == 1);
     assert(expired[0] == 0);
+    assert(ctx.tx_buffer[0].fast_retransmit == RUDP_FAST_RETRANSMIT_OFF); // Flag cleared after tick
+    assert(ctx.tx_buffer[0].frame.header.ack == 42); // Header ACK dynamically refreshed!
     assert(ctx.tx_buffer[0].timestamp == 1025); // Timer reset for next cycle
 
     // When the valid ACK arrives (ACK=1 acknowledging packet 0):
-    assert(rudp_recv_ack(&ctx, 1) == 0);
+    assert(rudp_recv_ack(&ctx, 1) == RUDP_OK);
     assert(ctx.tail == 1);
     assert(ctx.duplicate_ack_count == 0); // Counter reset on window advance!
 
-    printf("[OK] Fast Retransmit (Tri-ACK detected, immediate loss recovery triggered)\n");
+    printf("[OK] Fast Retransmit (Tri-ACK flag, anti-storm lock, and dynamic ACK refresh verified)\n");
 }
 
 // --- 9. Dead Peer Detection & Retransmission Limit Test ---
@@ -356,11 +372,11 @@ void test_dead_peer_detection() {
     dummy.raw = 0;
     uint16_t expired[64];
 
-    assert(rudp_init(&ctx) == 0);
+    assert(rudp_init(&ctx) == RUDP_OK);
     assert(ctx.state == RUDP_STATE_CONNECTED);
 
     // Send a packet at t=1000ms with a 100ms timeout
-    assert(rudp_send(&ctx, dummy, 1000) == 0);
+    assert(rudp_send(&ctx, dummy, 1000) == RUDP_OK);
     assert(ctx.tx_buffer[0].retries == 0);
 
     uint32_t current_time = 1000;
@@ -375,10 +391,20 @@ void test_dead_peer_detection() {
 
     // 11th timeout: Exceeds RUDP_MAX_RETRIES -> Dead peer declared!
     current_time += 110;
-    assert(rudp_tick(&ctx, current_time, 100, expired, 64) == -1); // Fatal error returned
-    assert(ctx.state == RUDP_STATE_DISCONNECTED);                  // State switched to DISCONNECTED
+    assert(rudp_tick(&ctx, current_time, 100, expired, 64) == RUDP_ERR_DISCONNECTED); // Dead peer error returned
+    assert(ctx.state == RUDP_STATE_DISCONNECTED);                                      // State switched to DISCONNECTED
 
-    printf("[OK] Dead Peer Detection (Exceeding max retries triggers RUDP_STATE_DISCONNECTED)\n");
+    // Test Zombie prevention: subsequent ticks are inert and return RUDP_ERR_DISCONNECTED immediately
+    assert(rudp_tick(&ctx, current_time + 110, 100, expired, 64) == RUDP_ERR_DISCONNECTED);
+    // Test send rejection on disconnected context
+    assert(rudp_send(&ctx, dummy, current_time + 110) == RUDP_ERR_DISCONNECTED);
+
+    // Test rudp_reset restores healthy connection
+    assert(rudp_reset(&ctx) == RUDP_OK);
+    assert(ctx.state == RUDP_STATE_CONNECTED);
+    assert(rudp_send(&ctx, dummy, current_time + 110) == RUDP_OK);
+
+    printf("[OK] Dead Peer & Zombie Prevention (Disconnected state enforced, rudp_reset validated)\n");
 }
 
 int main(void) {

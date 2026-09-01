@@ -44,31 +44,52 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 
 ---
 
-## 📌 Phase 3.5: Protocol Hardening & Audit Remediation
-*Directly addresses the findings from the multi-agent architectural audit before scaling.*
+## 📌 Phase 3.5: Protocol Hardening & Audit Remediation (GitHub Issue #3)
+*Comprehensive remediation of all 3 confirmed runtime defects, portability issues, API ergonomics, and doc/test drift before Phase 4.*
 
-- [ ] **Fast Retransmit Hardening & Storm Prevention**:
-  - Fix startup off-by-one: Initialize `last_ack_received = 0xFFFF` (sentinel) so valid `ACK=0` is not counted as a duplicate.
-  - Prevent duplicate storm: Trigger Fast Retransmit strictly on `duplicate_ack_count == 3` (single trigger with `fast_retransmit_done` lock, cleared when `tail` advances).
-  - Use an explicit flag (`slot->fast_retransmit`) to guarantee immediate retransmission even near clock origin (`now <= timeout`).
-  - Reset `duplicate_ack_count = 0` when the window empties (`head == tail`).
-- [ ] **Standalone ACK (Tier 1 - 4B) & Dynamic Refresh**:
-  - Implement `rudp_pack_ack(uint16_t ack_num, uint8_t *out_buf, size_t max_len)` and `rudp_unpack_ack(const uint8_t *in_buf, size_t in_len, uint16_t *out_ack)`.
-  - Fix unidirectional traffic: Allow receivers to send pure ACK control frames without requiring dummy application data.
-  - In `rudp_tick()`, dynamically refresh `slot->frame.header.ack = ctx->expected_seq_num` on every retransmission.
-- [ ] **ACK Window Boundary & Error Propagation**:
-  - Reject stale ACKs older than `tail` so network reordering does not pollute the duplicate ACK counter.
-  - Propagate errors in `rudp_recv()` when an incoming frame carries an invalid/corrupted piggybacked ACK.
-- [ ] **Safety Bounds, Error Codes & Doc Sync**:
+- [x] **1. Dead Connection & Zombie Overflow Protection**:
+  - Make `rudp_tick()` inert / no-op once `ctx->state == RUDP_STATE_DISCONNECTED` (prevents `retries` uint8 overflow at 256 from resurrecting dead connections as "zombies").
+  - Reject `rudp_send()` immediately when `ctx->state == RUDP_STATE_DISCONNECTED`.
+  - Expose `int rudp_reset(rudp_context_s *ctx)` as the clean, explicit API to reset and reconnect a dead context.
+- [ ] **2. Preserve Retransmission List on Dead Peer Trigger**:
+  - When slot $k$ trips the retry limit in `rudp_tick()`, return the count of already-collected expired indices ($0 \dots k-1$) and signal dead peer distinctly so in-flight retransmissions are not silently dropped.
   - Differentiate return codes in `rudp_tick()` (`-1` = invalid arguments, `-2` = dead peer).
-  - Enforce compile-time safety check `#if RUDP_MAX_RETRIES > 254` to avoid `uint8_t` counter overflow.
-  - Update `README.md` and `ARCHITECTURE.md` (clarify 63 usable in-flight capacity for 64-slot ring buffer, align $N+1$ ACK examples).
+- [x] **3. Fast Retransmit (Tri-ACK) Hardening & Stale-ACK Defense**:
+  - Fix startup off-by-one: Initialize `last_ack_received = 0xFFFF` (sentinel) so valid initial `ACK=0` is not counted as a duplicate.
+  - Fix duplicate storm: Trigger Fast Retransmit strictly on `duplicate_ack_count == 3` (single trigger).
+  - Use an explicit flag (`slot->fast_retransmit`) to guarantee immediate retransmission even near clock origin (`now <= timeout`).
+  - Add window-floor check in `rudp_recv_ack()` (`(int16_t)(ack_num - tail_seq) < 0`) so reordered/stale ACKs cannot reset `duplicate_ack_count` or disarm Tri-ACK.
+- [ ] **4. Standalone ACK (Tier 1 - 4B) & Dynamic Retransmit Refresh**:
+  - Implement `rudp_pack_ack(uint16_t ack_num, uint8_t *out_buf, size_t max_len)` and `rudp_unpack_ack(const uint8_t *in_buf, size_t in_len, uint16_t *out_ack)`.
+  - Fix unidirectional traffic: Allow receivers to send pure ACK control frames without requiring dummy application payload.
+  - In `rudp_tick()`, dynamically refresh `slot->frame.header.ack = ctx->expected_seq_num` on every retransmission.
+- [ ] **5. Portability & C++ Engine Linkage**:
+  - Add `extern "C"` guards in `include/protocol_rudp.h` and `include/protocol_tfv.h` for clean linkage with C++ game engines (Unreal, Godot, Raylib).
+  - Pin standard: Add `-std=c11 -pedantic -Werror` to `Makefile` CFLAGS (supporting C11 anonymous structs in `tfv_packet_u`).
+  - Standardize include paths: Replace `#include "../include/..."` with `#include "protocol_rudp.h"`.
+  - Prefix or clean up `IS_LITTLE_ENDIAN` macro to prevent public namespace pollution.
+  - Clean up dead header scaffolding: remove unused `RUDP_PACKED`, `RUDP_WIRE_DYNAMIC_SIZE -1`, and unused endian helpers.
+- [ ] **6. API Ergonomics & Context Encapsulation**:
+  - Add accessor `const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx, uint16_t slot_idx)` to allow reading expired frames without piercing context internals.
+  - Symmetrize API return values (`rudp_pack_frame` vs `rudp_unpack_frame`).
+- [ ] **7. Test Suite Hardening & CI**:
+  - Replace bare `assert()` with a custom non-collapsible `TEST_ASSERT()` macro (or `-UNDEBUG` in CFLAGS) so tests don't vanish under `-DNDEBUG`.
+  - Parameterize `tests/test_rudp.c` for any `RUDP_WINDOW_SIZE` (remove hardcoded 64, 32, 63 constants).
+  - Fix `int main()` to `int main(void)` in `tests/test_tfv.c`.
+  - Pull forward GitHub Actions CI workflow with AddressSanitizer (ASan), UndefinedBehaviorSanitizer (UBSan), and a fuzz target for `rudp_unpack_frame`.
+- [ ] **8. Documentation, Style & Security Policy**:
+  - Fix `README.md` Quick Start example to use $N+1$ convention (`ACK=1` acknowledges seq 0).
+  - Re-sync `ARCHITECTURE.md` (operator `> 0`, 16-byte slot diagram, retries & connection state machine).
+  - Align ASCII diagram in `src/rudp.c` with real struct field order (`frame | timestamp | state | retries | reserved`).
+  - Resolve `STYLE_CONVENTION.md` 2-space vs 4-space contradiction and add `.clang-format`.
+  - Add `SECURITY.md` (stating the absence of authentication/encryption on raw RUDP, recommending DTLS/TLS if needed).
 
 ---
 
 ## 📌 Phase 4: Multi-Resolution Architecture & Scalability
 *Depends on Phase 3 working bidirectional engine.*
 
+- [ ] **RX Out-of-Order Reassembly Buffer (Selective Repeat)**: Add a lightweight sliding RX buffer to temporarily store ahead-of-order in-window packets instead of dropping them immediately (eliminating Go-Back-N retransmission cascades).
 - [ ] **3-Tier Multi-Resolution Packet Support**:
   - **Tier 1 (4 bytes)**: Handle short header-only packets (`seq_num` + `ack`) for pure ACKs, heartbeats/pings, and connection signals.
   - **Tier 2 (8 bytes)**: Standard game frames (Header 4B + TFV 4B).
@@ -82,6 +103,8 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 ## 📌 Phase 5: Network Intelligence & Resilience (Advanced)
 *Depends on Phase 4.*
 
+- [ ] **Lightweight Header Checksum (CRC16 / Internet Checksum)**: Verify 16-bit header integrity to prevent bitflips on `ack` or `seq_num` from causing silent data loss or illegal window advancement.
+- [ ] **Randomized Initial Sequence Number (ISN) & Replay Defense**: Randomize `current_seq_num` at initialization/handshake to prevent delayed packets from past sessions colliding with a newly initialized context.
 - [ ] **Connection Lifecycle**: Implement lightweight `CONNECT` (SYN) and `DISCONNECT` (FIN) control frames for clean session handshakes and teardowns.
 - [ ] **Session / Connection ID in Handshake (Low Priority)**: Exchange a lightweight session identifier during `CONNECT` handshake to identify client sessions without bloating standard 8-byte frames.
 - [ ] **Adaptive RTT & Dynamic Timeout (Van Jacobson Algorithm)**: Measure sample ping (in ms) on each received ACK, track smoothed RTT (SRTT) and jitter (RTTVAR) using integer EWMA bit-shifts (`>> 3`, `>> 2`), and dynamically compute elastic timeout (`RTO = SRTT + 4 * RTTVAR`).
