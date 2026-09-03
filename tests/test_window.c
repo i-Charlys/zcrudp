@@ -1,4 +1,4 @@
-#include "../include/protocol_rudp.h"
+#include "protocol_rudp.h"
 #include <stdio.h>
 #include <assert.h>
 

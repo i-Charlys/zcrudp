@@ -1,4 +1,4 @@
-#include "../include/protocol_tfv.h"
+#include "protocol_tfv.h"
 #include <stdio.h>
 #include <assert.h>
 #include <stddef.h>
@@ -12,7 +12,7 @@
 /**
  * @brief Main function
  */
-int main() {
+int main(void) {
     tfv_packet_u packet;
 
     packet.raw = 0; // not good practice, but for testing it's ok

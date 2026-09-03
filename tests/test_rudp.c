@@ -1,6 +1,6 @@
-#include "../include/protocol_rudp.h"
+#include "protocol_rudp.h"
 #include <stdio.h>
-#include <assert.h> // Essential for testing
+#include <assert.h>
 
 // --- 1. Basic Happy Path Test ---
 void test_happy_path() {
