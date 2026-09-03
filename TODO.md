@@ -59,17 +59,18 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
   - Fix duplicate storm: Trigger Fast Retransmit strictly on `duplicate_ack_count == 3` (single trigger).
   - Use an explicit flag (`slot->fast_retransmit`) to guarantee immediate retransmission even near clock origin (`now <= timeout`).
   - Add window-floor check in `rudp_recv_ack()` (`(int16_t)(ack_num - tail_seq) < 0`) so reordered/stale ACKs cannot reset `duplicate_ack_count` or disarm Tri-ACK.
-- [ ] **4. Standalone ACK (Tier 1 - 4B) & Dynamic Retransmit Refresh**:
+- [x] **4. Standalone ACK (Tier 1 - 4B) & Dynamic Retransmit Refresh**:
   - Implement `rudp_pack_ack(uint16_t ack_num, uint8_t *out_buf, size_t max_len)` and `rudp_unpack_ack(const uint8_t *in_buf, size_t in_len, uint16_t *out_ack)`.
+  - Add modular helper `rudp_unpack_header(const uint8_t *in_buf, size_t in_len, rudp_header_s *out_header)` to share Big-Endian decoding logic with `rudp_unpack_frame`.
   - Fix unidirectional traffic: Allow receivers to send pure ACK control frames without requiring dummy application payload.
   - In `rudp_tick()`, dynamically refresh `slot->frame.header.ack = ctx->expected_seq_num` on every retransmission.
-- [ ] **5. Portability & C++ Engine Linkage**:
+- [x] **5. Portability & C++ Engine Linkage**:
   - Add `extern "C"` guards in `include/protocol_rudp.h` and `include/protocol_tfv.h` for clean linkage with C++ game engines (Unreal, Godot, Raylib).
   - Pin standard: Add `-std=c11 -pedantic -Werror` to `Makefile` CFLAGS (supporting C11 anonymous structs in `tfv_packet_u`).
   - Standardize include paths: Replace `#include "../include/..."` with `#include "protocol_rudp.h"`.
   - Prefix or clean up `IS_LITTLE_ENDIAN` macro to prevent public namespace pollution.
   - Clean up dead header scaffolding: remove unused `RUDP_PACKED`, `RUDP_WIRE_DYNAMIC_SIZE -1`, and unused endian helpers.
-- [ ] **6. API Ergonomics & Context Encapsulation**:
+- [x] **6. API Ergonomics & Context Encapsulation**:
   - Add accessor `const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx, uint16_t slot_idx)` to allow reading expired frames without piercing context internals.
   - Symmetrize API return values (`rudp_pack_frame` vs `rudp_unpack_frame`).
 - [ ] **7. Test Suite Hardening & CI**:
@@ -94,9 +95,13 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
   - **Tier 1 (4 bytes)**: Handle short header-only packets (`seq_num` + `ack`) for pure ACKs, heartbeats/pings, and connection signals.
   - **Tier 2 (8 bytes)**: Standard game frames (Header 4B + TFV 4B).
   - **Tier 3 (Multi-part Streaming)**: Stream large payloads (32-bit floats, text, files) via a TFV descriptor packet followed by $N$ pure 32-bit `packet.raw` frames (UTF-8 style scaling).
-- [ ] **Multi-Channel Architecture**: Support independent channel contexts (e.g. Channel 0: Unreliable Movement, Channel 1: Reliable Actions, Channel 2: Reliable Chat) to prevent Head-of-Line blocking between independent streams.
+- [ ] **Multi-Channel Architecture & Hardware Priority**: 
+  - Support independent channel contexts (e.g. Channel 0: Unreliable Movement, Channel 1: High-Priority Reliable Actions, Channel 2: Background Reliable Chat) to eliminate Head-of-Line blocking.
+  - Implement channel egress scheduler with priority preemption (critical actions preempt background queues before `sendto()`) and optional IP TOS/DSCP QoS socket tagging.
 - [ ] **Unreliable Channels**: Support fire-and-forget packets that bypass `tx_buffer` storage and retransmission (ideal for high-frequency game data like positions).
-- [ ] **1400-byte MTU Multiplexing / Bundling**: Implement batching of multiple 8-byte frames (up to 175 frames) into a single standard 1400-byte UDP datagram.
+- [ ] **1400-byte MTU Multiplexing / Bundling**: 
+  - Implement batching of multiple payloads into a single standard 1400-byte UDP datagram.
+  - Use implicit base-sequence indexing ($seq = base\_seq + k$) to eliminate 50% header overhead ($4\text{B header} + N \times 4\text{B payload}$ instead of repeating $8\text{B}$ per message).
 
 ---
 

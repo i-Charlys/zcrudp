@@ -160,16 +160,81 @@ void test_wire_serialization() {
     assert(restored_frame.packet.flags   == original_frame.packet.flags);
     assert(restored_frame.packet.value   == original_frame.packet.value);
 
-    // 4. Tests de sécurité (Pointeurs NULL et tailles invalides)
+    // 4. Tests de l'ACK Standalone (Tier 1 : 4 octets)
+    uint8_t ack_wire_buffer[RUDP_WIRE_HEADER_SIZE];
+    int ack_written = rudp_pack_ack(0x5678, ack_wire_buffer, sizeof(ack_wire_buffer));
+    assert(ack_written == RUDP_WIRE_HEADER_SIZE);
+    assert(ack_wire_buffer[0] == 0x00 && ack_wire_buffer[1] == 0x00); // seq_num is 0
+    assert(ack_wire_buffer[2] == 0x56 && ack_wire_buffer[3] == 0x78); // ack is Big-Endian 0x5678
+
+    // 5. Test du déballage de header (rudp_unpack_header)
+    rudp_header_s standalone_header;
+    assert(rudp_unpack_header(ack_wire_buffer, sizeof(ack_wire_buffer), &standalone_header) == RUDP_OK);
+    assert(standalone_header.seq_num == 0);
+    assert(standalone_header.ack == 0x5678);
+
+    // 6. Test du déballage direct d'ACK (rudp_unpack_ack)
+    uint16_t extracted_ack = 0;
+    assert(rudp_unpack_ack(ack_wire_buffer, sizeof(ack_wire_buffer), &extracted_ack) == RUDP_OK);
+    assert(extracted_ack == 0x5678);
+
+    // 7. Tests atomiques de payload (rudp_pack_payload, rudp_unpack_payload)
+    uint8_t payload_wire[sizeof(tfv_packet_u)];
+    tfv_packet_u orig_p;
+    orig_p.type = 99;
+    orig_p.flags = 0xAA;
+    orig_p.value = 0x1234;
+    assert(rudp_pack_payload(&orig_p, payload_wire, sizeof(payload_wire)) == (int)sizeof(tfv_packet_u));
+    assert(payload_wire[0] == 99 && payload_wire[1] == 0xAA);
+    assert(payload_wire[2] == 0x12 && payload_wire[3] == 0x34);
+
+    tfv_packet_u restored_p;
+    assert(rudp_unpack_payload(payload_wire, sizeof(payload_wire), &restored_p) == RUDP_OK);
+    assert(restored_p.type == 99 && restored_p.flags == 0xAA && restored_p.value == 0x1234);
+
+    // 8. Tests de sécurité (Pointeurs NULL et tailles invalides)
+    assert(rudp_pack_header(NULL, wire_buffer, sizeof(wire_buffer)) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_pack_header(&original_frame.header, NULL, sizeof(wire_buffer)) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_pack_header(&original_frame.header, wire_buffer, 3) == RUDP_ERR_INVALID_ARG);
+
+    assert(rudp_pack_payload(NULL, payload_wire, sizeof(payload_wire)) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_pack_payload(&orig_p, NULL, sizeof(payload_wire)) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_pack_payload(&orig_p, payload_wire, 3) == RUDP_ERR_INVALID_ARG);
+
+    assert(rudp_unpack_payload(NULL, sizeof(payload_wire), &restored_p) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_unpack_payload(payload_wire, sizeof(payload_wire), NULL) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_unpack_payload(payload_wire, 3, &restored_p) == RUDP_ERR_INVALID_ARG);
+
     assert(rudp_pack_frame(NULL, wire_buffer, sizeof(wire_buffer)) == RUDP_ERR_INVALID_ARG);
     assert(rudp_pack_frame(&original_frame, NULL, sizeof(wire_buffer)) == RUDP_ERR_INVALID_ARG);
     assert(rudp_pack_frame(&original_frame, wire_buffer, 7) == RUDP_ERR_INVALID_ARG); // Too small
+
+    assert(rudp_pack_ack(10, NULL, sizeof(ack_wire_buffer)) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_pack_ack(10, ack_wire_buffer, 3) == RUDP_ERR_INVALID_ARG); // Too small
+
+    assert(rudp_unpack_header(NULL, sizeof(ack_wire_buffer), &standalone_header) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_unpack_header(ack_wire_buffer, sizeof(ack_wire_buffer), NULL) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_unpack_header(ack_wire_buffer, 3, &standalone_header) == RUDP_ERR_INVALID_ARG); // Too small
+
+    assert(rudp_unpack_ack(NULL, sizeof(ack_wire_buffer), &extracted_ack) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_unpack_ack(ack_wire_buffer, sizeof(ack_wire_buffer), NULL) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_unpack_ack(ack_wire_buffer, 3, &extracted_ack) == RUDP_ERR_INVALID_ARG); // Too small
 
     assert(rudp_unpack_frame(NULL, sizeof(wire_buffer), &restored_frame) == RUDP_ERR_INVALID_ARG);
     assert(rudp_unpack_frame(wire_buffer, sizeof(wire_buffer), NULL) == RUDP_ERR_INVALID_ARG);
     assert(rudp_unpack_frame(wire_buffer, 7, &restored_frame) == RUDP_ERR_INVALID_ARG); // Too small
 
-    printf("[OK] Wire Serialization & Security Limits (Pack/Unpack validated)\n");
+    // 9. Test de l'accesseur de slot (rudp_get_slot_frame)
+    rudp_context_s dummy_ctx;
+    rudp_init(&dummy_ctx);
+    dummy_ctx.tx_buffer[0].frame = original_frame;
+    const rudp_frame_s *slot_frame = rudp_get_slot_frame(&dummy_ctx, 0);
+    assert(slot_frame != NULL);
+    assert(slot_frame->header.seq_num == 0x1234);
+    assert(rudp_get_slot_frame(NULL, 0) == NULL);
+    assert(rudp_get_slot_frame(&dummy_ctx, RUDP_WINDOW_SIZE) == NULL); // Out of bounds
+
+    printf("[OK] Wire Serialization & Modular Architecture (Pack/Unpack Header, Payload, Frame & Slot Accessor validated)\n");
 }
 
 // --- 6. Advanced Reliability Edge Cases Test ---

@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Iinclude -Wall -Wextra -O2
+CFLAGS = -Iinclude -Wall -Wextra -std=c11 -pedantic -Werror -O2
 BUILD_DIR = build
 SRC = src/rudp.c
 TESTS = tests/test_rudp.c tests/test_tfv.c tests/test_window.c

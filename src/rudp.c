@@ -1,4 +1,4 @@
-#include "../include/protocol_rudp.h"
+#include "protocol_rudp.h"
 #include <string.h>
 
 /*
@@ -260,22 +260,94 @@ int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out
 }
 
 
+int rudp_pack_header(const rudp_header_s *header, uint8_t *out_buf, size_t max_len) {
+    if (!header || !out_buf || max_len < RUDP_WIRE_HEADER_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_buf[0] = (uint8_t)(header->seq_num >> 8);
+    out_buf[1] = (uint8_t)(header->seq_num & 0xFF);
+    out_buf[2] = (uint8_t)(header->ack >> 8);
+    out_buf[3] = (uint8_t)(header->ack & 0xFF);
+
+    return RUDP_WIRE_HEADER_SIZE;
+}
+
+int rudp_pack_payload(const tfv_packet_u *packet, uint8_t *out_buf, size_t max_len) {
+    if (!packet || !out_buf || max_len < sizeof(tfv_packet_u)) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_buf[0] = packet->type;
+    out_buf[1] = packet->flags;
+    out_buf[2] = (uint8_t)(packet->value >> 8);
+    out_buf[3] = (uint8_t)(packet->value & 0xFF);
+
+    return (int)sizeof(tfv_packet_u);
+}
+
 int rudp_pack_frame(const rudp_frame_s *frame, uint8_t *out_buf, size_t max_len) {
     if (!frame || !out_buf || max_len < RUDP_WIRE_FRAME_SIZE) {
         return RUDP_ERR_INVALID_ARG;
     }
 
-    out_buf[0] = (uint8_t)(frame->header.seq_num >> 8);
-    out_buf[1] = (uint8_t)(frame->header.seq_num & 0xFF);
-    out_buf[2] = (uint8_t)(frame->header.ack >> 8);
-    out_buf[3] = (uint8_t)(frame->header.ack & 0xFF);
+    // 1. Pack header (bytes 0..3)
+    rudp_pack_header(&frame->header, out_buf, max_len);
 
-    out_buf[4] = frame->packet.type;
-    out_buf[5] = frame->packet.flags;
-    out_buf[6] = (uint8_t)(frame->packet.value >> 8);
-    out_buf[7] = (uint8_t)(frame->packet.value & 0xFF);
-    
+    // 2. Pack payload (bytes 4..7)
+    rudp_pack_payload(&frame->packet, out_buf + RUDP_WIRE_HEADER_SIZE, max_len - RUDP_WIRE_HEADER_SIZE);
+
     return RUDP_WIRE_FRAME_SIZE; // Success: 8 bytes written
+}
+
+int rudp_pack_ack(uint16_t ack_num, uint8_t *out_buf, size_t max_len) {
+    if (!out_buf || max_len < RUDP_WIRE_HEADER_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    rudp_header_s header;
+    header.seq_num = 0; // seq_num is unused for standalone cumulative ACK
+    header.ack = ack_num;
+
+    return rudp_pack_header(&header, out_buf, max_len);
+}
+
+int rudp_unpack_header(const uint8_t *in_buf, size_t in_len, rudp_header_s *out_header) {
+    if (!in_buf || !out_header || in_len < RUDP_WIRE_HEADER_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_header->seq_num = ((uint16_t)in_buf[0] << 8) | in_buf[1];
+    out_header->ack     = ((uint16_t)in_buf[2] << 8) | in_buf[3];
+
+    return RUDP_OK;
+}
+
+int rudp_unpack_payload(const uint8_t *in_buf, size_t in_len, tfv_packet_u *out_packet) {
+    if (!in_buf || !out_packet || in_len < sizeof(tfv_packet_u)) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_packet->type  = in_buf[0];
+    out_packet->flags = in_buf[1];
+    out_packet->value = ((uint16_t)in_buf[2] << 8) | in_buf[3];
+
+    return RUDP_OK;
+}
+
+int rudp_unpack_ack(const uint8_t *in_buf, size_t in_len, uint16_t *out_ack) {
+    if (!in_buf || !out_ack) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    rudp_header_s header;
+    int res = rudp_unpack_header(in_buf, in_len, &header);
+    if (res != RUDP_OK) {
+        return res;
+    }
+
+    *out_ack = header.ack;
+    return RUDP_OK;
 }
 
 int rudp_unpack_frame(const uint8_t *in_buf, size_t in_len, rudp_frame_s *out_frame) {
@@ -283,12 +355,19 @@ int rudp_unpack_frame(const uint8_t *in_buf, size_t in_len, rudp_frame_s *out_fr
         return RUDP_ERR_INVALID_ARG;
     }
 
-    out_frame->header.seq_num = ((uint16_t)in_buf[0] << 8) | in_buf[1];
-    out_frame->header.ack     = ((uint16_t)in_buf[2] << 8) | in_buf[3];
+    // 1. Unpack header via modular header decoder
+    rudp_unpack_header(in_buf, in_len, &out_frame->header);
 
-    out_frame->packet.type    = in_buf[4];
-    out_frame->packet.flags   = in_buf[5];
-    out_frame->packet.value   = ((uint16_t)in_buf[6] << 8) | in_buf[7];
+    // 2. Unpack payload via modular payload decoder
+    rudp_unpack_payload(in_buf + RUDP_WIRE_HEADER_SIZE, in_len - RUDP_WIRE_HEADER_SIZE, &out_frame->packet);
 
     return RUDP_OK;
+}
+
+const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx, uint16_t slot_idx) {
+    if (!ctx || slot_idx >= RUDP_WINDOW_SIZE) {
+        return NULL;
+    }
+
+    return &ctx->tx_buffer[slot_idx].frame;
 }
