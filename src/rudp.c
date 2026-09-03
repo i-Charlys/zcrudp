@@ -213,12 +213,21 @@ int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
  * @param max_indices Maximum capacity of the out_indices array.
  * @return Number of packets marked for retransmission (>= 0), or negative error code.
  */
-int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out_indices, int max_indices) {
-    if (!ctx || !out_indices || max_indices <= 0) return RUDP_ERR_INVALID_ARG;
+rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out_indices, int max_indices) {
+    if (!ctx || !out_indices || max_indices <= 0) {
+        rudp_tick_result_s result = {0, RUDP_ERR_INVALID_ARG};
+        return result;
+    }
 
-    if (ctx->state != RUDP_STATE_CONNECTED) return RUDP_ERR_DISCONNECTED; // Only process if connection is active
+    if (ctx->state != RUDP_STATE_CONNECTED) {
+        rudp_tick_result_s result = {0, RUDP_ERR_DISCONNECTED};
+        return result;
+    } // Only process if connection is active
     
-    if (ctx->head == ctx->tail) return 0; // Buffer is empty, nothing to do
+    if (ctx->head == ctx->tail) {
+        rudp_tick_result_s result = {0, RUDP_OK};
+        return result;
+    }  // Buffer is empty, nothing to do
 
     int count = 0;
     uint16_t current = ctx->tail;
@@ -241,7 +250,8 @@ int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out
             if (slot->retries > RUDP_MAX_RETRIES) {
                 // Mark the connection as disconnected if retries exceed the limit
                 ctx->state = RUDP_STATE_DISCONNECTED;
-                return RUDP_ERR_DISCONNECTED; // Indicate a fatal error due to dead peer
+                    rudp_tick_result_s result = {count, RUDP_ERR_DISCONNECTED};
+                return  result ; // Indicate a fatal error due to dead peer
             }
             
             // Reset the timer for this packet to prevent spamming
@@ -256,7 +266,8 @@ int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out
         current = (current + 1) & (RUDP_WINDOW_SIZE - 1);
     }
 
-    return count; // Return how many packets need to be resent
+    rudp_tick_result_s result = {count, RUDP_OK};
+    return result; // Return how many packets need to be resent
 }
 
 
@@ -370,4 +381,22 @@ const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx, uint16_t slot
     }
 
     return &ctx->tx_buffer[slot_idx].frame;
+}
+
+int rudp_get_unacked_slots(const rudp_context_s *ctx, uint16_t *out_indices, int max_indices) {
+    if (!ctx || !out_indices || max_indices <= 0) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    int count = 0;
+    uint16_t current = ctx->tail;
+
+    while (current != ctx->head && count < max_indices) {
+        if (ctx->tx_buffer[current].state == RUDP_SLOT_IN_FLIGHT) {
+            out_indices[count++] = current;
+        }
+        current = (current + 1) & (RUDP_WINDOW_SIZE - 1);
+    }
+
+    return count;
 }

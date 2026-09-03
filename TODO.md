@@ -51,9 +51,9 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
   - Make `rudp_tick()` inert / no-op once `ctx->state == RUDP_STATE_DISCONNECTED` (prevents `retries` uint8 overflow at 256 from resurrecting dead connections as "zombies").
   - Reject `rudp_send()` immediately when `ctx->state == RUDP_STATE_DISCONNECTED`.
   - Expose `int rudp_reset(rudp_context_s *ctx)` as the clean, explicit API to reset and reconnect a dead context.
-- [ ] **2. Preserve Retransmission List on Dead Peer Trigger**:
-  - When slot $k$ trips the retry limit in `rudp_tick()`, return the count of already-collected expired indices ($0 \dots k-1$) and signal dead peer distinctly so in-flight retransmissions are not silently dropped.
-  - Differentiate return codes in `rudp_tick()` (`-1` = invalid arguments, `-2` = dead peer).
+- [x] **2. Preserve Retransmission List on Dead Peer Trigger**:
+  - Implement `rudp_tick_result_s` returning both `{count, status}` so collected in-flight expired slots are preserved when dead peer is tripped.
+  - Expose `rudp_get_unacked_slots()` allowing game engines to inspect and rollback all unacknowledged packets upon disconnect.
 - [x] **3. Fast Retransmit (Tri-ACK) Hardening & Stale-ACK Defense**:
   - Fix startup off-by-one: Initialize `last_ack_received = 0xFFFF` (sentinel) so valid initial `ACK=0` is not counted as a duplicate.
   - Fix duplicate storm: Trigger Fast Retransmit strictly on `duplicate_ack_count == 3` (single trigger).

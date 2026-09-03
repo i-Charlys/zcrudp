@@ -46,6 +46,9 @@ extern "C" {
 #include <stddef.h>
 
 
+
+
+
 /**
  * @brief Represents the header of a RUDP frame. Length: 4 bytes.
  */
@@ -90,6 +93,14 @@ typedef struct {
     uint8_t  duplicate_ack_count;            /**< Count of duplicate ACKs received (Fast Retransmit) */
     uint8_t  state;                          /**< Connection lifecycle state */
 } rudp_context_s;
+
+/**
+ * @brief Represents the result of a RUDP tick operation.
+ */
+typedef struct {
+    int count;  /**< Count of already-collected expired indices (>= 0) */
+    int status; /**< RUDP_OK (0), RUDP_ERR_DISCONNECTED (-2), RUDP_ERR_INVALID_ARG (-1) */
+} rudp_tick_result_s;
 
 
 /**
@@ -228,6 +239,16 @@ int rudp_unpack_frame(const uint8_t *in_buf, size_t in_len, rudp_frame_s *out_fr
 const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx, uint16_t slot_idx);
 
 /**
+ * @brief Collects the indices of all slots currently in flight and unacknowledged.
+ *
+ * @param ctx Pointer to the RUDP context.
+ * @param out_indices Destination array to store slot indices.
+ * @param max_indices Maximum capacity of out_indices.
+ * @return Number of indices written (>= 0), or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_get_unacked_slots(const rudp_context_s *ctx, uint16_t *out_indices, int max_indices);
+
+/**
  * @brief Handles retransmissions for timed-out packets.
  *
  * @param ctx The RUDP context.
@@ -237,7 +258,7 @@ const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx, uint16_t slot
  * @param max_indices The maximum number of indices the array can hold.
  * @return The number of packets marked for retransmission, or negative error code.
  */
-int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out_indices, int max_indices);
+rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out_indices, int max_indices);
 
 #ifdef __cplusplus
 }

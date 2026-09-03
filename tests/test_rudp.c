@@ -21,10 +21,12 @@ void test_happy_path() {
     assert(rudp_recv_ack(&ctx, 50) == RUDP_ERR_OUT_OF_WINDOW);
 
     // Tick before expiration (100ms timeout)
-    assert(rudp_tick(&ctx, 1050, 100, expired_slots, 64) == 0);
+    rudp_tick_result_s res = rudp_tick(&ctx, 1050, 100, expired_slots, 64);
+    assert(res.count == 0 && res.status == RUDP_OK);
 
     // Tick after expiration
-    assert(rudp_tick(&ctx, 1150, 100, expired_slots, 64) == 1);
+    res = rudp_tick(&ctx, 1150, 100, expired_slots, 64);
+    assert(res.count == 1 && res.status == RUDP_OK);
     assert(expired_slots[0] == 0);
 
     // Receive cumulative ACK under N+1 convention: ACK=1 acknowledges packet 0
@@ -258,18 +260,19 @@ void test_reliability_edge_cases() {
     assert(ctx.tx_buffer[0].timestamp == 1000);
 
     // Exact boundary at t=1100 (100ms elapsed, not strictly > 100): must NOT expire
-    assert(rudp_tick(&ctx, 1100, 100, expired, 64) == 0);
+    assert(rudp_tick(&ctx, 1100, 100, expired, 64).count == 0);
 
     // At t=1101 (101ms elapsed): expired!
-    assert(rudp_tick(&ctx, 1101, 100, expired, 64) == 1);
+    rudp_tick_result_s res_tick = rudp_tick(&ctx, 1101, 100, expired, 64);
+    assert(res_tick.count == 1 && res_tick.status == RUDP_OK);
     assert(expired[0] == 0);
     assert(ctx.tx_buffer[0].timestamp == 1101); // Timestamp updated to prevent spam
 
     // Immediate tick 1ms later at t=1102: must NOT re-expire immediately
-    assert(rudp_tick(&ctx, 1102, 100, expired, 64) == 0);
+    assert(rudp_tick(&ctx, 1102, 100, expired, 64).count == 0);
 
     // At t=1202 (101ms after retransmission): expires again
-    assert(rudp_tick(&ctx, 1202, 100, expired, 64) == 1);
+    assert(rudp_tick(&ctx, 1202, 100, expired, 64).count == 1);
 
     // --- C. Stale / Duplicate ACKs ---
     // Acknowledge packet 0 with ACK=1 (N+1)
@@ -292,10 +295,10 @@ void test_reliability_edge_cases() {
     assert(rudp_recv_ack(&ctx, 10) == RUDP_ERR_OUT_OF_WINDOW);
 
     // --- E. Invalid tick arguments ---
-    assert(rudp_tick(NULL, 1000, 100, expired, 64) == RUDP_ERR_INVALID_ARG);
-    assert(rudp_tick(&ctx, 1000, 100, NULL, 64) == RUDP_ERR_INVALID_ARG);
-    assert(rudp_tick(&ctx, 1000, 100, expired, 0) == RUDP_ERR_INVALID_ARG);
-    assert(rudp_tick(&ctx, 1000, 100, expired, -1) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_tick(NULL, 1000, 100, expired, 64).status == RUDP_ERR_INVALID_ARG);
+    assert(rudp_tick(&ctx, 1000, 100, NULL, 64).status == RUDP_ERR_INVALID_ARG);
+    assert(rudp_tick(&ctx, 1000, 100, expired, 0).status == RUDP_ERR_INVALID_ARG);
+    assert(rudp_tick(&ctx, 1000, 100, expired, -1).status == RUDP_ERR_INVALID_ARG);
 
     printf("[OK] Reliability Edge Cases (Timeout boundaries, anti-spam tick, stale ACKs, rollover rejection)\n");
 }
@@ -383,7 +386,7 @@ void test_fast_retransmit_tri_ack() {
     assert(ctx.tx_buffer[0].timestamp == 1000);
 
     // Under normal circumstances at t=1020ms (only 20ms elapsed), rudp_tick would return 0
-    assert(rudp_tick(&ctx, 1020, 100, expired, 64) == 0);
+    assert(rudp_tick(&ctx, 1020, 100, expired, 64).count == 0);
 
     // Initial ACK 0 arrives (1st observation: baseline reference recorded)
     assert(rudp_recv_ack(&ctx, 0) == RUDP_OK);
@@ -416,7 +419,8 @@ void test_fast_retransmit_tri_ack() {
     ctx.tx_buffer[0].fast_retransmit = RUDP_FAST_RETRANSMIT_PENDING; // Restore flag for test
 
     // Immediate tick at t=1025ms (well before the 100ms timeout!):
-    assert(rudp_tick(&ctx, 1025, 100, expired, 64) == 1);
+    rudp_tick_result_s tri_res = rudp_tick(&ctx, 1025, 100, expired, 64);
+    assert(tri_res.count == 1 && tri_res.status == RUDP_OK);
     assert(expired[0] == 0);
     assert(ctx.tx_buffer[0].fast_retransmit == RUDP_FAST_RETRANSMIT_OFF); // Flag cleared after tick
     assert(ctx.tx_buffer[0].frame.header.ack == 42); // Header ACK dynamically refreshed!
@@ -449,27 +453,48 @@ void test_dead_peer_detection() {
     // Simulate 10 consecutive timeouts (RUDP_MAX_RETRIES) without receiving an ACK
     for (int retry = 1; retry <= RUDP_MAX_RETRIES; retry++) {
         current_time += 110; // Advance past the 100ms timeout
-        assert(rudp_tick(&ctx, current_time, 100, expired, 64) == 1);
+        rudp_tick_result_s tick_res = rudp_tick(&ctx, current_time, 100, expired, 64);
+        assert(tick_res.count == 1 && tick_res.status == RUDP_OK);
         assert(ctx.tx_buffer[0].retries == retry);
         assert(ctx.state == RUDP_STATE_CONNECTED); // Still connected while retrying
     }
 
     // 11th timeout: Exceeds RUDP_MAX_RETRIES -> Dead peer declared!
     current_time += 110;
-    assert(rudp_tick(&ctx, current_time, 100, expired, 64) == RUDP_ERR_DISCONNECTED); // Dead peer error returned
-    assert(ctx.state == RUDP_STATE_DISCONNECTED);                                      // State switched to DISCONNECTED
+    rudp_tick_result_s dead_res = rudp_tick(&ctx, current_time, 100, expired, 64);
+    assert(dead_res.status == RUDP_ERR_DISCONNECTED); // Dead peer error returned
+    assert(ctx.state == RUDP_STATE_DISCONNECTED);      // State switched to DISCONNECTED
 
     // Test Zombie prevention: subsequent ticks are inert and return RUDP_ERR_DISCONNECTED immediately
-    assert(rudp_tick(&ctx, current_time + 110, 100, expired, 64) == RUDP_ERR_DISCONNECTED);
+    assert(rudp_tick(&ctx, current_time + 110, 100, expired, 64).status == RUDP_ERR_DISCONNECTED);
     // Test send rejection on disconnected context
     assert(rudp_send(&ctx, dummy, current_time + 110) == RUDP_ERR_DISCONNECTED);
+
+    // Test Preservation of collected indices when slot trips limit:
+    assert(rudp_reset(&ctx) == RUDP_OK);
+    assert(rudp_send(&ctx, dummy, 1000) == RUDP_OK); // Slot 0
+    assert(rudp_send(&ctx, dummy, 1000) == RUDP_OK); // Slot 1
+    ctx.tx_buffer[0].retries = 3;                  // Slot 0 expired but below limit
+    ctx.tx_buffer[1].retries = RUDP_MAX_RETRIES;   // Slot 1 will trip on next tick
+    rudp_tick_result_s multi_dead = rudp_tick(&ctx, 1200, 100, expired, 64);
+    assert(multi_dead.status == RUDP_ERR_DISCONNECTED);
+    assert(multi_dead.count == 1);                 // Slot 0 was preserved in out_indices!
+    assert(expired[0] == 0);                       // Slot 0 index preserved!
 
     // Test rudp_reset restores healthy connection
     assert(rudp_reset(&ctx) == RUDP_OK);
     assert(ctx.state == RUDP_STATE_CONNECTED);
     assert(rudp_send(&ctx, dummy, current_time + 110) == RUDP_OK);
 
-    printf("[OK] Dead Peer & Zombie Prevention (Disconnected state enforced, rudp_reset validated)\n");
+    // Test rudp_get_unacked_slots accessor
+    uint16_t unacked[64];
+    assert(rudp_get_unacked_slots(NULL, unacked, 64) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_get_unacked_slots(&ctx, NULL, 64) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_get_unacked_slots(&ctx, unacked, 0) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_get_unacked_slots(&ctx, unacked, 64) == 1); // 1 packet in flight from line 487
+    assert(unacked[0] == 0);
+
+    printf("[OK] Dead Peer & Zombie Prevention (Preserve in-flight slots on dead peer & rudp_reset validated)\n");
 }
 
 int main(void) {
