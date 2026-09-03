@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     #define IS_LITTLE_ENDIAN 1
 #else
@@ -42,5 +46,9 @@ typedef union {
         uint16_t value ;
     };
 } tfv_packet_u;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // PROTOCOL_TFV_H

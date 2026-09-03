@@ -51,31 +51,40 @@ rudp_send(&ctx, packet, 1000);
 ### Handling ACKs and Retransmissions
 
 ```c
-// Receive an ACK for sequence number 0
-rudp_recv_ack(&ctx, 0);
+// Receive an ACK under N+1 convention: ACK=1 acknowledges packet 0
+rudp_recv_ack(&ctx, 1);
 
 // Check for timed-out packets (100ms timeout)
 uint16_t expired_slots[64];
-int count = rudp_tick(&ctx, 1200, 100, expired_slots, 64);
+rudp_tick_result_s res = rudp_tick(&ctx, 1200, 100, expired_slots, 64);
 
-for (int i = 0; i < count; i++) {
-    // Resend packet at expired_slots[i]
+if (res.status == RUDP_OK && res.count > 0) {
+    for (int i = 0; i < res.count; i++) {
+        const rudp_frame_s *frame = rudp_get_slot_frame(&ctx, expired_slots[i]);
+        // Resend frame via sendto()
+    }
 }
 ```
 
 ## Building & Testing
 
-The project includes a `Makefile` for easy compilation and testing.
+The project includes a `Makefile` for compilation, strict C11 compliance, and sanitizers.
 
 ### Run all tests
 ```bash
 make test
 ```
 
+### Run Memory & Undefined Behavior Sanitizers (ASan & UBSan)
+```bash
+make asan
+```
+
 ### Build individual tests
 ```bash
 make test_rudp
 make test_tfv
+make test_window
 ```
 
 ### Manual compilation (alternative)
