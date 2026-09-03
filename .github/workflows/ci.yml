@@ -21,3 +21,4 @@ jobs:
 
     - name: Run Memory Sanitizers (ASan & UBSan)
       run: make clean && make asan
+

@@ -21,3 +21,4 @@ If deployed in untrusted network environments or for security-sensitive game tra
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability or critical memory safety issue within `zcrudp`, please report it responsibly by contacting the repository maintainer via private security advisory on GitHub rather than opening a public issue.
+
