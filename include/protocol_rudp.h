@@ -10,19 +10,18 @@
 #error "RUDP_WINDOW_SIZE must be a power of 2 between 2 and 32768"
 #endif
 
-
-#ifdef RUDP_PACKED_STRUCTURES
-    #define RUDP_PACKED __attribute__((packed))
-#else
-    #define RUDP_PACKED
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 #define RUDP_SLOT_FREE      0
 #define RUDP_SLOT_IN_FLIGHT 1
 
+#define RUDP_FAST_RETRANSMIT_OFF     0 /**< Normal timer-based transmission */
+#define RUDP_FAST_RETRANSMIT_PENDING 1 /**< Fast retransmit flag raised by Tri-ACK */
+
 #define RUDP_WIRE_HEADER_SIZE 4 /**< Standalone header size (Tier 1: seq_num + ack) */
 #define RUDP_WIRE_FRAME_SIZE  8 /**< Standard frame size (Tier 2: Header + TFV Packet) */
-#define RUDP_WIRE_DYNAMIC_SIZE -1 /**< Dynamic stream frame size (Tier 3) */
 
 #define RUDP_STATE_DISCONNECTED 0 /**< Peer is disconnected or timed out */
 #define RUDP_STATE_CONNECTED    1 /**< Active healthy connection */
@@ -31,6 +30,13 @@
 #define RUDP_MAX_RETRIES        10 /**< Max retransmissions before declaring dead peer */
 #endif
 
+/* Standardized Return & Error Codes */
+#define RUDP_OK                  0  /**< Success / operation completed */
+#define RUDP_ERR_INVALID_ARG    -1  /**< NULL pointer or invalid argument */
+#define RUDP_ERR_DISCONNECTED   -2  /**< Connection dead or disconnected */
+#define RUDP_ERR_BUFFER_FULL    -3  /**< Transmission buffer is full */
+#define RUDP_ERR_OUT_OF_WINDOW  -4  /**< Sequence or ACK is outside active window boundaries */
+
 
 
 
@@ -38,6 +44,9 @@
 #include "protocol_tfv.h"
 #include <stdint.h>
 #include <stddef.h>
+
+
+
 
 
 /**
@@ -66,8 +75,9 @@ typedef struct {
     uint32_t timestamp;
     uint8_t state; /**< 0: RUDP_SLOT_FREE, 1: RUDP_SLOT_IN_FLIGHT */
     uint8_t retries; /**< Number of retransmission attempts for this slot */
-    uint8_t reserved[2]; /**< Padding for alignment */
-    
+    uint8_t fast_retransmit; /**< Flag indicating if fast retransmit is needed */
+    uint8_t reserved; /**< Padding for alignment */
+
 } rudp_slot_s; 
 
 /**
@@ -84,6 +94,14 @@ typedef struct {
     uint8_t  state;                          /**< Connection lifecycle state */
 } rudp_context_s;
 
+/**
+ * @brief Represents the result of a RUDP tick operation.
+ */
+typedef struct {
+    int count;  /**< Count of already-collected expired indices (>= 0) */
+    int status; /**< RUDP_OK (0), RUDP_ERR_DISCONNECTED (-2), RUDP_ERR_INVALID_ARG (-1) */
+} rudp_tick_result_s;
+
 
 /**
  * @brief Initializes a RUDP context.
@@ -92,6 +110,14 @@ typedef struct {
  * @return 0 on success, -1 on error.
  */
 int rudp_init(rudp_context_s *ctx);
+
+/**
+ * @brief Resets an existing RUDP context back to its initial connected state.
+ *
+ * @param ctx Pointer to the RUDP context.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_reset(rudp_context_s *ctx);
 
 /**
  * @brief Queues a packet for transmission into the sliding window.
@@ -124,36 +150,118 @@ int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_
 int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num);
 
 /**
- * @brief Serializes a RUDP frame into a network-ready Big-Endian byte buffer.
+ * @brief Serializes a 4-byte RUDP header into Big-Endian network format.
+ *
+ * @param header Pointer to the source header struct.
+ * @param out_buf Destination byte buffer.
+ * @param max_len Maximum capacity of destination buffer (must be >= RUDP_WIRE_HEADER_SIZE).
+ * @return Number of bytes written (4 on success), or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_pack_header(const rudp_header_s *header, uint8_t *out_buf, size_t max_len);
+
+/**
+ * @brief Serializes a 4-byte TFV packet payload into Big-Endian network format.
+ *
+ * @param packet Pointer to the source TFV packet.
+ * @param out_buf Destination byte buffer.
+ * @param max_len Maximum capacity of destination buffer (must be >= sizeof(tfv_packet_u)).
+ * @return Number of bytes written (4 on success), or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_pack_payload(const tfv_packet_u *packet, uint8_t *out_buf, size_t max_len);
+
+/**
+ * @brief Serializes a RUDP frame (Tier 2: 8 bytes) into a network-ready Big-Endian byte buffer.
  *
  * @param frame Pointer to the source frame.
  * @param out_buf Destination byte buffer.
  * @param max_len Maximum writable capacity of out_buf (must be >= RUDP_WIRE_FRAME_SIZE).
- * @return Number of bytes written (8 on success), or -1 on error.
+ * @return Number of bytes written (8 on success), or RUDP_ERR_INVALID_ARG on error.
  */
 int rudp_pack_frame(const rudp_frame_s *frame, uint8_t *out_buf, size_t max_len);
 
 /**
- * @brief Deserializes a network byte buffer into a RUDP frame struct.
+ * @brief Serializes a standalone cumulative ACK (Tier 1: 4 bytes) into network Big-Endian format.
+ *
+ * @param ack_num The cumulative sequence number being acknowledged.
+ * @param out_buf Destination byte buffer.
+ * @param max_len Maximum writable capacity of out_buf (must be >= RUDP_WIRE_HEADER_SIZE).
+ * @return Number of bytes written (4 on success), or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_pack_ack(uint16_t ack_num, uint8_t *out_buf, size_t max_len);
+
+/**
+ * @brief Decodes a 4-byte RUDP header from network Big-Endian format.
+ *
+ * @param in_buf Raw network bytes.
+ * @param in_len Length of input buffer (must be >= RUDP_WIRE_HEADER_SIZE).
+ * @param out_header Pointer to store the decoded header.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_unpack_header(const uint8_t *in_buf, size_t in_len, rudp_header_s *out_header);
+
+/**
+ * @brief Decodes a 4-byte TFV packet payload from Big-Endian network format.
+ *
+ * @param in_buf Raw network bytes.
+ * @param in_len Length of input buffer (must be >= sizeof(tfv_packet_u)).
+ * @param out_packet Pointer to store the extracted TFV packet.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_unpack_payload(const uint8_t *in_buf, size_t in_len, tfv_packet_u *out_packet);
+
+/**
+ * @brief Decodes a standalone ACK (Tier 1: 4 bytes) from network format.
+ *
+ * @param in_buf Raw network bytes.
+ * @param in_len Length of input buffer (must be >= RUDP_WIRE_HEADER_SIZE).
+ * @param out_ack Pointer to store the extracted ACK number.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_unpack_ack(const uint8_t *in_buf, size_t in_len, uint16_t *out_ack);
+
+/**
+ * @brief Deserializes a network byte buffer into a full RUDP frame struct (Tier 2: 8 bytes).
  *
  * @param in_buf Source byte buffer received from network.
  * @param in_len Number of bytes received (must be >= RUDP_WIRE_FRAME_SIZE).
  * @param out_frame Destination frame pointer.
- * @return 0 on success, or -1 on error.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
 int rudp_unpack_frame(const uint8_t *in_buf, size_t in_len, rudp_frame_s *out_frame);
 
+/**
+ * @brief Accessor retrieving a read-only pointer to the frame stored at a specific slot.
+ *
+ * @param ctx Pointer to the RUDP context.
+ * @param slot_idx Index of the slot in tx_buffer (0 to RUDP_WINDOW_SIZE - 1).
+ * @return Const pointer to the frame on success, or NULL if arguments are invalid.
+ */
+const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx, uint16_t slot_idx);
+
+/**
+ * @brief Collects the indices of all slots currently in flight and unacknowledged.
+ *
+ * @param ctx Pointer to the RUDP context.
+ * @param out_indices Destination array to store slot indices.
+ * @param max_indices Maximum capacity of out_indices.
+ * @return Number of indices written (>= 0), or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_get_unacked_slots(const rudp_context_s *ctx, uint16_t *out_indices, int max_indices);
 
 /**
  * @brief Handles retransmissions for timed-out packets.
- * * @param ctx The RUDP context.
+ *
+ * @param ctx The RUDP context.
  * @param now Current time in milliseconds.
  * @param timeout Retransmission timeout in milliseconds.
  * @param out_indices Array provided by the caller to be filled with expired slot indices.
  * @param max_indices The maximum number of indices the array can hold.
- * @return The number of packets marked for retransmission, or -1 on error.
+ * @return The number of packets marked for retransmission, or negative error code.
  */
-int rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out_indices, int max_indices);
+rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out_indices, int max_indices);
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif // PROTOCOL_RUDP_H
