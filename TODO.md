@@ -124,4 +124,8 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 - [ ] **Interactive CLI Demo (`examples/demo_loss.c`)**: Runnable 2-node client/server demo with configurable simulated packet loss and latency injection.
 - [ ] **Benchmarking Suite (`bench/bench_rudp.c`)**: Measure packet encoding/decoding throughput (Mpps) and latency (ns) with performance graphs for `README.md`.
 - [ ] **CMake Integration (`CMakeLists.txt`)**: Modern CMake build script alongside `Makefile` for one-click integration into game engines (Raylib, SDL2, Unreal, Godot).
-- [ ] **CI/CD & Memory Sanity (Low Priority / Non-urgent)**: GitHub Actions workflow with AddressSanitizer (ASan), UndefinedBehaviorSanitizer (UBSan), and Valgrind (proving 0 memory leaks / 0 undefined behaviors).
+- [ ] **One-Command Multi-Language Bindings (Python, Node/Bun, Rust, Go, C++)**:
+  - Provide a single command (e.g. `make bindings` or `pip install -e .`) to build and expose the C-ABI shared library (`librudp.so`).
+  - Python binding (via `ctypes` or `cffi`) for rapid bot scripting, headless test simulation, and AI game client training.
+  - Foreign Function Interface (FFI) templates for Node.js (`node-addon-api` / Bun FFI), Rust (bindgen crate), and Go (cgo).
+- [x] **CI/CD & Memory Sanity**: GitHub Actions workflow with AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan) verifying 0 memory leaks and 0 undefined behaviors.
