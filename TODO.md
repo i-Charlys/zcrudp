@@ -94,23 +94,31 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
   - **Tier 1 (4 bytes)**: Handle short header-only packets (`seq_num` + `ack`) for pure ACKs, heartbeats/pings, and connection signals.
   - **Tier 2 (8 bytes)**: Standard game frames (Header 4B + TFV 4B).
   - **Tier 3 (Multi-part Streaming)**: Stream large payloads (32-bit floats, text, files) via a TFV descriptor packet followed by $N$ pure 32-bit `packet.raw` frames (UTF-8 style scaling).
-- [ ] **Multi-Channel Architecture & Hardware Priority**: 
-  - Support independent channel contexts (e.g. Channel 0: Unreliable Movement, Channel 1: High-Priority Reliable Actions, Channel 2: Background Reliable Chat) to eliminate Head-of-Line blocking.
-  - Implement channel egress scheduler with priority preemption (critical actions preempt background queues before `sendto()`) and optional IP TOS/DSCP QoS socket tagging.
-- [ ] **Unreliable Channels**: Support fire-and-forget packets that bypass `tx_buffer` storage and retransmission (ideal for high-frequency game data like positions).
+- [ ] **Multi-Channel Architecture & User-Configurable Profiles**: 
+  - Provide a modular, policy-free channel configuration API using bitwise capability flags:
+    - `RUDP_CHANNEL_RELIABLE`: Guarantees delivery with sliding-window retransmissions.
+    - `RUDP_CHANNEL_UNRELIABLE`: High-frequency fire-and-forget (0 tx_buffer footprint, ideal for positions).
+    - `RUDP_CHANNEL_ENCRYPTED`: Cryptographically protected via WireGuard / Noise AEAD.
+    - `RUDP_CHANNEL_ORDERED`: Enforces strict sequencing vs unordered delivery.
+  - Allow the user/game developer to configure up to `RUDP_MAX_CHANNELS` channels with complete autonomy (e.g. 10 encrypted channels, 10 reliable channels, or any customized mix).
+  - Channel egress scheduler with priority preemption (critical channels preempt background queues before `sendto()`) and optional IP TOS/DSCP QoS socket tagging.
 - [ ] **1400-byte MTU Multiplexing / Bundling**: 
   - Implement batching of multiple payloads into a single standard 1400-byte UDP datagram.
   - Use implicit base-sequence indexing ($seq = base\_seq + k$) to eliminate 50% header overhead ($4\text{B header} + N \times 4\text{B payload}$ instead of repeating $8\text{B}$ per message).
 
 ---
 
-## 📌 Phase 5: Network Intelligence & Resilience (Advanced)
+## 📌 Phase 5: Security, Transport Intelligence & Dual Target (WireGuard & lwIP)
 *Depends on Phase 4.*
 
-- [ ] **Lightweight Header Checksum (CRC16 / Internet Checksum)**: Verify 16-bit header integrity to prevent bitflips on `ack` or `seq_num` from causing silent data loss or illegal window advancement.
-- [ ] **Randomized Initial Sequence Number (ISN) & Replay Defense**: Randomize `current_seq_num` at initialization/handshake to prevent delayed packets from past sessions colliding with a newly initialized context.
-- [ ] **Connection Lifecycle**: Implement lightweight `CONNECT` (SYN) and `DISCONNECT` (FIN) control frames for clean session handshakes and teardowns.
-- [ ] **Session / Connection ID in Handshake (Low Priority)**: Exchange a lightweight session identifier during `CONNECT` handshake to identify client sessions without bloating standard 8-byte frames.
+- [ ] **Dual-Target Network Stacks**:
+  - **Target A (Standard OS / Game Engines)**: Desktop, dedicated servers, and consoles using standard POSIX/BSD and Winsock UDP sockets.
+  - **Target B (Embedded / IoT / Robotics)**: Bare-metal and FreeRTOS microcontrollers (STM32, ESP32) using the lightweight **lwIP** stack with zero-malloc static buffers.
+- [ ] **WireGuard & Noise Protocol Cryptographic Layer**:
+  - Outsource encryption and authentication to the mathematically audited **Noise Protocol Framework** (ChaCha20-Poly1305 + Curve25519) for channels flagged with `RUDP_CHANNEL_ENCRYPTED`.
+  - On Target A: In-process lightweight Noise AEAD or native WireGuard tunnel encapsulation.
+  - On Target B: Embedded integration with **`wireguard-lwip`** for encrypted bare-metal communication.
+  - Eliminates the need for fragile homemade crypto, providing military-grade mutual authentication and replay defense.
 - [ ] **Adaptive RTT & Dynamic Timeout (Van Jacobson Algorithm)**: Measure sample ping (in ms) on each received ACK, track smoothed RTT (SRTT) and jitter (RTTVAR) using integer EWMA bit-shifts (`>> 3`, `>> 2`), and dynamically compute elastic timeout (`RTO = SRTT + 4 * RTTVAR`).
 - [ ] **Estimable / Dead-Reckoning Classification**: Categorize continuous data for local client-side physics interpolation/extrapolation on packet drop.
 - [ ] **XOR-based Forward Error Correction (FEC)**: Support generating and decoding XOR parity frames ($P = A \oplus B \oplus C$) to mathematically reconstruct lost frames locally on the receiver with 0ms round-trip latency.
@@ -124,4 +132,8 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 - [ ] **Interactive CLI Demo (`examples/demo_loss.c`)**: Runnable 2-node client/server demo with configurable simulated packet loss and latency injection.
 - [ ] **Benchmarking Suite (`bench/bench_rudp.c`)**: Measure packet encoding/decoding throughput (Mpps) and latency (ns) with performance graphs for `README.md`.
 - [ ] **CMake Integration (`CMakeLists.txt`)**: Modern CMake build script alongside `Makefile` for one-click integration into game engines (Raylib, SDL2, Unreal, Godot).
-- [ ] **CI/CD & Memory Sanity (Low Priority / Non-urgent)**: GitHub Actions workflow with AddressSanitizer (ASan), UndefinedBehaviorSanitizer (UBSan), and Valgrind (proving 0 memory leaks / 0 undefined behaviors).
+- [ ] **One-Command Multi-Language Bindings (Python, Node/Bun, Rust, Go, C++)**:
+  - Provide a single command (e.g. `make bindings` or `pip install -e .`) to build and expose the C-ABI shared library (`librudp.so`).
+  - Python binding (via `ctypes` or `cffi`) for rapid bot scripting, headless test simulation, and AI game client training.
+  - Foreign Function Interface (FFI) templates for Node.js (`node-addon-api` / Bun FFI), Rust (bindgen crate), and Go (cgo).
+- [x] **CI/CD & Memory Sanity**: GitHub Actions workflow with AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan) verifying 0 memory leaks and 0 undefined behaviors.
