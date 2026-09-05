@@ -238,13 +238,18 @@ int rudp_session_init(rudp_session_s *session) {
     }
 
     session->active_channels = 0;
+    session->reserved[0] = 0;
+    session->reserved[1] = 0;
+    session->reserved[2] = 0;
     for (uint8_t i = 0; i < RUDP_MAX_CHANNELS; i++) {
         session->channels[i].channel_id = i;
         session->channels[i].flags = RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED;
         session->channels[i].last_unreliable_seq = 0;
         session->channels[i].has_unreliable_seq = 0;
-        session->channels[i].reserved = 0;
+        session->channels[i].ack_pending = 0;
+        session->channels[i].last_ack_sent = 0;
         session->channels[i].next_unreliable_seq = 0;
+        session->channels[i].reserved = 0;
         rudp_init(&session->channels[i].ctx);
     }
 
@@ -588,6 +593,9 @@ int rudp_session_send_unreliable(rudp_session_s *session, uint8_t channel_id,
         return ret;
     }
 
+    ack_chan->last_ack_sent = d_header.ack;
+    ack_chan->ack_pending = 0;
+
     rudp_record_s record;
     record.channel_id = channel_id;
     record.flags = RUDP_RECORD_FLAG_UNRELIABLE;
@@ -652,13 +660,17 @@ int rudp_session_process_datagram(rudp_session_s *session, const uint8_t *in_buf
 
         rudp_channel_s *chan = &session->channels[rec.channel_id];
 
-        if (rec.flags & RUDP_RECORD_FLAG_RELIABLE) {
+        if (rec.flags & RUDP_RECORD_FLAG_ACK) {
+            /* Explicit multi-channel ACK record: routes cumulative ACK to target channel */
+            rudp_recv_ack(&session->channels[rec.channel_id].ctx, rec.seq_num);
+        } else if (rec.flags & RUDP_RECORD_FLAG_RELIABLE) {
             /* Reliable delivery via channel sliding window */
             if (rec.seq_num == chan->ctx.expected_seq_num) {
                 if ((size_t)delivered_count < max_delivered) {
                     out_delivered[delivered_count++] = rec;
                 }
                 chan->ctx.expected_seq_num++;
+                chan->ack_pending = 1;
             }
         } else {
             /* Unreliable delivery via 16-bit anti-rollback sequence filter (RFC 1982) */

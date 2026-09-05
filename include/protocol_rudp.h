@@ -25,8 +25,9 @@ extern "C" {
 #define RUDP_WIRE_DATAGRAM_HEADER_SIZE 4 /**< Datagram header size on wire (ack + ack_channel + count) */
 #define RUDP_WIRE_RECORD_SIZE          8 /**< Message record size on wire (channel_id + flags + seq_num + tfv) */
 
-#define RUDP_RECORD_FLAG_RELIABLE    (1U << 0) /**< Reliable message requiring sliding window delivery */
 #define RUDP_RECORD_FLAG_UNRELIABLE  (0U)      /**< Unreliable fire-and-forget message */
+#define RUDP_RECORD_FLAG_RELIABLE    (1U << 0) /**< Reliable message requiring sliding window delivery */
+#define RUDP_RECORD_FLAG_ACK         (1U << 1) /**< Explicit multi-channel ACK record (seq_num carries ACK N+1) */
 
 #define RUDP_STATE_DISCONNECTED 0 /**< Peer is disconnected or timed out */
 #define RUDP_STATE_CONNECTED    1 /**< Active healthy connection */
@@ -150,8 +151,10 @@ typedef struct {
     uint8_t channel_id;           /**< Channel identifier (0 to RUDP_MAX_CHANNELS - 1) */
     uint16_t last_unreliable_seq; /**< Last accepted unreliable sequence number (RX anti-rollback) */
     uint8_t  has_unreliable_seq;  /**< Flag: 1 if last_unreliable_seq is initialized, 0 otherwise */
-    uint8_t  reserved;            /**< Padding byte for 16-bit alignment */
+    uint8_t  ack_pending;         /**< Flag: 1 if new reliable packet received needing ACK */
+    uint16_t last_ack_sent;       /**< Last cumulative ACK transmitted for this channel */
     uint16_t next_unreliable_seq; /**< Next unreliable sequence number to transmit (TX) */
+    uint16_t reserved;            /**< Explicit padding for strict 32-bit boundary alignment */
     rudp_context_s ctx;           /**< Dedicated sliding window context (used if RELIABLE) */
 } rudp_channel_s;
 
@@ -161,6 +164,7 @@ typedef struct {
 typedef struct {
     rudp_channel_s channels[RUDP_MAX_CHANNELS]; /**< Multi-channel array */
     uint8_t active_channels;                     /**< Number of configured channels */
+    uint8_t reserved[3];                         /**< Explicit padding to 32-bit boundary */
 } rudp_session_s;
 
 /**

@@ -855,6 +855,111 @@ void test_multi_channel_datagram_session(void) {
     printf("[OK] Multi-Channel Datagram Session (Bundling, Dispatch, Standalone ACK & Free Window verified)\n");
 }
 
+// --- 15. Multi-Channel Explicit ACK Record Bundling (AI KV-Cache & Speculative Streaming) ---
+void test_multi_channel_record_ack_bundling(void) {
+    rudp_session_s prefill_node; // Sender of KV Chunks & Cluster Barrier
+    rudp_session_s decode_node;  // Sender of Speculative Tokens & Multi-ACKs
+    assert(rudp_session_init(&prefill_node) == RUDP_OK);
+    assert(rudp_session_init(&decode_node) == RUDP_OK);
+
+    // Channel 0: KV-Cache Attention Chunks (Reliable In-Order)
+    assert(rudp_session_config_channel(&prefill_node, 0, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED) == RUDP_OK);
+    assert(rudp_session_config_channel(&decode_node, 0, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED) == RUDP_OK);
+
+    // Channel 1: Speculative Draft Tokens / Logits (Unreliable Bypass)
+    assert(rudp_session_config_channel(&prefill_node, 1, RUDP_CHANNEL_FLAG_UNRELIABLE) == RUDP_OK);
+    assert(rudp_session_config_channel(&decode_node, 1, RUDP_CHANNEL_FLAG_UNRELIABLE) == RUDP_OK);
+
+    // Channel 2: Cluster Consensus / Barrier (Reliable In-Order)
+    assert(rudp_session_config_channel(&prefill_node, 2, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED) == RUDP_OK);
+    assert(rudp_session_config_channel(&decode_node, 2, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED) == RUDP_OK);
+
+    // Step 1: Prefill node emits KV Chunk on Channel 0 AND Barrier on Channel 2
+    tfv_packet_u kv_chunk = { .type = 1, .flags = 0, .value = 5555 };
+    assert(rudp_send(&prefill_node.channels[0].ctx, kv_chunk, 100) == RUDP_OK);
+    assert(prefill_node.channels[0].ctx.tx_buffer[0].state == RUDP_SLOT_IN_FLIGHT);
+
+    tfv_packet_u barrier = { .type = 2, .flags = 0, .value = 9999 };
+    assert(rudp_send(&prefill_node.channels[2].ctx, barrier, 100) == RUDP_OK);
+    assert(prefill_node.channels[2].ctx.tx_buffer[0].state == RUDP_SLOT_IN_FLIGHT);
+
+    // Step 2: Decode node receives both packets (via bundled datagram from prefill)
+    uint8_t fwd_datagram[64];
+    rudp_datagram_header_s fwd_hdr = { .ack = 0, .ack_channel = 0, .count = 2 };
+    rudp_pack_datagram_header(&fwd_hdr, fwd_datagram, sizeof(fwd_datagram));
+
+    rudp_record_s fwd_recs[2];
+    fwd_recs[0].channel_id = 0;
+    fwd_recs[0].flags = RUDP_RECORD_FLAG_RELIABLE;
+    fwd_recs[0].seq_num = 0;
+    fwd_recs[0].payload = kv_chunk;
+    rudp_pack_record(&fwd_recs[0], fwd_datagram + 4, sizeof(fwd_datagram) - 4);
+
+    fwd_recs[1].channel_id = 2;
+    fwd_recs[1].flags = RUDP_RECORD_FLAG_RELIABLE;
+    fwd_recs[1].seq_num = 0;
+    fwd_recs[1].payload = barrier;
+    rudp_pack_record(&fwd_recs[1], fwd_datagram + 12, sizeof(fwd_datagram) - 12);
+
+    rudp_record_s delivered_to_decode[4];
+    int count = rudp_session_process_datagram(&decode_node, fwd_datagram, 20, delivered_to_decode, 4);
+    assert(count == 2);
+    assert(decode_node.channels[0].ctx.expected_seq_num == 1);
+    assert(decode_node.channels[0].ack_pending == 1); // ACK pending on Channel 0!
+    assert(decode_node.channels[2].ctx.expected_seq_num == 1);
+    assert(decode_node.channels[2].ack_pending == 1); // ACK pending on Channel 2!
+
+    // Step 3: Decode node responds with 1 SINGLE DATAGRAM that simultaneously:
+    // - Header ACK: confirms Channel 0 (KV-Cache, ack=1)
+    // - Record 0: explicit ACK record for Channel 2 (Barrier, ack=1, flags=FLAG_ACK)
+    // - Record 1: speculative draft token for Channel 1 (Unreliable, token_id=4242)
+    uint8_t reply_datagram[64];
+    rudp_datagram_header_s reply_hdr = {
+        .ack = decode_node.channels[0].ctx.expected_seq_num, // ack = 1 for Channel 0
+        .ack_channel = 0,
+        .count = 2
+    };
+    rudp_pack_datagram_header(&reply_hdr, reply_datagram, sizeof(reply_datagram));
+
+    // Record 0: Explicit ACK record for Channel 2
+    rudp_record_s rec_ack_ch2 = {
+        .channel_id = 2,
+        .flags = RUDP_RECORD_FLAG_ACK,
+        .seq_num = decode_node.channels[2].ctx.expected_seq_num, // ack = 1 for Channel 2
+        .payload = { .raw = 0 }
+    };
+    rudp_pack_record(&rec_ack_ch2, reply_datagram + 4, sizeof(reply_datagram) - 4);
+
+    // Record 1: Speculative token on Channel 1
+    tfv_packet_u draft_token = { .type = 50, .flags = 0, .value = 4242 };
+    rudp_record_s rec_draft = {
+        .channel_id = 1,
+        .flags = RUDP_RECORD_FLAG_UNRELIABLE,
+        .seq_num = decode_node.channels[1].next_unreliable_seq++,
+        .payload = draft_token
+    };
+    rudp_pack_record(&rec_draft, reply_datagram + 12, sizeof(reply_datagram) - 12);
+
+    // Step 4: Prefill node processes the 20-byte reply datagram
+    rudp_record_s delivered_to_prefill[4];
+    count = rudp_session_process_datagram(&prefill_node, reply_datagram, 20, delivered_to_prefill, 4);
+
+    // Only the draft token is delivered to application; ACK records are absorbed internally!
+    assert(count == 1);
+    assert(delivered_to_prefill[0].channel_id == 1);
+    assert(delivered_to_prefill[0].flags == RUDP_RECORD_FLAG_UNRELIABLE);
+    assert(delivered_to_prefill[0].payload.value == 4242);
+
+    // Verify BOTH sliding windows on Prefill node were freed in a single datagram:
+    assert(prefill_node.channels[0].ctx.tx_buffer[0].state == RUDP_SLOT_FREE); // Channel 0 freed!
+    assert(prefill_node.channels[0].ctx.tail == 1);
+
+    assert(prefill_node.channels[2].ctx.tx_buffer[0].state == RUDP_SLOT_FREE); // Channel 2 freed by ACK record!
+    assert(prefill_node.channels[2].ctx.tail == 1);
+
+    printf("[OK] Multi-Channel Explicit ACK Record Bundling (Simultaneous Multi-ACK & Stream Multiplexing verified)\n");
+}
+
 int main(void) {
     printf("--- MEMORY SIZE TESTS ---\n");
     printf("Header Size  : %zu bytes\n", sizeof(rudp_header_s));
@@ -881,6 +986,7 @@ int main(void) {
     test_datagram_bundling_and_validation();
     test_unreliable_fast_bypass_and_anti_rollback();
     test_multi_channel_datagram_session();
+    test_multi_channel_record_ack_bundling();
 
     printf("\n>>> ALL TESTS PASSED SUCCESSFULLY! <<<\n");
 
