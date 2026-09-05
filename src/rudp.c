@@ -3,55 +3,85 @@
 
 /*
  * ============================================================================
- * RUDP MEMORY & PACKET ARCHITECTURE
+ * RUDP MULTI-CHANNEL & UNIFIED DATAGRAM ARCHITECTURE
  * ============================================================================
  *
- * 1. RUDP_CONTEXT_S (The "Engine" - Full Protocol State Machine)
- * +-------------------+------------+------------+---------------------------+
- * | current_seq_num   | head (2B)  | tail (2B)  | tx_buffer (64 Slots)      |
- * | (Next seq to use) | (Write idx)| (Read idx) | (~1 KB Ring Buffer)       |
- * +-------------------+------------+------------+---------------------------+
- *                                                              |
- *                                                              v
- * 2. TX_BUFFER (Circular Array - 64 Slots / Sliding Window)
- * +---------------+---------------+---------------+ ... +---------------+
- * |    Slot 0     |    Slot 1     |    Slot 2     |     |    Slot 63    |
- * +---------------+---------------+---------------+ ... +---------------+
- *         |
- *         v
- * 3. RUDP_SLOT_S (The "Storage Container" - 16B aligned)
- * +---------------------+-----------------------+-----------------------------+
- * | state (1B)          | timestamp (4B)        | FRAME (8B)                  |
- * | (FREE / IN_FLIGHT)  | (Sent time in ms)     | (Network Wire Packet)       |
- * +---------------------+-----------------------+-----------------------------+
- *   <------------- Local Memory ------------->    <------ Wire Payload ------>
- *                                                              |
- *                                                              v
- * 4. RUDP_FRAME_S (The "Wire Packet" - Exactly 8 Bytes on Network)
- * +-------------------------------------+-------------------------------------+
- * |             HEADER (4B)             |             PACKET (4B)             |
- * +------------------+------------------+---------+-----------+---------------+
- * | seq_num (2B)     | ack (2B)         | type    | flags     | value         |
- * | (16-bit sequence)| (Cumulative ACK) | (8-bit) | (8-bit)   | (16-bit val)  |
- * +------------------+------------------+---------+-----------+---------------+
- *   <------- Protocol Control ------->    <-------- TFV Data Payload ------->
+ * 1. LOCAL MEMORY HIERARCHY (ZERO-MALLOC, CACHE-FRIENDLY STATIC LAYOUT)
+ *
+ * +-------------------------------------------------------------------------+
+ * | RUDP_SESSION_S (4180 Bytes Total)                                       |
+ * |                                                                         |
+ * | channels[0..3] (4 Channels x 1044 Bytes = 4176 Bytes)                   |
+ * | active_channels (1 Byte) + padding (3 Bytes)                            |
+ * +-------------------------------------------------------------------------+
+ *   |
+ *   v
+ * +-------------------------------------------------------------------------+
+ * | RUDP_CHANNEL_S (1044 Bytes per Channel)                                 |
+ * |                                                                         |
+ * | Byte 0: flags (1B)                 | Byte 1: channel_id (1B)            |
+ * | Bytes 2..3: last_unreliable_seq(2B)| Byte 4: has_unreliable_seq (1B)    |
+ * | Byte 5: reserved padding (1B)      | Bytes 6..7: next_unreliable_seq(2B)|
+ * |                                                                         |
+ * | Bytes 8..1043: ctx (RUDP_CONTEXT_S - 1036 Bytes)                        |
+ * |   - tx_buffer[64] : 64 slots x 16 Bytes = 1024 Bytes                    |
+ * |   - State Machine : 12 Bytes (head, tail, seq, expected, ack, etc.)     |
+ * +-------------------------------------------------------------------------+
  *
  * ============================================================================
- * 5. PROTOCOL DATA FLOW & SYMMETRY (TX / RX PIPELINE)
+ * 2. UNIFIED WIRE FORMAT (NETWORK DATAGRAM & MULTI-CHANNEL BUNDLING)
  * ============================================================================
  *
- *  SENDER WORKFLOW (Game -> Network)         RECEIVER WORKFLOW (Network -> Game)
- *  ─────────────────────────────────         ───────────────────────────────────
- *  1. Game Data: tfv_packet_u                1. Raw Bytes from UDP socket
- *          │                                         │
- *          ▼                                         ▼
- *  2. rudp_send(ctx, packet, now);           2. rudp_unpack_frame(buf, len, &frame);
- *     (Assigns seq, ack, queues in tx_buf)      (Converts raw bytes to rudp_frame_s)
- *          │                                         │
- *          ▼                                         ▼
- *  3. rudp_pack_frame(&frame, buf, 8);       3. rudp_recv(ctx, &frame, &out_packet);
- *     (Serializes 8B Big-Endian for socket)     (Processes incoming ACK, drops dups,
- *                                                and delivers tfv_packet_u to game!)
+ * A single UDP Datagram can bundle multiple messages from DIFFERENT channels:
+ *
+ * +----------------------------------+---------------------------------------+
+ * | DATAGRAM HEADER (4 Bytes)        | BUNDLED RECORDS (count x 8 Bytes)     |
+ * +-----------------+--------+-------+---------------------------------------+
+ * | ack (2B)        | ack_ch | count | Record 0 (8B) | Record 1 (8B) | ...   |
+ * | (Cumulative ACK)| (1B)   | (1B)  | (Channel A)   | (Channel B)   |       |
+ * +-----------------+--------+-------+---------------+---------------+-------+
+ *
+ * A. STANDALONE ACK (count == 0, exactly 4 Bytes):
+ * +------------------------------------+
+ * | ack (2B)      | ack_chan (1B) | 0  |
+ * +------------------------------------+
+ *
+ * B. BUNDLED MULTI-CHANNEL DATAGRAM (e.g., count == 2, 20 Bytes on wire):
+ * +-------------------------------------------------------------------------+
+ * | Header (4B) : ack=42, ack_channel=0, count=2                            |
+ * +-------------------------------------------------------------------------+
+ * | Record 0 (8B) -> Channel 0 [RELIABLE]   | seq=5 | tfv=ChatMsg           |
+ * +-------------------------------------------------------------------------+
+ * | Record 1 (8B) -> Channel 1 [UNRELIABLE] | seq=9 | tfv=PlayerPos         |
+ * +-------------------------------------------------------------------------+
+ *   -> Total Wire Length: 4 + (2 x 8) = 20 Bytes (fits in 84B Ethernet floor)
+ *
+ * ============================================================================
+ * 3. RECORD WIRE LAYOUT (8 Bytes - Zero Padding)
+ * ============================================================================
+ * +--------------+------------+------------------+--------------------------+
+ * | channel_id   | flags      | seq_num          | tfv_packet_u             |
+ * | (1 Byte)     | (1 Byte)   | (2 Bytes)        | (4 Bytes)                |
+ * +--------------+------------+------------------+--------------------------+
+ *
+ * ============================================================================
+ * 4. MULTI-CHANNEL SESSION DISPATCH FLOW
+ * ============================================================================
+ *
+ *  SOCKET RX (in_buf, in_len)
+ *          │
+ *          ▼
+ *  rudp_session_process_datagram()
+ *          │
+ *          ├─► 1. Dispatch Piggybacked ACK:
+ *          │      rudp_recv_ack(&session->channels[header.ack_channel].ctx, header.ack);
+ *          │
+ *          └─► 2. For each Record (0 .. count - 1):
+ *                 chan = &session->channels[rec.channel_id];
+ *                 │
+ *                 ├── RELIABLE   ──► Sliding Window check (chan->ctx.expected_seq_num++)
+ *                 │
+ *                 └── UNRELIABLE ──► RFC 1982 Anti-Rollback filter (last_unreliable_seq)
  * ============================================================================
  */
 /**
