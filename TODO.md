@@ -99,7 +99,11 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
   - [x] Implement multi-channel session structures (`rudp_channel_s`, `rudp_session_s`) with zero dynamic allocation (`RUDP_MAX_CHANNELS = 4`, ~4 KB footprint).
   - [x] Implement session initialization and channel configuration API (`rudp_session_init`, `rudp_session_config_channel`).
   - [ ] Channel egress scheduler with priority preemption (critical channels preempt background queues before `sendto()`) and optional IP TOS/DSCP QoS socket tagging.
-  - [ ] Unreliable channel send/receive bypass (0 `tx_buffer` footprint for high-frequency position data).
+  - [ ] **Next-Gen Unreliable Channel Engine (The 3-Tier Trinity)**:
+    - **Fast Memory Bypass**: Direct egress with zero `tx_buffer` allocation or copying, and anti-rollback sequence filtering on RX.
+    - **Track A (Ultra-Dense 4B Game Datagram)**: Leverage Tier 1 (4 bytes total) for compact input/angle telemetry without RUDP header overhead, cutting bandwidth by 50%.
+    - **Track B (Rolling Delta / 0ms Instant Recovery)**: Embed state $N$ alongside compact delta of state $N-1$ in Tier 2 (8 bytes) to mathematically reconstruct dropped frames on the receiver with 0ms round-trip latency.
+    - **Track C (Kinematic Adaptive Redundancy)**: Egress scheduler detects motion inflection points (acceleration/jerk) and automatically emits forward-cloned duplicates ($2\times$) without waiting for ACKs.
 - [ ] **1400-byte MTU Multiplexing / Bundling**: 
   - Implement batching of multiple payloads into a single standard 1400-byte UDP datagram.
   - Use implicit base-sequence indexing ($seq = base\_seq + k$) to eliminate 50% header overhead ($4\text{B header} + N \times 4\text{B payload}$ instead of repeating $8\text{B}$ per message).
