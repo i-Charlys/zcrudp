@@ -9,23 +9,24 @@
  * 1. LOCAL MEMORY HIERARCHY (ZERO-MALLOC, CACHE-FRIENDLY STATIC LAYOUT)
  *
  * +-------------------------------------------------------------------------+
- * | RUDP_SESSION_S (4180 Bytes Total)                                       |
+ * | RUDP_SESSION_S (4212 Bytes Total)                                       |
  * |                                                                         |
- * | channels[0..3] (4 Channels x 1044 Bytes = 4176 Bytes)                   |
- * | active_channels (1 Byte) + padding (3 Bytes)                            |
+ * | channels[0..3] (4 Channels x 1052 Bytes = 4208 Bytes)                   |
+ * | active_channels (1B) + rr_cursor (1B) + reserved[2] (2B) = 4 Bytes      |
  * +-------------------------------------------------------------------------+
  *   |
  *   v
  * +-------------------------------------------------------------------------+
- * | RUDP_CHANNEL_S (1044 Bytes per Channel)                                 |
+ * | RUDP_CHANNEL_S (1052 Bytes per Channel)                                 |
  * |                                                                         |
  * | Byte 0: flags (1B)                 | Byte 1: channel_id (1B)            |
  * | Bytes 2..3: last_unreliable_seq(2B)| Byte 4: has_unreliable_seq (1B)    |
- * | Byte 5: reserved padding (1B)      | Bytes 6..7: next_unreliable_seq(2B)|
+ * | Byte 5: ack_pending (1B)           | Bytes 6..7: last_ack_sent (2B)     |
+ * | Bytes 8..9: next_unreliable_seq(2B)| Bytes 10..11: reserved (2B)        |
  * |                                                                         |
- * | Bytes 8..1043: ctx (RUDP_CONTEXT_S - 1036 Bytes)                        |
+ * | Bytes 12..1051: ctx (RUDP_CONTEXT_S - 1040 Bytes)                       |
  * |   - tx_buffer[64] : 64 slots x 16 Bytes = 1024 Bytes                    |
- * |   - State Machine : 12 Bytes (head, tail, seq, expected, ack, etc.)     |
+ * |   - State Machine : 16 Bytes (head, tail, seq, exp, ack, dup, st, rx)   |
  * +-------------------------------------------------------------------------+
  *
  * ============================================================================
@@ -108,6 +109,7 @@ int rudp_init(rudp_context_s *ctx) {
     ctx->last_ack_received = 0xFFFF; // Initialize to an invalid sequence number
     ctx->duplicate_ack_count = 0;
     ctx->state = RUDP_STATE_CONNECTED;
+    ctx->last_rx_time = 0;
 
     return RUDP_OK;
 }
@@ -146,6 +148,7 @@ int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now) {
     slot->state = RUDP_SLOT_IN_FLIGHT;
     slot->retries = 0;
     slot->fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
+    slot->tx_count = 0;
     slot->timestamp = now;
 
     ctx->current_seq_num = (ctx->current_seq_num + 1);
@@ -159,7 +162,8 @@ int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_
         return RUDP_ERR_INVALID_ARG;
     }
 
-    rudp_recv_ack(ctx, frame->header.ack); // Process the cumulative ACK from incoming frame
+    /* Passive ACK processing: incoming data frames do not count toward Fast Retransmit (RFC 5681) */
+    rudp_recv_ack_ex(ctx, frame->header.ack, false);
 
     /* Check if the incoming sequence number matches the expected sequence number */
     if (frame->header.seq_num == ctx->expected_seq_num) {
@@ -218,7 +222,9 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
     } else if (count_duplicate_ack && ctx->tail != ctx->head) {
         // Only deliberate ACKs (Standalone ACK or explicit ACK record) count toward Fast Retransmit!
         if (ack_num == ctx->last_ack_received) {
-            ctx->duplicate_ack_count++;
+            if (ctx->duplicate_ack_count < 255) {
+                ctx->duplicate_ack_count++;
+            }
 
             // Fast Retransmit Trigger: Exactly 3 duplicate ACKs signify packet loss
             if (ctx->duplicate_ack_count == 3) {
@@ -239,15 +245,28 @@ int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
     return rudp_recv_ack_ex(ctx, ack_num, true);
 }
 
+void rudp_touch(rudp_context_s *ctx, uint32_t now) {
+    if (ctx) {
+        ctx->last_rx_time = now;
+    }
+}
+
+bool rudp_is_alive(const rudp_context_s *ctx, uint32_t now, uint32_t idle_timeout) {
+    if (!ctx || ctx->state != RUDP_STATE_CONNECTED) {
+        return false;
+    }
+    return ((uint32_t)(now - ctx->last_rx_time) <= idle_timeout);
+}
+
 int rudp_session_init(rudp_session_s *session) {
     if (!session) {
         return RUDP_ERR_INVALID_ARG;
     }
 
     session->active_channels = 0;
+    session->rr_cursor = 0;
     session->reserved[0] = 0;
     session->reserved[1] = 0;
-    session->reserved[2] = 0;
     for (uint8_t i = 0; i < RUDP_MAX_CHANNELS; i++) {
         session->channels[i].channel_id = i;
         session->channels[i].flags = RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED;
@@ -301,12 +320,18 @@ int rudp_session_reset(rudp_session_s *session) {
         rudp_session_reset_channel(session, i);
     }
     session->active_channels = 0;
+    session->rr_cursor = 0;
+    session->reserved[0] = 0;
+    session->reserved[1] = 0;
 
     return RUDP_OK;
 }
 
 int rudp_session_send_reliable(rudp_session_s *session, uint8_t channel_id, tfv_packet_u payload, uint32_t now) {
     if (!session || channel_id >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (!(session->channels[channel_id].flags & RUDP_CHANNEL_FLAG_RELIABLE)) {
         return RUDP_ERR_INVALID_ARG;
     }
 
@@ -347,9 +372,13 @@ rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout
     while (current != ctx->head && count < max_indices) {
         rudp_slot_s *slot = &ctx->tx_buffer[current];
 
+        // Calculate timeout with binary exponential backoff (capped at 64x)
+        uint32_t shift = (slot->retries > 6) ? 6 : slot->retries;
+        uint32_t current_timeout = timeout << shift;
+
         // Check if slot has expired or has fast_retransmit flagged
         if (slot->state == RUDP_SLOT_IN_FLIGHT && 
-            (slot->fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING || (now - slot->timestamp > timeout))) 
+            (slot->fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING || ((uint32_t)(now - slot->timestamp) > current_timeout))) 
         {
             slot->fast_retransmit = RUDP_FAST_RETRANSMIT_OFF; // Clear fast retransmit flag
 
@@ -357,6 +386,7 @@ rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout
             slot->frame.header.ack = ctx->expected_seq_num;
 
             slot->retries++; // Increment the retry counter for this slot
+            slot->tx_count++;
 
             if (slot->retries > RUDP_MAX_RETRIES) {
                 // Mark the connection as disconnected if retries exceed the limit
@@ -612,7 +642,8 @@ int rudp_unpack_datagram(const uint8_t *in_buf, size_t in_len,
 }
 
 int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_channel,
-                                uint8_t *out_buf, size_t max_len) {
+                                uint8_t *out_buf, size_t max_len,
+                                uint32_t now, uint32_t timeout) {
     if (!session || !out_buf || primary_ack_channel >= RUDP_MAX_CHANNELS) {
         return RUDP_ERR_INVALID_ARG;
     }
@@ -620,10 +651,13 @@ int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_cha
         return RUDP_ERR_BUFFER_FULL;
     }
 
+    /* Clamp capacity to RUDP_DEFAULT_MTU to prevent IP fragmentation */
+    size_t effective_max = (max_len > RUDP_DEFAULT_MTU) ? RUDP_DEFAULT_MTU : max_len;
+
     rudp_channel_s *prim_chan = &session->channels[primary_ack_channel];
 
     /* Determine how many 8-byte records can fit into the provided buffer */
-    size_t cap_records = (max_len - RUDP_WIRE_DATAGRAM_HEADER_SIZE) / RUDP_WIRE_RECORD_SIZE;
+    size_t cap_records = (effective_max - RUDP_WIRE_DATAGRAM_HEADER_SIZE) / RUDP_WIRE_RECORD_SIZE;
     if (cap_records > 255) {
         cap_records = 255;
     }
@@ -631,7 +665,8 @@ int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_cha
     uint8_t count = 0;
 
     /* 1. Bundling priority: Multi-channel explicit ACK records for any other channel with ack_pending */
-    for (uint8_t c = 0; c < RUDP_MAX_CHANNELS && count < cap_records; c++) {
+    for (uint8_t i = 0; i < RUDP_MAX_CHANNELS && count < cap_records; i++) {
+        uint8_t c = (uint8_t)((session->rr_cursor + i) % RUDP_MAX_CHANNELS);
         if (c != primary_ack_channel && session->channels[c].ack_pending) {
             rudp_channel_s *chan = &session->channels[c];
             rudp_record_s rec;
@@ -641,7 +676,7 @@ int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_cha
             rec.payload.raw = 0;
 
             size_t offset = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)count * RUDP_WIRE_RECORD_SIZE);
-            int ret = rudp_pack_record(&rec, out_buf + offset, max_len - offset);
+            int ret = rudp_pack_record(&rec, out_buf + offset, effective_max - offset);
             if (ret != RUDP_WIRE_RECORD_SIZE) {
                 return ret;
             }
@@ -652,29 +687,67 @@ int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_cha
         }
     }
 
-    /* 2. Bundling priority: In-flight reliable slots waiting in channel tx_buffers */
-    for (uint8_t c = 0; c < RUDP_MAX_CHANNELS && count < cap_records; c++) {
+    /* 2. Bundling priority: In-flight reliable slots waiting in channel tx_buffers (Fair Round-Robin) */
+    for (uint8_t i = 0; i < RUDP_MAX_CHANNELS && count < cap_records; i++) {
+        uint8_t c = (uint8_t)((session->rr_cursor + i) % RUDP_MAX_CHANNELS);
         rudp_channel_s *chan = &session->channels[c];
+        if (chan->ctx.state != RUDP_STATE_CONNECTED) {
+            continue;
+        }
+
         uint16_t curr = chan->ctx.tail;
         while (curr != chan->ctx.head && count < cap_records) {
             rudp_slot_s *slot = &chan->ctx.tx_buffer[curr];
             if (slot->state == RUDP_SLOT_IN_FLIGHT) {
-                rudp_record_s rec;
-                rec.channel_id = c;
-                rec.flags = RUDP_RECORD_FLAG_RELIABLE;
-                rec.seq_num = slot->frame.header.seq_num;
-                rec.payload = slot->frame.packet;
-
-                size_t offset = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)count * RUDP_WIRE_RECORD_SIZE);
-                int ret = rudp_pack_record(&rec, out_buf + offset, max_len - offset);
-                if (ret != RUDP_WIRE_RECORD_SIZE) {
-                    return ret;
+                bool send_now = false;
+                if (slot->tx_count == 0) {
+                    send_now = true;
+                } else if (slot->fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING) {
+                    send_now = true;
+                } else if (timeout == 0) {
+                    send_now = true;
+                } else {
+                    uint32_t shift = (slot->retries > 6) ? 6 : slot->retries;
+                    uint32_t current_timeout = timeout << shift;
+                    if ((uint32_t)(now - slot->timestamp) > current_timeout) {
+                        send_now = true;
+                    }
                 }
-                count++;
+
+                if (send_now) {
+                    rudp_record_s rec;
+                    rec.channel_id = c;
+                    rec.flags = RUDP_RECORD_FLAG_RELIABLE;
+                    rec.seq_num = slot->frame.header.seq_num;
+                    rec.payload = slot->frame.packet;
+
+                    size_t offset = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)count * RUDP_WIRE_RECORD_SIZE);
+                    int ret = rudp_pack_record(&rec, out_buf + offset, effective_max - offset);
+                    if (ret != RUDP_WIRE_RECORD_SIZE) {
+                        return ret;
+                    }
+
+                    if (slot->tx_count == 0) {
+                        slot->tx_count = 1;
+                        slot->timestamp = now;
+                    } else {
+                        slot->retries++;
+                        slot->tx_count++;
+                        slot->timestamp = now;
+                        slot->fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
+                        if (slot->retries > RUDP_MAX_RETRIES) {
+                            chan->ctx.state = RUDP_STATE_DISCONNECTED;
+                        }
+                    }
+                    count++;
+                }
             }
             curr = (curr + 1) & (RUDP_WINDOW_SIZE - 1);
         }
     }
+
+    /* Advance round-robin cursor for next datagram egress */
+    session->rr_cursor = (uint8_t)((session->rr_cursor + 1) % RUDP_MAX_CHANNELS);
 
     /* 3. Pack the primary 4-byte datagram header at the beginning of out_buf */
     rudp_datagram_header_s d_header;
@@ -682,7 +755,7 @@ int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_cha
     d_header.ack_channel = primary_ack_channel;
     d_header.count = count;
 
-    int ret = rudp_pack_datagram_header(&d_header, out_buf, max_len);
+    int ret = rudp_pack_datagram_header(&d_header, out_buf, effective_max);
     if (ret != RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
         return ret;
     }
@@ -809,11 +882,12 @@ int rudp_session_process_datagram(rudp_session_s *session, const uint8_t *in_buf
                 /* If out_delivered is saturated, do not increment expected_seq_num and do not set ack_pending.
                  * The un-delivered record will be dropped, forcing the sender to retransmit it later. */
             } else {
-                /* Duplicate or retransmitted packet check (RFC 1982 sequence distance) */
-                int16_t diff = (int16_t)(rec.seq_num - chan->ctx.expected_seq_num);
-                if (diff < 0) {
-                    /* Peer retransmitted an earlier packet (its ACK may have been lost).
-                     * Re-arm ACK so next outgoing datagram unblocks the peer. */
+                /* Duplicate, retransmitted, or out-of-order gap packet check (RFC 1982 / RFC 5681) */
+                int32_t diff = (int16_t)(rec.seq_num - chan->ctx.expected_seq_num);
+                if (diff < 0 || (diff > 0 && diff < (int32_t)RUDP_WINDOW_SIZE)) {
+                    /* Peer retransmitted an earlier packet (its ACK may have been lost),
+                     * or a gap arrived (out-of-order packet).
+                     * Under RFC 5681, re-arm ACK immediately to trigger duplicate ACKs / break deadlocks! */
                     chan->ack_pending = 1;
                 }
             }
@@ -827,7 +901,7 @@ int rudp_session_process_datagram(rudp_session_s *session, const uint8_t *in_buf
                 }
             } else {
                 uint16_t distance = (uint16_t)(rec.seq_num - chan->last_unreliable_seq);
-                if (distance != 0 && distance < 0x8000U) {
+                if (distance != 0 && distance <= RUDP_UNRELIABLE_MAX_AHEAD) {
                     if ((size_t)delivered_count < max_delivered) {
                         chan->last_unreliable_seq = rec.seq_num;
                         out_delivered[delivered_count++] = rec;

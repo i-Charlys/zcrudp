@@ -40,6 +40,14 @@ extern "C" {
 #define RUDP_MAX_CHANNELS       4  /**< Default number of independent channels per session */
 #endif
 
+#if RUDP_MAX_CHANNELS < 1 || RUDP_MAX_CHANNELS > 255
+#error "RUDP_MAX_CHANNELS must be between 1 and 255"
+#endif
+
+#ifndef RUDP_UNRELIABLE_MAX_AHEAD
+#define RUDP_UNRELIABLE_MAX_AHEAD 512 /**< Maximum plausible sequence jump before rejecting as spurious */
+#endif
+
 /* Channel Capability Bitwise Flags */
 #define RUDP_CHANNEL_FLAG_UNRELIABLE  (0U)      /**< Fire-and-forget unreliable channel */
 #define RUDP_CHANNEL_FLAG_RELIABLE    (1U << 0) /**< Delivery guaranteed via sliding window retransmission */
@@ -97,7 +105,7 @@ typedef struct {
     uint8_t state; /**< 0: RUDP_SLOT_FREE, 1: RUDP_SLOT_IN_FLIGHT */
     uint8_t retries; /**< Number of retransmission attempts for this slot */
     uint8_t fast_retransmit; /**< Flag indicating if fast retransmit is needed */
-    uint8_t reserved; /**< Padding for alignment */
+    uint8_t tx_count;        /**< Number of transmissions on wire (0 = pending initial TX) */
 
 } rudp_slot_s; 
 
@@ -113,6 +121,7 @@ typedef struct {
     uint16_t last_ack_received;              /**< Last ACK number received from peer */
     uint8_t  duplicate_ack_count;            /**< Count of duplicate ACKs received (Fast Retransmit) */
     uint8_t  state;                          /**< Connection lifecycle state */
+    uint32_t last_rx_time;                   /**< Timestamp of last received packet/ACK for liveness */
 } rudp_context_s;
 
 /**
@@ -165,7 +174,8 @@ typedef struct {
 typedef struct {
     rudp_channel_s channels[RUDP_MAX_CHANNELS]; /**< Multi-channel array */
     uint8_t active_channels;                     /**< Number of configured channels */
-    uint8_t reserved[3];                         /**< Explicit padding to 32-bit boundary */
+    uint8_t rr_cursor;                           /**< Round-robin egress cursor for channel fairness */
+    uint8_t reserved[2];                         /**< Explicit padding to 32-bit boundary */
 } rudp_session_s;
 
 /* Compile-time verification of ABI struct sizes (C11 Static Asserts) */
@@ -174,11 +184,12 @@ _Static_assert(sizeof(rudp_frame_s) == 8, "rudp_frame_s size must be 8 bytes");
 _Static_assert(sizeof(rudp_slot_s) == 16, "rudp_slot_s size must be 16 bytes");
 _Static_assert(sizeof(rudp_datagram_header_s) == 4, "rudp_datagram_header_s size must be 4 bytes");
 _Static_assert(sizeof(rudp_record_s) == 8, "rudp_record_s size must be 8 bytes");
-#if RUDP_WINDOW_SIZE == 64 && RUDP_MAX_CHANNELS == 4
-_Static_assert(sizeof(rudp_context_s) == 1036, "rudp_context_s size must be 1036 bytes");
-_Static_assert(sizeof(rudp_channel_s) == 1048, "rudp_channel_s size must be 1048 bytes");
-_Static_assert(sizeof(rudp_session_s) == 4196, "rudp_session_s size must be 4196 bytes");
-#endif
+_Static_assert(sizeof(rudp_context_s) == (sizeof(rudp_slot_s) * (RUDP_WINDOW_SIZE) + 16),
+               "rudp_context_s size mismatch");
+_Static_assert(sizeof(rudp_channel_s) == (sizeof(rudp_context_s) + 12),
+               "rudp_channel_s size mismatch");
+_Static_assert(sizeof(rudp_session_s) == (sizeof(rudp_channel_s) * (RUDP_MAX_CHANNELS) + 4),
+               "rudp_session_s size mismatch");
 
 /**
  * @brief Initializes a multi-channel session.
@@ -234,10 +245,31 @@ int rudp_session_send_reliable(rudp_session_s *session, uint8_t channel_id, tfv_
  * @param primary_ack_channel Channel ID to acknowledge in the 4-byte datagram header.
  * @param out_buf Destination byte buffer.
  * @param max_len Maximum writable buffer capacity.
+ * @param now Current timestamp in milliseconds.
+ * @param timeout Retransmission timeout threshold in milliseconds.
  * @return Total number of bytes written (>= 4), or negative error code.
  */
 int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_channel,
-                                uint8_t *out_buf, size_t max_len);
+                                uint8_t *out_buf, size_t max_len,
+                                uint32_t now, uint32_t timeout);
+
+/**
+ * @brief Updates the last received timestamp on a RUDP context for liveness tracking.
+ *
+ * @param ctx Pointer to the RUDP context.
+ * @param now Current timestamp in milliseconds.
+ */
+void rudp_touch(rudp_context_s *ctx, uint32_t now);
+
+/**
+ * @brief Checks if a RUDP context connection is active and responsive within an idle timeout.
+ *
+ * @param ctx Pointer to the RUDP context.
+ * @param now Current timestamp in milliseconds.
+ * @param idle_timeout Max elapsed milliseconds without incoming traffic (0 disables idle check).
+ * @return true if connected and within idle timeout, false otherwise.
+ */
+bool rudp_is_alive(const rudp_context_s *ctx, uint32_t now, uint32_t idle_timeout);
 
 /**
  * @brief Serializes a 4-byte datagram header into Big-Endian network format.
@@ -347,7 +379,7 @@ int rudp_reset(rudp_context_s *ctx);
  * @param ctx Pointer to the RUDP context.
  * @param packet TFV packet payload to send.
  * @param now Current timestamp in milliseconds.
- * @return 0 on success, -1 if the transmission buffer is full.
+ * @return RUDP_OK on success, RUDP_ERR_BUFFER_FULL if buffer is full, RUDP_ERR_DISCONNECTED if disconnected, or RUDP_ERR_INVALID_ARG.
  */
 int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now);
 
@@ -358,7 +390,7 @@ int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now);
  * @param ctx Pointer to the RUDP context.
  * @param frame Pointer to the received RUDP frame.
  * @param out_packet Pointer to store the extracted TFV packet.
- * @return 1 on new in-order packet delivered, 0 if duplicate/out-of-order, -1 on error (e.g., NULL pointers).
+ * @return 1 on new packet delivered, 0 if duplicate/out-of-order, or negative RUDP_ERR_* code on error.
  */
 int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_packet);
 
@@ -370,7 +402,7 @@ int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_
  * @param ack_num Next expected sequence number from peer (N+1).
  * @param count_duplicate_ack true if this ACK is a deliberate standalone ACK or explicit ACK record,
  *                            false if this is a passive piggybacked ACK on unrelated data.
- * @return 0 on success, -1 if the ACK is out-of-window or corrupted.
+ * @return RUDP_OK on success, RUDP_ERR_OUT_OF_WINDOW if stale/ahead, or RUDP_ERR_INVALID_ARG.
  */
 int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate_ack);
 
@@ -379,7 +411,7 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
  *
  * @param ctx Pointer to the RUDP context.
  * @param ack_num Next expected sequence number from peer (N+1).
- * @return 0 on success, -1 if the ACK is out-of-window or corrupted.
+ * @return RUDP_OK on success, RUDP_ERR_OUT_OF_WINDOW if stale/ahead, or RUDP_ERR_INVALID_ARG.
  */
 int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num);
 

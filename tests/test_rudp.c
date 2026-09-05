@@ -272,8 +272,12 @@ void test_reliability_edge_cases() {
     // Immediate tick 1ms later at t=1102: must NOT re-expire immediately
     assert(rudp_tick(&ctx, 1102, 100, expired, 64).count == 0);
 
-    // At t=1202 (101ms after retransmission): expires again
-    assert(rudp_tick(&ctx, 1202, 100, expired, 64).count == 1);
+    // Exponential backoff: retry 1 doubles timeout to 200ms
+    // At t=1202 (101ms after 1st retransmission): must NOT expire yet
+    assert(rudp_tick(&ctx, 1202, 100, expired, 64).count == 0);
+
+    // At t=1302 (201ms after 1st retransmission): expires again
+    assert(rudp_tick(&ctx, 1302, 100, expired, 64).count == 1);
 
     // --- C. Stale / Duplicate ACKs ---
     // Acknowledge packet 0 with ACK=1 (N+1)
@@ -451,9 +455,10 @@ void test_dead_peer_detection() {
 
     uint32_t current_time = 1000;
 
-    // Simulate 10 consecutive timeouts (RUDP_MAX_RETRIES) without receiving an ACK
+    // Simulate 10 consecutive timeouts (RUDP_MAX_RETRIES) with binary exponential backoff
     for (int retry = 1; retry <= RUDP_MAX_RETRIES; retry++) {
-        current_time += 110; // Advance past the 100ms timeout
+        uint32_t shift = (retry - 1 > 6) ? 6 : (retry - 1);
+        current_time += (100 << shift) + 10; // Advance past the backed-off timeout
         rudp_tick_result_s tick_res = rudp_tick(&ctx, current_time, 100, expired, 64);
         assert(tick_res.count == 1 && tick_res.status == RUDP_OK);
         assert(ctx.tx_buffer[0].retries == retry);
@@ -461,7 +466,8 @@ void test_dead_peer_detection() {
     }
 
     // 11th timeout: Exceeds RUDP_MAX_RETRIES -> Dead peer declared!
-    current_time += 110;
+    uint32_t shift = (RUDP_MAX_RETRIES > 6) ? 6 : RUDP_MAX_RETRIES;
+    current_time += (100 << shift) + 10;
     rudp_tick_result_s dead_res = rudp_tick(&ctx, current_time, 100, expired, 64);
     assert(dead_res.status == RUDP_ERR_DISCONNECTED); // Dead peer error returned
     assert(ctx.state == RUDP_STATE_DISCONNECTED);      // State switched to DISCONNECTED
@@ -477,7 +483,8 @@ void test_dead_peer_detection() {
     assert(rudp_send(&ctx, dummy, 1000) == RUDP_OK); // Slot 1
     ctx.tx_buffer[0].retries = 3;                  // Slot 0 expired but below limit
     ctx.tx_buffer[1].retries = RUDP_MAX_RETRIES;   // Slot 1 will trip on next tick
-    rudp_tick_result_s multi_dead = rudp_tick(&ctx, 1200, 100, expired, 64);
+    // Both slots timed out past their backed-off deadlines at t = 10000ms
+    rudp_tick_result_s multi_dead = rudp_tick(&ctx, 10000, 100, expired, 64);
     assert(multi_dead.status == RUDP_ERR_DISCONNECTED);
     assert(multi_dead.count == 1);                 // Slot 0 was preserved in out_indices!
     assert(expired[0] == 0);                       // Slot 0 index preserved!
@@ -977,7 +984,7 @@ void test_bug1_unreliable_stream_no_spurious_fast_retransmit(void) {
 
     // Bob receives packet 0
     uint8_t dgram[64];
-    int len = rudp_session_build_datagram(&alice, 0, dgram, sizeof(dgram));
+    int len = rudp_session_build_datagram(&alice, 0, dgram, sizeof(dgram), 1000, 100);
     assert(len == 12); // 4B hdr + 8B rec
     rudp_record_s delivered[4];
     assert(rudp_session_process_datagram(&bob, dgram, (size_t)len, delivered, 4) == 1);
@@ -1105,7 +1112,7 @@ void test_bug3_duplicate_reliable_packet_rearms_ack(void) {
 
     // Receiver gets packet 0
     uint8_t dgram[32];
-    int len = rudp_session_build_datagram(&sender, 0, dgram, sizeof(dgram));
+    int len = rudp_session_build_datagram(&sender, 0, dgram, sizeof(dgram), 1000, 100);
     assert(len == 12);
     rudp_record_s delivered[2];
     assert(rudp_session_process_datagram(&receiver, dgram, (size_t)len, delivered, 2) == 1);
@@ -1114,7 +1121,7 @@ void test_bug3_duplicate_reliable_packet_rearms_ack(void) {
 
     // Receiver creates ACK datagram to acknowledge packet 0
     uint8_t ack_dgram[32];
-    len = rudp_session_build_datagram(&receiver, 0, ack_dgram, sizeof(ack_dgram));
+    len = rudp_session_build_datagram(&receiver, 0, ack_dgram, sizeof(ack_dgram), 1000, 100);
     assert(len == 4); // count == 0
     assert(receiver.channels[0].ack_pending == 0); // ACK sent, pending cleared
 
@@ -1128,7 +1135,7 @@ void test_bug3_duplicate_reliable_packet_rearms_ack(void) {
     assert(receiver.channels[0].ack_pending == 1);
 
     // Receiver builds datagram to reply
-    len = rudp_session_build_datagram(&receiver, 0, ack_dgram, sizeof(ack_dgram));
+    len = rudp_session_build_datagram(&receiver, 0, ack_dgram, sizeof(ack_dgram), 1000, 100);
     assert(len == 4);
     assert(receiver.channels[0].ack_pending == 0);
 
@@ -1166,7 +1173,7 @@ void test_session_build_datagram_intra_tick_bundler(void) {
 
     // Build unified datagram with primary_ack_channel = 0
     uint8_t out_buf[128];
-    int built_len = rudp_session_build_datagram(&tx_session, 0, out_buf, sizeof(out_buf));
+    int built_len = rudp_session_build_datagram(&tx_session, 0, out_buf, sizeof(out_buf), 1000, 100);
     // Header (4B) + Ch2 ACK record (8B) + Ch0 reliable record (8B) + Ch1 reliable record (8B) = 28B
     assert(built_len == 28);
     assert(tx_session.channels[2].ack_pending == 0);
@@ -1190,20 +1197,296 @@ void test_session_build_datagram_intra_tick_bundler(void) {
     assert(parsed_recs[2].flags == RUDP_RECORD_FLAG_RELIABLE);
     assert(parsed_recs[2].seq_num == 0);
 
-    // Test buffer capacity truncation (max_len = 12 allows header + 1 record)
+    // Test buffer capacity truncation (max_len = 12 allows header + 1 record) on timeout retransmit
     uint8_t small_buf[12];
-    int small_len = rudp_session_build_datagram(&tx_session, 0, small_buf, sizeof(small_buf));
+    int small_len = rudp_session_build_datagram(&tx_session, 0, small_buf, sizeof(small_buf), 1200, 100);
     assert(small_len == 12);
     assert(rudp_unpack_datagram_header(small_buf, 12, &parsed_hdr) == RUDP_OK);
     assert(parsed_hdr.count == 1);
 
     // Test buffer too small (< 4 bytes)
-    assert(rudp_session_build_datagram(&tx_session, 0, small_buf, 3) == RUDP_ERR_BUFFER_FULL);
+    assert(rudp_session_build_datagram(&tx_session, 0, small_buf, 3, 1000, 100) == RUDP_ERR_BUFFER_FULL);
 
     // Test invalid channel ID
-    assert(rudp_session_build_datagram(&tx_session, 99, out_buf, sizeof(out_buf)) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_session_build_datagram(&tx_session, 99, out_buf, sizeof(out_buf), 1000, 100) == RUDP_ERR_INVALID_ARG);
 
     printf("[OK] Intra-Tick Bundler Verified: Multi-ACK and Multi-Channel Reliable In-Flight aggregation\n");
+}
+
+static void test_gap_triggered_fast_retransmit(void) {
+    rudp_session_s sender, receiver;
+    assert(rudp_session_init(&sender) == RUDP_OK);
+    assert(rudp_session_init(&receiver) == RUDP_OK);
+    assert(rudp_session_config_channel(&sender, 0, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED) == RUDP_OK);
+    assert(rudp_session_config_channel(&receiver, 0, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED) == RUDP_OK);
+
+    // Sender sends packets 0, 1, 2, 3, 4
+    for (uint16_t i = 0; i < 5; i++) {
+        tfv_packet_u p = { .type = 1, .flags = 0, .value = i };
+        assert(rudp_session_send_reliable(&sender, 0, p, 1000) == RUDP_OK);
+    }
+
+    // Packet 0 is delivered
+    uint8_t dgram[64];
+    rudp_record_s rec_delivered[4];
+    uint8_t out_p0[12];
+    rudp_datagram_header_s h0 = {0, 0, 1};
+    rudp_record_s r0 = {0, RUDP_RECORD_FLAG_RELIABLE, 0, {.value = 0}};
+    assert(rudp_pack_datagram_header(&h0, out_p0, sizeof(out_p0)) == 4);
+    assert(rudp_pack_record(&r0, out_p0 + 4, sizeof(out_p0) - 4) == 8);
+    assert(rudp_session_process_datagram(&receiver, out_p0, 12, rec_delivered, 4) == 1);
+    assert(receiver.channels[0].ctx.expected_seq_num == 1);
+    assert(receiver.channels[0].ack_pending == 1);
+
+    // Receiver ACKs packet 0 (ack=1)
+    int len = rudp_session_build_datagram(&receiver, 0, dgram, sizeof(dgram), 1000, 100);
+    assert(len == 4);
+    assert(rudp_session_process_datagram(&sender, dgram, (size_t)len, rec_delivered, 4) == 0);
+    assert(sender.channels[0].ctx.tail == 1); // Packet 0 freed
+
+    // SIMULATE DROP: Packet 1 is lost on the wire!
+    // Packets 2, 3, 4 arrive at receiver out-of-order (gap)
+    for (uint16_t seq = 2; seq <= 4; seq++) {
+        uint8_t gap_buf[12];
+        rudp_datagram_header_s gh = {0, 0, 1};
+        rudp_record_s gr = {0, RUDP_RECORD_FLAG_RELIABLE, seq, {.value = seq}};
+        assert(rudp_pack_datagram_header(&gh, gap_buf, sizeof(gap_buf)) == 4);
+        assert(rudp_pack_record(&gr, gap_buf + 4, sizeof(gap_buf) - 4) == 8);
+
+        // Gap record rejected from immediate delivery
+        assert(rudp_session_process_datagram(&receiver, gap_buf, 12, rec_delivered, 4) == 0);
+        // BUT receiver MUST re-arm ack_pending to send duplicate ACK!
+        assert(receiver.channels[0].ack_pending == 1);
+
+        // Receiver sends duplicate ACK back to sender
+        len = rudp_session_build_datagram(&receiver, 0, dgram, sizeof(dgram), 1000, 100);
+        assert(len == 4);
+        assert(rudp_session_process_datagram(&sender, dgram, (size_t)len, rec_delivered, 4) == 0);
+    }
+
+    // Sender has now received 3 duplicate ACKs (Tri-ACK) for expected_seq_num 1
+    assert(sender.channels[0].ctx.duplicate_ack_count == 3);
+    assert(sender.channels[0].ctx.tx_buffer[1].fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING);
+
+    // Fast Retransmit triggers immediately via rudp_tick at t=1010 without waiting for 100ms timeout!
+    uint16_t expired[4];
+    rudp_tick_result_s res = rudp_tick(&sender.channels[0].ctx, 1010, 100, expired, 4);
+    assert(res.status == RUDP_OK && res.count == 1);
+    assert(expired[0] == 1); // Slot 1 flagged and collected immediately
+
+    printf("[OK] Bug 3 (Tri-ACK Gap): Reliable sequence gap triggers ACK re-arming and prompt Tri-ACK Fast Retransmit\n");
+}
+
+static void test_duplicate_ack_saturation(void) {
+    rudp_context_s ctx;
+    assert(rudp_init(&ctx) == RUDP_OK);
+    tfv_packet_u p = {.type = 1, .flags = 0, .value = 123};
+    assert(rudp_send(&ctx, p, 1000) == RUDP_OK);
+
+    // Initial observation of baseline ACK=0
+    assert(rudp_recv_ack(&ctx, 0) == RUDP_OK);
+    assert(ctx.duplicate_ack_count == 0);
+
+    // Send 300 duplicate ACKs (packet 0 in flight, ack 0 is duplicate)
+    for (int i = 1; i <= 300; i++) {
+        assert(rudp_recv_ack(&ctx, 0) == RUDP_OK);
+        if (i == 3) {
+            assert(ctx.duplicate_ack_count == 3);
+            assert(ctx.tx_buffer[0].fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING);
+            // Simulate fast retransmit being handled
+            ctx.tx_buffer[0].fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
+        }
+    }
+
+    // Must saturate at 255 and NOT rollover to 0
+    assert(ctx.duplicate_ack_count == 255);
+    // Fast retransmit must not have been triggered again after count 3
+    assert(ctx.tx_buffer[0].fast_retransmit == RUDP_FAST_RETRANSMIT_OFF);
+
+    printf("[OK] Bug 4 (Saturating Duplicate ACK): duplicate_ack_count saturates at 255 without rollover\n");
+}
+
+static void test_unreliable_jump_bound_critical_2(void) {
+    rudp_session_s rx_session;
+    assert(rudp_session_init(&rx_session) == RUDP_OK);
+    assert(rudp_session_config_channel(&rx_session, 1, RUDP_CHANNEL_FLAG_UNRELIABLE) == RUDP_OK);
+
+    rudp_record_s delivered[4];
+    uint8_t buf[12];
+    rudp_datagram_header_s hdr = {0, 0, 1};
+
+    // Packet 0 with seq = 100 arrives
+    rudp_record_s r1 = {1, RUDP_RECORD_FLAG_UNRELIABLE, 100, {.value = 100}};
+    assert(rudp_pack_datagram_header(&hdr, buf, sizeof(buf)) == 4);
+    assert(rudp_pack_record(&r1, buf + 4, sizeof(buf) - 4) == 8);
+    assert(rudp_session_process_datagram(&rx_session, buf, 12, delivered, 4) == 1);
+    assert(rx_session.channels[1].last_unreliable_seq == 100);
+
+    // Valid forward jump: seq = 600 (distance = 500 <= 512)
+    rudp_record_s r2 = {1, RUDP_RECORD_FLAG_UNRELIABLE, 600, {.value = 600}};
+    assert(rudp_pack_record(&r2, buf + 4, sizeof(buf) - 4) == 8);
+    assert(rudp_session_process_datagram(&rx_session, buf, 12, delivered, 4) == 1);
+    assert(rx_session.channels[1].last_unreliable_seq == 600);
+
+    // Malicious forward jump: seq = 600 + 30000 (distance > 512)
+    rudp_record_s r_mal = {1, RUDP_RECORD_FLAG_UNRELIABLE, 30600, {.value = 999}};
+    assert(rudp_pack_record(&r_mal, buf + 4, sizeof(buf) - 4) == 8);
+    assert(rudp_session_process_datagram(&rx_session, buf, 12, delivered, 4) == 0);
+    assert(rx_session.channels[1].last_unreliable_seq == 600); // Unchanged!
+
+    // Malicious 32767 jump:
+    rudp_record_s r_32k = {1, RUDP_RECORD_FLAG_UNRELIABLE, (uint16_t)(600 + 32767), {.value = 999}};
+    assert(rudp_pack_record(&r_32k, buf + 4, sizeof(buf) - 4) == 8);
+    assert(rudp_session_process_datagram(&rx_session, buf, 12, delivered, 4) == 0);
+    assert(rx_session.channels[1].last_unreliable_seq == 600); // Unchanged!
+
+    // Legitimate packet seq = 601 is delivered promptly (channel NOT muted!)
+    rudp_record_s r3 = {1, RUDP_RECORD_FLAG_UNRELIABLE, 601, {.value = 601}};
+    assert(rudp_pack_record(&r3, buf + 4, sizeof(buf) - 4) == 8);
+    assert(rudp_session_process_datagram(&rx_session, buf, 12, delivered, 4) == 1);
+    assert(rx_session.channels[1].last_unreliable_seq == 601);
+
+    printf("[OK] Critical 2 (Bounded Unreliable Jump): RFC 1982 jump bounded to RUDP_UNRELIABLE_MAX_AHEAD\n");
+}
+
+static void test_bundler_retransmission_gating_and_fairness(void) {
+    rudp_session_s sess;
+    assert(rudp_session_init(&sess) == RUDP_OK);
+    for (uint8_t c = 0; c < 4; c++) {
+        assert(rudp_session_config_channel(&sess, c, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED) == RUDP_OK);
+        tfv_packet_u p = {.type = 1, .flags = 0, .value = c};
+        assert(rudp_session_send_reliable(&sess, c, p, 1000) == RUDP_OK);
+    }
+
+    // A. Round-Robin fairness test: datagram capacity of only 1 record
+    uint8_t small_buf[12];
+    rudp_datagram_header_s hdr;
+    rudp_record_s rec;
+
+    // Call 1: should pick channel 0
+    int len = rudp_session_build_datagram(&sess, 0, small_buf, sizeof(small_buf), 1000, 100);
+    assert(len == 12);
+    assert(rudp_unpack_datagram(small_buf, 12, &hdr, &rec, 1) == RUDP_OK);
+    assert(rec.channel_id == 0);
+
+    // Call 2: round-robin cursor picks channel 1
+    len = rudp_session_build_datagram(&sess, 0, small_buf, sizeof(small_buf), 1000, 100);
+    assert(len == 12);
+    assert(rudp_unpack_datagram(small_buf, 12, &hdr, &rec, 1) == RUDP_OK);
+    assert(rec.channel_id == 1);
+
+    // Call 3: round-robin cursor picks channel 2
+    len = rudp_session_build_datagram(&sess, 0, small_buf, sizeof(small_buf), 1000, 100);
+    assert(len == 12);
+    assert(rudp_unpack_datagram(small_buf, 12, &hdr, &rec, 1) == RUDP_OK);
+    assert(rec.channel_id == 2);
+
+    // Call 4: round-robin cursor picks channel 3
+    len = rudp_session_build_datagram(&sess, 0, small_buf, sizeof(small_buf), 1000, 100);
+    assert(len == 12);
+    assert(rudp_unpack_datagram(small_buf, 12, &hdr, &rec, 1) == RUDP_OK);
+    assert(rec.channel_id == 3);
+
+    // B. Retransmission Gating:
+    // At t = 1010 (10ms later, timeout is 100ms), all 4 packets have been sent once and not timed out
+    uint8_t big_buf[256];
+    len = rudp_session_build_datagram(&sess, 0, big_buf, sizeof(big_buf), 1010, 100);
+    assert(len == 4); // Only datagram header, count == 0! No spurious 60x/sec duplication!
+    assert(rudp_unpack_datagram_header(big_buf, 4, &hdr) == RUDP_OK);
+    assert(hdr.count == 0);
+
+    // At t = 1150 (150ms > 100ms timeout), all 4 packets timed out and are retransmitted
+    len = rudp_session_build_datagram(&sess, 0, big_buf, sizeof(big_buf), 1150, 100);
+    assert(len == 4 + 4 * 8); // Header (4B) + 4 records (32B) = 36B
+    assert(rudp_unpack_datagram_header(big_buf, (size_t)len, &hdr) == RUDP_OK);
+    assert(hdr.count == 4);
+
+    // C. MTU clamp: max_len = 65535 clamped to RUDP_DEFAULT_MTU (1400 bytes)
+    assert(rudp_session_build_datagram(&sess, 0, big_buf, 65535, 1150, 100) <= RUDP_DEFAULT_MTU);
+
+    printf("[OK] High 3 & 4 (Bundler Fairness & Gating): Round-robin fairness, retransmission gating, and MTU clamp verified\n");
+}
+
+static void test_legacy_recv_passive_ack(void) {
+    rudp_context_s ctx;
+    assert(rudp_init(&ctx) == RUDP_OK);
+    tfv_packet_u p = {.type = 1, .flags = 0, .value = 42};
+    assert(rudp_send(&ctx, p, 1000) == RUDP_OK);
+
+    // Incoming data frames with piggybacked ACK=0
+    rudp_frame_s incoming_frame;
+    incoming_frame.header.seq_num = 0;
+    incoming_frame.header.ack = 0;
+    incoming_frame.packet.raw = 100;
+
+    tfv_packet_u delivered;
+    for (int i = 0; i < 5; i++) {
+        int ret = rudp_recv(&ctx, &incoming_frame, &delivered);
+        if (i == 0) assert(ret == 1);
+        else assert(ret == 0);
+    }
+
+    // Verify passive ACK did not increment duplicate_ack_count
+    assert(ctx.duplicate_ack_count == 0);
+    assert(ctx.tx_buffer[0].fast_retransmit == RUDP_FAST_RETRANSMIT_OFF);
+
+    printf("[OK] High 5 (Passive rudp_recv ACK): Data frames with piggybacked ACKs do not trigger phantom Fast Retransmit\n");
+}
+
+static void test_negative_bounds_and_mutations(void) {
+    rudp_session_s sess;
+    assert(rudp_session_init(&sess) == RUDP_OK);
+    assert(rudp_session_config_channel(&sess, 0, RUDP_CHANNEL_FLAG_RELIABLE) == RUDP_OK);
+    assert(rudp_session_config_channel(&sess, 1, RUDP_CHANNEL_FLAG_UNRELIABLE) == RUDP_OK);
+
+    // Low 14: send_reliable rejects channel without RUDP_CHANNEL_FLAG_RELIABLE
+    tfv_packet_u p = {.value = 1};
+    assert(rudp_session_send_reliable(&sess, 1, p, 1000) == RUDP_ERR_INVALID_ARG);
+
+    // M5: send_reliable rejects channel_id >= RUDP_MAX_CHANNELS
+    assert(rudp_session_send_reliable(&sess, RUDP_MAX_CHANNELS, p, 1000) == RUDP_ERR_INVALID_ARG);
+
+    // M6: reset_channel rejects channel_id >= RUDP_MAX_CHANNELS
+    assert(rudp_session_reset_channel(&sess, RUDP_MAX_CHANNELS) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_session_reset_channel(NULL, 0) == RUDP_ERR_INVALID_ARG);
+
+    // M2: datagram with header.ack_channel >= RUDP_MAX_CHANNELS received over wire
+    uint8_t bad_ack_chan_buf[4] = {0, 0, RUDP_MAX_CHANNELS, 0};
+    rudp_record_s recs[2];
+    assert(rudp_session_process_datagram(&sess, bad_ack_chan_buf, 4, recs, 2) == RUDP_ERR_INVALID_ARG);
+
+    // M1: datagram with rec.channel_id >= RUDP_MAX_CHANNELS received over wire
+    uint8_t bad_rec_buf[12] = {0, 0, 0, 1, RUDP_MAX_CHANNELS, 0, 0, 0, 0, 0, 0, 0};
+    assert(rudp_session_process_datagram(&sess, bad_rec_buf, 12, recs, 2) == RUDP_ERR_INVALID_ARG);
+
+    // M3: exact datagram wire length check: in_len != 4 + count * 8
+    assert(rudp_session_process_datagram(&sess, bad_rec_buf, 11, recs, 2) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_session_process_datagram(&sess, bad_rec_buf, 13, recs, 2) == RUDP_ERR_INVALID_ARG);
+
+    // M4: rudp_recv_ack_ex rejects ACK older than oldest in-flight packet (tail_seq)
+    rudp_context_s ctx;
+    assert(rudp_init(&ctx) == RUDP_OK);
+    ctx.current_seq_num = 10;
+    ctx.head = 1;
+    ctx.tail = 0;
+    ctx.tx_buffer[0].state = RUDP_SLOT_IN_FLIGHT;
+    ctx.tx_buffer[0].frame.header.seq_num = 5; // oldest in-flight is 5
+    // ACK = 4 is older than 5 -> OUT_OF_WINDOW
+    assert(rudp_recv_ack_ex(&ctx, 4, true) == RUDP_ERR_OUT_OF_WINDOW);
+    // ACK = 5 is valid (boundary)
+    assert(rudp_recv_ack_ex(&ctx, 5, true) == RUDP_OK);
+    // ACK = 11 is ahead of current_seq_num 10 -> OUT_OF_WINDOW
+    assert(rudp_recv_ack_ex(&ctx, 11, true) == RUDP_ERR_OUT_OF_WINDOW);
+
+    // High 7: Liveness detection
+    assert(rudp_init(&ctx) == RUDP_OK);
+    rudp_touch(&ctx, 1000);
+    assert(rudp_is_alive(&ctx, 1500, 1000) == true);
+    assert(rudp_is_alive(&ctx, 2100, 1000) == false);
+    ctx.state = RUDP_STATE_DISCONNECTED;
+    assert(rudp_is_alive(&ctx, 1000, 1000) == false);
+
+    printf("[OK] Negative Bounds & Mutations (M1-M6, Capability, Liveness): All boundary checks strictly validated\n");
 }
 
 int main(void) {
@@ -1237,6 +1520,12 @@ int main(void) {
     test_bug2_output_buffer_saturation_no_silent_loss();
     test_bug3_duplicate_reliable_packet_rearms_ack();
     test_session_build_datagram_intra_tick_bundler();
+    test_gap_triggered_fast_retransmit();
+    test_duplicate_ack_saturation();
+    test_unreliable_jump_bound_critical_2();
+    test_bundler_retransmission_gating_and_fairness();
+    test_legacy_recv_passive_ack();
+    test_negative_bounds_and_mutations();
 
     printf("\n>>> ALL TESTS PASSED SUCCESSFULLY! <<<\n");
 

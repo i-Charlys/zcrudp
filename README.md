@@ -212,14 +212,18 @@ thresholds and is separate from the portable core tests.
 | Feature | `zcrudp` | `ENet` | `KCP` | `Valve GNS` | `QUIC (RFC 9000)` |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Allocation Model** | **Strict Zero-Malloc** | Dynamic (`malloc`) | Custom Hook / Heap | Object Pools / Heap | Dynamic Heap |
-| **Connection Footprint** | **1,036 B** (ctx) / **4,196 B** (4 ch) | ~20 - 64 KB | ~8 - 32 KB | > 100 KB | > 150 KB |
+| **Connection Footprint** | **1,040 B** (ctx) / **4,212 B** (4 ch) | ~20 - 64 KB | ~8 - 32 KB | > 100 KB | > 150 KB |
 | **Bare-Metal MCU Ready** | **Yes** (STM32, ESP32, lwIP) | No (OS-tied) | With static pool | No | No |
+| **Payload Specialization** | **Fixed 4-byte TFV (compact)** | Arbitrary MTU / Chunks | Arbitrary MTU / Chunks | Arbitrary MTU / Chunks | Arbitrary Byte Streams |
 | **Wire Header Size** | **4 B** (ack) / **8 B** (frame) | 28 - 48 B | 24 B | 15 - 40+ B | 20 - 50+ B |
 | **Multi-Channel Multiplexing**| **Native (4 isolated channels)** | Native | Manual (1 cb/stream)| Native (Multi-lane) | Native (Streams) |
-| **Head-of-Line Blocking** | **None** (per-channel isolated) | Partial | High (single stream)| None | None |
+| **Head-of-Line Blocking** | **Zero Inter-Channel** (Go-Back-N intra-ch) | Partial | High (single stream)| None | None |
 | **Intra-Tick Multi-ACK Bundling**| **Yes** (`build_datagram`) | Piggybacked | Piggybacked | Batched frames | SACK frames |
-| **Encode Speed (Single Core)**| **~2.0 ns / op** (~500 Mops/s) | ~120 - 250 ns | ~45 - 80 ns | ~300 - 800 ns | Complex AEAD |
+| **Codec Throughput (Single Core)**| **~2.0 ns / op** (~500 Mops/s) | ~120 - 250 ns | ~45 - 80 ns | ~300 - 800 ns | Complex AEAD |
 | **Distributed AI KV-Cache** | **Engineered (Prefill-Decode)**| Unsuitable | Unsuitable | Average | Average (HTTP/3) |
+
+> [!NOTE]
+> `zcrudp` eliminates Head-of-Line blocking between separate channels. Within a single reliable channel, strict in-order Go-Back-N delivery applies. Codec throughput reflects pure in-memory serialization (`bench/bench_rudp.c`), isolated from OS socket I/O.
 
 For complete technical benchmarks, packet layouts, and architectural analysis, see [docs/COMPARISON.md](docs/COMPARISON.md).
 

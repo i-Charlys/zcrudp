@@ -8,9 +8,9 @@ extern "C" {
 #endif
 
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-    #define IS_LITTLE_ENDIAN 1
+    #define RUDP_IS_LITTLE_ENDIAN 1
 #else
-    #define IS_LITTLE_ENDIAN 0
+    #define RUDP_IS_LITTLE_ENDIAN 0
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -23,7 +23,7 @@ extern "C" {
 #endif
 
 /* Zero-dependency Network Byte Order conversions (Big-Endian wire format) */
-#if IS_LITTLE_ENDIAN
+#if RUDP_IS_LITTLE_ENDIAN
     #define rudp_htons(x) rudp_bswap16(x)
     #define rudp_ntohs(x) rudp_bswap16(x)
     #define rudp_htonl(x) rudp_bswap32(x)

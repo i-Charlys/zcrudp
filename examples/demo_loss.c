@@ -21,9 +21,11 @@ typedef struct {
   uint8_t bytes[MAX_DGRAM_LEN];
   size_t len;
   uint64_t due;
+  uint64_t seq;
   int used;
 } delayed_s;
 static delayed_s queue[QUEUE_SIZE];
+static uint64_t enqueue_seq = 0;
 static rudp_session_s session;
 static uint32_t rng;
 static unsigned loss, latency, jitter;
@@ -70,6 +72,7 @@ static void enqueue(const uint8_t *bytes, size_t len) {
       memcpy(queue[i].bytes, bytes, len);
       queue[i].len = len;
       queue[i].due = now_ms() + latency + random_next() % (jitter + 1);
+      queue[i].seq = enqueue_seq++;
       queue[i].used = 1;
       return;
     }
@@ -80,14 +83,22 @@ static void enqueue(const uint8_t *bytes, size_t len) {
 
 static int flush(int fd, const struct sockaddr_in *peer) {
   uint64_t now = now_ms();
-  for (unsigned i = 0; i < QUEUE_SIZE; i++) {
-    if (!queue[i].used || queue[i].due > now) continue;
-    ssize_t n = sendto(fd, queue[i].bytes, queue[i].len, 0,
+  while (1) {
+    int best = -1;
+    for (unsigned i = 0; i < QUEUE_SIZE; i++) {
+      if (!queue[i].used || queue[i].due > now) continue;
+      if (best == -1 || queue[i].due < queue[best].due ||
+          (queue[i].due == queue[best].due && queue[i].seq < queue[best].seq)) {
+        best = (int)i;
+      }
+    }
+    if (best < 0) break;
+    ssize_t n = sendto(fd, queue[best].bytes, queue[best].len, 0,
                        (const struct sockaddr *)peer, sizeof(*peer));
-    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) continue;
-    if (n != (ssize_t)queue[i].len) { perror("sendto"); return -1; }
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) break;
+    if (n != (ssize_t)queue[best].len) { perror("sendto"); return -1; }
     sent++;
-    queue[i].used = 0;
+    queue[best].used = 0;
   }
   return 0;
 }
@@ -194,15 +205,25 @@ int main(int argc, char **argv) {
   printf("READY %s %s:%u -> %s:%u loss=%u%% latency=%ums jitter=0..%ums seed=%u\n",
          argv[1], bind_ip, port, peer_ip, peer_port, loss, latency, jitter, seed);
   puts("Commands: r <value>, u <value>, stats, q");
-  uint64_t start = now_ms(), next = start;
-  unsigned generated = 0;
+  uint64_t start = now_ms(), next_rel = start, next_unrel = start;
+  unsigned gen_rel = 0, gen_unrel = 0;
   int status = 0;
   struct pollfd fds[2] = {{fd, POLLIN, 0}, {STDIN_FILENO, POLLIN, 0}};
   char line[128]; size_t used = 0; int too_long = 0;
   while (running && (!duration || now_ms() - start < duration)) {
-    if (generated < count && now_ms() >= next) {
-      if (send_value(1, generated) == 0) { (void)send_value(0, generated); generated++; }
-      next = now_ms() + interval;
+    uint64_t cur_ms = now_ms();
+    if (gen_rel < count && cur_ms >= next_rel) {
+      if (send_value(1, gen_rel) == 0) {
+        gen_rel++;
+        next_rel = cur_ms + interval;
+      } else {
+        next_rel = cur_ms + 10;
+      }
+    }
+    if (gen_unrel < count && cur_ms >= next_unrel) {
+      (void)send_value(0, gen_unrel);
+      gen_unrel++;
+      next_unrel = cur_ms + interval;
     }
     uint16_t indices[RUDP_WINDOW_SIZE];
     rudp_tick_result_s tick = rudp_tick(&session.channels[0].ctx, (uint32_t)now_ms(), timeout, indices, RUDP_WINDOW_SIZE);
@@ -250,7 +271,7 @@ int main(int argc, char **argv) {
   stats();
   unsigned queued = 0;
   for (unsigned i = 0; i < QUEUE_SIZE; i++) queued += queue[i].used != 0;
-  printf("EXIT generated=%u queued_on_exit=%u\n", generated, queued);
+  printf("EXIT gen_rel=%u gen_unrel=%u queued_on_exit=%u\n", gen_rel, gen_unrel, queued);
   close(fd);
   return status;
 }

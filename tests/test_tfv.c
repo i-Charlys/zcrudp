@@ -29,7 +29,7 @@ int main(void) {
     assert(sizeof(packet.value) == 2);
 
 
-    #if IS_LITTLE_ENDIAN
+    #if RUDP_IS_LITTLE_ENDIAN
         printf("System is little-endian\n");
     #else
         printf("System is big-endian\n");

@@ -18,16 +18,17 @@ This document provides a technical, benchmark-backed comparison between `zcrudp`
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Language & Standard** | Pure C11 (strict `-pedantic`) | C99 | C89 / C99 | C++11 | C++03 / C++11 | C99 / Rust / Go | OS Kernel / C |
 | **Memory Allocation** | **Strict Zero-Malloc** | Dynamic (`malloc`/`free`) | Custom hook (`ikcp_malloc`) | Dynamic / Object Pools | Heavy C++ (`new`/`delete`) | Dynamic Heap | OS Kernel Buffers |
-| **Footprint per Connection** | **1,036 B** (ctx) / **4,196 B** (4 ch) | ~20 KB - 64 KB | ~8 KB - 32 KB | > 100 KB | > 128 KB | > 150 KB | ~8 KB - 64 KB (OS) |
+| **Footprint per Connection** | **1,040 B** (ctx) / **4,212 B** (4 ch) | ~20 KB - 64 KB | ~8 KB - 32 KB | > 100 KB | > 128 KB | > 150 KB | ~8 KB - 64 KB (OS) |
 | **Embedded / Bare-Metal Ready** | **Yes** (STM32, ESP32, lwIP) | No (POSIX/WinSock tied) | Possible with static pool | No (Heavy dependencies) | No (Heavy C++ runtime) | No (Requires TLS runtime) | No (Requires full IP stack) |
+| **Payload Specialization** | **Fixed 4-byte TFV (compact)** | Arbitrary MTU / Fragments | Arbitrary MTU / Fragments | Arbitrary MTU / Lanes | Arbitrary MTU / Fragments | Arbitrary Byte Streams | Arbitrary Byte Streams |
 | **Wire Header Size** | **4 Bytes** (ack) / **8 Bytes** (frame) | 28 - 48 Bytes | 24 Bytes | 15 - 40+ Bytes | 20 - 35+ Bytes | 20 - 50+ Bytes | 20 - 60 Bytes |
 | **Multi-Channel Multiplexing** | **Native (up to 4 channels)** | Native (channels 0..N) | Manual (1 cb = 1 stream) | Native (Multi-lane) | Native (Channels) | Native (Streams) | None (Single stream) |
-| **Head-of-Line (HoL) Blocking** | **None** (per-channel independent) | Partial (shared queue) | High (single stream) | None (per-lane) | None (per-channel) | None (per-stream) | **Total** (stream-wide freeze) |
+| **Head-of-Line (HoL) Blocking** | **Zero Inter-Channel** (Go-Back-N intra-ch) | Partial (shared queue) | High (single stream) | None (per-lane) | None (per-channel) | None (per-stream) | **Total** (stream-wide freeze) |
 | **Unreliable Stream Support** | **Fast Bypass + RFC 1982** | Yes (`ENET_PACKET_FLAG_UNRELIABLE`) | Requires mode switch | Yes (`k_nSteamNetworkingSend_Unreliable`) | Yes (`UNRELIABLE_SEQUENCED`) | Datagram Extension | No |
 | **Intra-Tick Multi-ACK Bundling** | **Yes** (`rudp_session_build_datagram`) | Piggybacked | Piggybacked | Batched frames | Piggybacked | SACK frames | SACK / Delayed ACK |
 | **Fast Retransmit** | **Tri-ACK RFC 5681 Compliant** | RTT Timeout | Fast ACK (resend count) | Selective ACK (SACK) | SACK | SACK / RACK | Tri-ACK / SACK |
 | **Codec Throughput (Single Core)** | **~500 Mops/s** (2.0 ns/op encode) | ~10 - 25 Mops/s | ~20 - 50 Mops/s | ~5 - 15 Mops/s | ~5 - 10 Mops/s | ~2 - 10 Mops/s | OS syscall bound |
-| **Cryptographic Layer** | External (Noise / WireGuard) | None / External | None / External | Built-in AES-GCM | Built-in ChaCha/AES | Mandatory TLS 1.3 | External (TLS) |
+| **Cryptographic Layer** | External (DTLS / WireGuard) | None / External | None / External | Built-in AES-GCM | Built-in ChaCha/AES | Mandatory TLS 1.3 | External (TLS) |
 | **AI KV-Cache Streaming Fit** | **Engineered** (Prefill-Decode) | Poor | Poor | Average | Poor | Average (HTTP/3 RPC) | Poor (HoL blocking) |
 
 ---
@@ -57,8 +58,8 @@ In high-tick systems (e.g. 60 Hz to 120 Hz game engines, robotics telemetry, or 
 ### 2.2 Memory Model & Real-Time Predictability
 
 - **`zcrudp` (Zero-Malloc Invariant)**:
-  - All buffers are statically or stack allocated. The single-channel context [`rudp_context_s`](file:///home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/include/protocol_rudp.h#L107-L116) occupies exactly **1,036 bytes**.
-  - A 4-channel session [`rudp_session_s`](file:///home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/include/protocol_rudp.h#L165-L169) occupies exactly **4,196 bytes**.
+  - All buffers are statically or stack allocated. The single-channel context [`rudp_context_s`](file:///home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/include/protocol_rudp.h#L115-L125) occupies exactly **1,040 bytes**.
+  - A 4-channel session [`rudp_session_s`](file:///home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/include/protocol_rudp.h#L174-L179) occupies exactly **4,212 bytes**.
   - There are zero calls to `malloc`, `free`, `realloc`, or OS memory allocators anywhere in the library core.
   - Guarantees: Zero memory fragmentation, zero garbage collection spikes, deterministic cache-line execution, and immediate bare-metal deployment on microcontrollers (STM32, ESP32, RISC-V) running FreeRTOS or bare metal with lwIP.
 
@@ -78,10 +79,9 @@ A fundamental flaw in single-stream transports (TCP, basic ARQ) is **Head-of-Lin
 
 - **`zcrudp`**:
   - Implements **isolated per-channel contexts**.
-  - Channel 0 (Reliable / In-Order) manages its own sliding window.
-  - Channel 1 (Unreliable / Bypass) streams continuous telemetry with a 16-bit anti-rollback sequence filter (RFC 1982). A dropped packet on Channel 0 does **not** stall Channel 1.
-  - Channel 2 (Consensus / Barriers) operates independently of Channels 0 and 1.
-  - Multi-channel ACKs are consolidated into a single MTU datagram via [`rudp_session_build_datagram()`](file:///home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/src/rudp.c#L611-L691), avoiding inter-channel transmission delays.
+  - **Zero Inter-Channel HoL**: Channel 0 (Reliable / In-Order) manages its own independent sliding window. Channel 1 (Unreliable / Bypass) streams continuous telemetry with a 16-bit anti-rollback sequence filter (RFC 1982). A dropped packet on Channel 0 does **not** stall Channel 1.
+  - **Intra-Channel Reliable Ordering**: Within a single reliable channel, strict in-order Go-Back-N delivery applies. If packet $K$ is dropped on Channel 0, packets $K+1, K+2$ on Channel 0 are held until packet $K$ is recovered via Tri-ACK Fast Retransmit or RTO timeout. Applications needing non-blocking concurrent streams should assign independent topics to distinct channels.
+  - Multi-channel ACKs are consolidated into a single MTU datagram via [`rudp_session_build_datagram()`](file:///home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/src/rudp.c#L644-L724), avoiding inter-channel transmission delays.
 
 - **`TCP`**:
   - Completely blocked. One dropped packet freezes the entire socket.
@@ -106,9 +106,18 @@ Empirical benchmark results measured with `CLOCK_MONOTONIC` on Linux x86-64 (Int
 | **`ENet`** | Packet Encode + Queue | ~120 - 250 ns | ~4 - 8 Mops/s | Linked-list node allocation |
 | **`Valve GNS`** | Packet Processing | ~300 - 800 ns | ~1.2 - 3.3 Mops/s | Encryption tag calculation + lane state |
 
+> [!NOTE]
+> **Benchmark Methodology Disclosure**: The ~500 Mops/s throughput figure reflects pure in-memory serialization (`bench/bench_rudp.c`) of fixed 4-byte TFV records on a dedicated CPU core with warm caches. It measures codec efficiency in isolation from OS syscall overhead (`sendto`/`recvfrom`), kernel network stack processing, and NIC physical latency. By comparison, reported metrics for ENet, KCP, GNS, and QUIC include variable-length payload memory management, multi-segment fragmentation, or cryptographic AEAD calculations.
+
 ---
 
-### 2.5 Distributed AI KV-Cache Serving (Prefill-Decode Disaggregation)
+### 2.5 Payload Specialization & Architectural Scope
+
+`zcrudp` deliberately specializes in fixed 4-byte structured game / robotics / AI state payloads (`tfv_packet_u`). 
+- **Target Workload**: High-frequency state telemetry, player inputs, transformation updates, speculative token IDs, and consensus synchronization primitives.
+- **Architectural Tradeoff**: `zcrudp` does **not** provide built-in multi-packet IP fragmentation for large files (e.g. textures, model weights, or megabyte-sized RPC streams). Applications requiring arbitrary variable-length streaming across multiple MTU datagrams should use QUIC or ENet, or chunk large data structures into TFV sequences at the application layer.
+
+### 2.6 Distributed AI KV-Cache Serving (Prefill-Decode Disaggregation)
 
 Modern large language model (LLM) serving architectures decouple compute-intensive **Prefill nodes** (TTFT - Time to First Token) from memory-bound **Decode nodes** (TPOT - Time Per Output Token):
 

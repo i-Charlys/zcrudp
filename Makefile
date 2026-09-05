@@ -35,17 +35,17 @@ all: $(BUILD_DIR) $(BINS)
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/test_rudp: src/rudp.c tests/test_rudp.c
-	$(CC) $(CFLAGS) $^ -o $@
+$(BUILD_DIR)/test_rudp: src/rudp.c tests/test_rudp.c $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) src/rudp.c tests/test_rudp.c -o $@
 
-$(BUILD_DIR)/test_tfv: tests/test_tfv.c
-	$(CC) $(CFLAGS) $^ -o $@
+$(BUILD_DIR)/test_tfv: tests/test_tfv.c $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) tests/test_tfv.c -o $@
 
-$(BUILD_DIR)/test_window_min: src/rudp.c tests/test_window.c
-	$(CC) $(CFLAGS) -DRUDP_WINDOW_SIZE=2 $^ -o $@
+$(BUILD_DIR)/test_window_min: src/rudp.c tests/test_window.c $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DRUDP_WINDOW_SIZE=2 src/rudp.c tests/test_window.c -o $@
 
-$(BUILD_DIR)/test_window_max: src/rudp.c tests/test_window.c
-	$(CC) $(CFLAGS) -DRUDP_WINDOW_SIZE=32768 $^ -o $@
+$(BUILD_DIR)/test_window_max: src/rudp.c tests/test_window.c $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DRUDP_WINDOW_SIZE=32768 src/rudp.c tests/test_window.c -o $@
 
 test_rudp: $(BUILD_DIR)/test_rudp
 	./$(BUILD_DIR)/test_rudp
