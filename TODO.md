@@ -99,14 +99,16 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
   - [x] Implement multi-channel session structures (`rudp_channel_s`, `rudp_session_s`) with zero dynamic allocation (`RUDP_MAX_CHANNELS = 4`, ~4 KB footprint).
   - [x] Implement session initialization and channel configuration API (`rudp_session_init`, `rudp_session_config_channel`).
   - [ ] Channel egress scheduler with priority preemption (critical channels preempt background queues before `sendto()`) and optional IP TOS/DSCP QoS socket tagging.
-  - [ ] **Next-Gen Unreliable Channel Engine (The 3-Tier Trinity)**:
-    - **Fast Memory Bypass**: Direct egress with zero `tx_buffer` allocation or copying, and anti-rollback sequence filtering on RX.
-    - **Track A (Ultra-Dense 4B Game Datagram)**: Leverage Tier 1 (4 bytes total) for compact input/angle telemetry without RUDP header overhead, cutting bandwidth by 50%.
+  - [x] **Unified Datagram & Intra-Tick Bundling Architecture**:
+    - [x] **Step 1: Wire Format Specifications**: 4-byte datagram header (`ack`, `ack_channel`, `count`) and 8-byte message records (`channel_id`, `flags`, `seq_num`, `payload`).
+    - [x] **Step 2: Strict Wire Serialization & Bounded Validation**: Endian-safe bitshifts and strict bounded length check (`in_len == 4 + count * 8`).
+    - [x] **Step 3: Multi-Channel Session Routing**: Piggybacked ACK dispatch to target channel and message record distribution across independent channel contexts.
+    - [x] **Step 4: Fast Memory Bypass & 16-bit Anti-Rollback**: Zero-malloc egress bypassing `tx_buffer`, and RFC 1982 circular sequence filter (`distance != 0 && distance < 0x8000U`) rejecting older or duplicate frames.
+  - [ ] **Next-Gen Unreliable Channel Engine (The 3-Tier Trinity - Advanced Tracks)**:
+    - **Track A (Ultra-Dense 4B Game Datagram)**: Standalone 4B frames for compact input/angle telemetry.
     - **Track B (Rolling Delta / 0ms Instant Recovery)**: Embed state $N$ alongside compact delta of state $N-1$ in Tier 2 (8 bytes) to mathematically reconstruct dropped frames on the receiver with 0ms round-trip latency.
     - **Track C (Kinematic Adaptive Redundancy)**: Egress scheduler detects motion inflection points (acceleration/jerk) and automatically emits forward-cloned duplicates ($2\times$) without waiting for ACKs.
-- [ ] **1400-byte MTU Multiplexing / Bundling**: 
-  - **Intra-Tick Bundling (Anti-Nagle Principle)**: Batch multiple payloads generated synchronously within the *same game tick* into a single standard 1400-byte UDP datagram; never delay egress across future frames (672 ns wire padding vs 16.67 ms inter-frame penalty).
-  - Use implicit base-sequence indexing ($seq = base\_seq + k$) to eliminate 50% header overhead ($4\text{B header} + N \times 4\text{B payload}$ instead of repeating $8\text{B}$ per message).
+  - [ ] **Egress Scheduler & MTU Packing**: Batch intra-tick payloads into 1400-byte UDP datagrams without cross-tick delay (Anti-Nagle Principle).
 
 ---
 
