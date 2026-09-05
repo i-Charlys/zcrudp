@@ -64,6 +64,7 @@ extern "C" {
 #include "protocol_tfv.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 
 
@@ -167,6 +168,18 @@ typedef struct {
     uint8_t reserved[3];                         /**< Explicit padding to 32-bit boundary */
 } rudp_session_s;
 
+/* Compile-time verification of ABI struct sizes (C11 Static Asserts) */
+_Static_assert(sizeof(rudp_header_s) == 4, "rudp_header_s size must be 4 bytes");
+_Static_assert(sizeof(rudp_frame_s) == 8, "rudp_frame_s size must be 8 bytes");
+_Static_assert(sizeof(rudp_slot_s) == 16, "rudp_slot_s size must be 16 bytes");
+_Static_assert(sizeof(rudp_datagram_header_s) == 4, "rudp_datagram_header_s size must be 4 bytes");
+_Static_assert(sizeof(rudp_record_s) == 8, "rudp_record_s size must be 8 bytes");
+#if RUDP_WINDOW_SIZE == 64 && RUDP_MAX_CHANNELS == 4
+_Static_assert(sizeof(rudp_context_s) == 1036, "rudp_context_s size must be 1036 bytes");
+_Static_assert(sizeof(rudp_channel_s) == 1048, "rudp_channel_s size must be 1048 bytes");
+_Static_assert(sizeof(rudp_session_s) == 4196, "rudp_session_s size must be 4196 bytes");
+#endif
+
 /**
  * @brief Initializes a multi-channel session.
  *
@@ -174,6 +187,23 @@ typedef struct {
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
 int rudp_session_init(rudp_session_s *session);
+
+/**
+ * @brief Resets a single channel state machine (sequence numbers, flags, and sliding window).
+ *
+ * @param session Pointer to the session struct.
+ * @param channel_id Channel identifier (0 to RUDP_MAX_CHANNELS - 1).
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_session_reset_channel(rudp_session_s *session, uint8_t channel_id);
+
+/**
+ * @brief Resets all channels and active channel count in a session.
+ *
+ * @param session Pointer to the session struct.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_session_reset(rudp_session_s *session);
 
 /**
  * @brief Configures a channel within a session with specific capability flags.
@@ -184,6 +214,30 @@ int rudp_session_init(rudp_session_s *session);
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
 int rudp_session_config_channel(rudp_session_s *session, uint8_t channel_id, uint8_t flags);
+
+/**
+ * @brief Sends a reliable message over a session channel, queuing it into that channel's tx_buffer.
+ *
+ * @param session Pointer to the session.
+ * @param channel_id Channel identifier.
+ * @param payload 4-byte game payload.
+ * @param now Current timestamp in milliseconds.
+ * @return RUDP_OK on success, or negative error code on failure.
+ */
+int rudp_session_send_reliable(rudp_session_s *session, uint8_t channel_id, tfv_packet_u payload, uint32_t now);
+
+/**
+ * @brief Builds a unified datagram aggregating piggybacked ACK, multi-channel pending ACKs,
+ *        and in-flight reliable records into a single network packet up to max_len (Intra-Tick Bundler).
+ *
+ * @param session Pointer to the session.
+ * @param primary_ack_channel Channel ID to acknowledge in the 4-byte datagram header.
+ * @param out_buf Destination byte buffer.
+ * @param max_len Maximum writable buffer capacity.
+ * @return Total number of bytes written (>= 4), or negative error code.
+ */
+int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_channel,
+                                uint8_t *out_buf, size_t max_len);
 
 /**
  * @brief Serializes a 4-byte datagram header into Big-Endian network format.
@@ -307,6 +361,18 @@ int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now);
  * @return 1 on new in-order packet delivered, 0 if duplicate/out-of-order, -1 on error (e.g., NULL pointers).
  */
 int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_packet);
+
+/**
+ * @brief Processes an incoming cumulative ACK under the N+1 convention with explicit control
+ *        over whether duplicate ACKs count towards Tri-ACK Fast Retransmit.
+ *
+ * @param ctx Pointer to the RUDP context.
+ * @param ack_num Next expected sequence number from peer (N+1).
+ * @param count_duplicate_ack true if this ACK is a deliberate standalone ACK or explicit ACK record,
+ *                            false if this is a passive piggybacked ACK on unrelated data.
+ * @return 0 on success, -1 if the ACK is out-of-window or corrupted.
+ */
+int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate_ack);
 
 /**
  * @brief Processes an incoming cumulative ACK under the N+1 convention.

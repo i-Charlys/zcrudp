@@ -104,11 +104,18 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
     - [x] **Step 2: Strict Wire Serialization & Bounded Validation**: Endian-safe bitshifts and strict bounded length check (`in_len == 4 + count * 8`).
     - [x] **Step 3: Multi-Channel Session Routing**: Piggybacked ACK dispatch to target channel and message record distribution across independent channel contexts.
     - [x] **Step 4: Fast Memory Bypass & 16-bit Anti-Rollback**: Zero-malloc egress bypassing `tx_buffer`, and RFC 1982 circular sequence filter (`distance != 0 && distance < 0x8000U`) rejecting older or duplicate frames.
+    - [x] **Step 5: Protocol Hardening & Intra-Tick Bundler**:
+      - `rudp_session_send_reliable()` queues reliable slots into channel `tx_buffer`.
+      - `rudp_session_build_datagram()` aggregates primary piggybacked ACK, multi-channel pending ACKs (`RUDP_RECORD_FLAG_ACK`), and in-flight reliable slots into a unified MTU packet.
+      - Fixed Bug 1 (TCP RFC 5681): Passive piggybacked ACKs on datagrams with data (`count > 0`) do not count towards Tri-ACK Fast Retransmit.
+      - Fixed Bug 2 (Zero Silent Loss): Two-pass atomic datagram validation and strict delivery bound check (`delivered_count < max_delivered`) preventing premature ACK generation on buffer saturation.
+      - Fixed Bug 3 (RFC 793/1122): Retransmitted duplicate reliable packets re-arm `ack_pending = 1` to unblock peer sliding window.
+      - C11 compile-time `_Static_assert` ABI checks on all structures.
   - [ ] **Next-Gen Unreliable Channel Engine (The 3-Tier Trinity - Advanced Tracks)**:
     - **Track A (Ultra-Dense 4B Game Datagram)**: Standalone 4B frames for compact input/angle telemetry.
     - **Track B (Rolling Delta / 0ms Instant Recovery)**: Embed state $N$ alongside compact delta of state $N-1$ in Tier 2 (8 bytes) to mathematically reconstruct dropped frames on the receiver with 0ms round-trip latency.
     - **Track C (Kinematic Adaptive Redundancy)**: Egress scheduler detects motion inflection points (acceleration/jerk) and automatically emits forward-cloned duplicates ($2\times$) without waiting for ACKs.
-  - [ ] **Egress Scheduler & MTU Packing**: Batch intra-tick payloads into 1400-byte UDP datagrams without cross-tick delay (Anti-Nagle Principle).
+  - [x] **Egress Scheduler & MTU Packing (Intra-Tick Bundler)**: Batch intra-tick payloads and multi-channel ACKs into MTU-sized UDP datagrams without cross-tick delay (Anti-Nagle Principle).
 
 ---
 
