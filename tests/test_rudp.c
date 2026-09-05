@@ -497,12 +497,43 @@ void test_dead_peer_detection() {
     printf("[OK] Dead Peer & Zombie Prevention (Preserve in-flight slots on dead peer & rudp_reset validated)\n");
 }
 
+// --- 10. Multi-Channel Session Architecture Test ---
+void test_multi_channel_session(void) {
+    rudp_session_s session;
+
+    assert(rudp_session_init(NULL) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_session_init(&session) == RUDP_OK);
+    assert(session.active_channels == 0);
+
+    // Channel 0: Unreliable movement
+    assert(rudp_session_config_channel(&session, 0, 0) == RUDP_OK);
+    assert(session.channels[0].flags == 0);
+    assert(session.active_channels == 1);
+
+    // Channel 1: High-priority reliable actions
+    assert(rudp_session_config_channel(&session, 1, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED) == RUDP_OK);
+    assert(session.channels[1].flags == (RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED));
+    assert(session.active_channels == 2);
+
+    // Channel 2: Encrypted reliable inventory
+    assert(rudp_session_config_channel(&session, 2, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ENCRYPTED) == RUDP_OK);
+    assert((session.channels[2].flags & RUDP_CHANNEL_FLAG_ENCRYPTED) != 0);
+    assert(session.active_channels == 3);
+
+    // Out-of-bounds channel configuration
+    assert(rudp_session_config_channel(&session, RUDP_MAX_CHANNELS, 0) == RUDP_ERR_INVALID_ARG);
+
+    printf("[OK] Multi-Channel Session (Session Init, Capability Flags & Bounds Check validated)\n");
+}
+
 int main(void) {
     printf("--- MEMORY SIZE TESTS ---\n");
     printf("Header Size  : %zu bytes\n", sizeof(rudp_header_s));
     printf("Frame Size   : %zu bytes\n", sizeof(rudp_frame_s));
     printf("Slot Size    : %zu bytes\n", sizeof(rudp_slot_s));
-    printf("Context Size : %zu bytes\n\n", sizeof(rudp_context_s));
+    printf("Context Size : %zu bytes\n", sizeof(rudp_context_s));
+    printf("Channel Size : %zu bytes\n", sizeof(rudp_channel_s));
+    printf("Session Size : %zu bytes (at RUDP_MAX_CHANNELS=%u)\n\n", sizeof(rudp_session_s), RUDP_MAX_CHANNELS);
 
     printf("--- RUDP ENGINE TESTS ---\n");
     test_happy_path();
@@ -514,6 +545,7 @@ int main(void) {
     test_rx_and_full_duplex();
     test_fast_retransmit_tri_ack();
     test_dead_peer_detection();
+    test_multi_channel_session();
 
     printf("\n>>> ALL TESTS PASSED SUCCESSFULLY! <<<\n");
 

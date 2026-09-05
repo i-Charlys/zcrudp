@@ -202,6 +202,34 @@ int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
     return RUDP_OK;
 }
 
+int rudp_session_init(rudp_session_s *session) {
+    if (!session) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    session->active_channels = 0;
+    for (uint8_t i = 0; i < RUDP_MAX_CHANNELS; i++) {
+        session->channels[i].channel_id = i;
+        session->channels[i].flags = RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED;
+        rudp_init(&session->channels[i].ctx);
+    }
+
+    return RUDP_OK;
+}
+
+int rudp_session_config_channel(rudp_session_s *session, uint8_t channel_id, uint8_t flags) {
+    if (!session || channel_id >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    session->channels[channel_id].flags = flags;
+    if (channel_id >= session->active_channels) {
+        session->active_channels = (uint8_t)(channel_id + 1);
+    }
+
+    return RUDP_OK;
+}
+
 
 /**
  * @brief Scans the transmission window for timed-out packets and fills an array with their indices.

@@ -30,6 +30,19 @@ extern "C" {
 #define RUDP_MAX_RETRIES        10 /**< Max retransmissions before declaring dead peer */
 #endif
 
+#ifndef RUDP_MAX_CHANNELS
+#define RUDP_MAX_CHANNELS       4  /**< Default number of independent channels per session */
+#endif
+
+/* Channel Capability Bitwise Flags */
+#define RUDP_CHANNEL_FLAG_RELIABLE    (1U << 0) /**< Delivery guaranteed via sliding window retransmission */
+#define RUDP_CHANNEL_FLAG_ORDERED     (1U << 1) /**< Packets delivered strictly in sequential order */
+#define RUDP_CHANNEL_FLAG_ENCRYPTED   (1U << 2) /**< Egress payload encapsulated in WireGuard/Noise AEAD */
+
+#ifndef RUDP_DEFAULT_MTU
+#define RUDP_DEFAULT_MTU        1400 /**< Safe default UDP datagram payload limit preventing IP fragmentation */
+#endif
+
 /* Standardized Return & Error Codes */
 #define RUDP_OK                  0  /**< Success / operation completed */
 #define RUDP_ERR_INVALID_ARG    -1  /**< NULL pointer or invalid argument */
@@ -104,6 +117,41 @@ typedef struct {
 
 
 /**
+ * @brief Represents an individual logical communication channel.
+ */
+typedef struct {
+    uint8_t flags;            /**< Combination of RUDP_CHANNEL_FLAG_* */
+    uint8_t channel_id;       /**< Channel identifier (0 to RUDP_MAX_CHANNELS - 1) */
+    rudp_context_s ctx;       /**< Dedicated sliding window context */
+} rudp_channel_s;
+
+/**
+ * @brief Represents a peer session holding multiple independent channels.
+ */
+typedef struct {
+    rudp_channel_s channels[RUDP_MAX_CHANNELS]; /**< Multi-channel array */
+    uint8_t active_channels;                     /**< Number of configured channels */
+} rudp_session_s;
+
+/**
+ * @brief Initializes a multi-channel session.
+ *
+ * @param session Pointer to the session struct.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_session_init(rudp_session_s *session);
+
+/**
+ * @brief Configures a channel within a session with specific capability flags.
+ *
+ * @param session Pointer to the session struct.
+ * @param channel_id Channel identifier (0 to RUDP_MAX_CHANNELS - 1).
+ * @param flags Bitwise combination of RUDP_CHANNEL_FLAG_*.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_session_config_channel(rudp_session_s *session, uint8_t channel_id, uint8_t flags);
+
+/**
  * @brief Initializes a RUDP context.
  *
  * @param ctx Pointer to the RUDP context to initialize.
@@ -112,7 +160,7 @@ typedef struct {
 int rudp_init(rudp_context_s *ctx);
 
 /**
- * @brief Resets an existing RUDP context back to its initial connected state.
+ * @brief Resets a RUDP context to a healthy connected state, clearing in-flight buffers and sequence numbers.
  *
  * @param ctx Pointer to the RUDP context.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
@@ -148,6 +196,8 @@ int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_
  * @return 0 on success, -1 if the ACK is out-of-window or corrupted.
  */
 int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num);
+
+
 
 /**
  * @brief Serializes a 4-byte RUDP header into Big-Endian network format.
