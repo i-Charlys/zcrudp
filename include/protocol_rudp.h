@@ -22,12 +22,32 @@ extern "C" {
 
 #define RUDP_WIRE_HEADER_SIZE 4 /**< Standalone header size (Tier 1: seq_num + ack) */
 #define RUDP_WIRE_FRAME_SIZE  8 /**< Standard frame size (Tier 2: Header + TFV Packet) */
+#define RUDP_WIRE_DATAGRAM_HEADER_SIZE 4 /**< Datagram header size on wire (ack + ack_channel + count) */
+#define RUDP_WIRE_RECORD_SIZE          8 /**< Message record size on wire (channel_id + flags + seq_num + tfv) */
+
+#define RUDP_RECORD_FLAG_UNRELIABLE  (0U)      /**< Unreliable fire-and-forget message */
+#define RUDP_RECORD_FLAG_RELIABLE    (1U << 0) /**< Reliable message requiring sliding window delivery */
+#define RUDP_RECORD_FLAG_ACK         (1U << 1) /**< Explicit multi-channel ACK record (seq_num carries ACK N+1) */
 
 #define RUDP_STATE_DISCONNECTED 0 /**< Peer is disconnected or timed out */
 #define RUDP_STATE_CONNECTED    1 /**< Active healthy connection */
 
 #ifndef RUDP_MAX_RETRIES
 #define RUDP_MAX_RETRIES        10 /**< Max retransmissions before declaring dead peer */
+#endif
+
+#ifndef RUDP_MAX_CHANNELS
+#define RUDP_MAX_CHANNELS       4  /**< Default number of independent channels per session */
+#endif
+
+/* Channel Capability Bitwise Flags */
+#define RUDP_CHANNEL_FLAG_UNRELIABLE  (0U)      /**< Fire-and-forget unreliable channel */
+#define RUDP_CHANNEL_FLAG_RELIABLE    (1U << 0) /**< Delivery guaranteed via sliding window retransmission */
+#define RUDP_CHANNEL_FLAG_ORDERED     (1U << 1) /**< Packets delivered strictly in sequential order */
+#define RUDP_CHANNEL_FLAG_ENCRYPTED   (1U << 2) /**< Egress payload encapsulated in WireGuard/Noise AEAD */
+
+#ifndef RUDP_DEFAULT_MTU
+#define RUDP_DEFAULT_MTU        1400 /**< Safe default UDP datagram payload limit preventing IP fragmentation */
 #endif
 
 /* Standardized Return & Error Codes */
@@ -44,6 +64,7 @@ extern "C" {
 #include "protocol_tfv.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 
 
@@ -104,6 +125,207 @@ typedef struct {
 
 
 /**
+ * @brief Datagram Header (4 bytes, sent once per UDP datagram).
+ *        If count == 0, this datagram represents a pure Standalone ACK.
+ */
+typedef struct {
+    uint16_t ack;         /**< Piggybacked cumulative ACK sequence number */
+    uint8_t  ack_channel; /**< Channel ID to which the ACK applies */
+    uint8_t  count;       /**< Number of bundled records in this datagram (0 = Standalone ACK) */
+} rudp_datagram_header_s;
+
+/**
+ * @brief Individual Message Record (8 bytes, repeated 'count' times in datagram).
+ */
+typedef struct {
+    uint8_t      channel_id; /**< Target channel identifier (0..RUDP_MAX_CHANNELS-1) */
+    uint8_t      flags;      /**< Record flags (RUDP_RECORD_FLAG_*) */
+    uint16_t     seq_num;    /**< 16-bit sequence (reliable sliding window or unreliable sequence) */
+    tfv_packet_u payload;    /**< 4-byte game payload */
+} rudp_record_s;
+
+/**
+ * @brief Represents an individual logical communication channel.
+ */
+typedef struct {
+    uint8_t flags;                /**< Combination of RUDP_CHANNEL_FLAG_* */
+    uint8_t channel_id;           /**< Channel identifier (0 to RUDP_MAX_CHANNELS - 1) */
+    uint16_t last_unreliable_seq; /**< Last accepted unreliable sequence number (RX anti-rollback) */
+    uint8_t  has_unreliable_seq;  /**< Flag: 1 if last_unreliable_seq is initialized, 0 otherwise */
+    uint8_t  ack_pending;         /**< Flag: 1 if new reliable packet received needing ACK */
+    uint16_t last_ack_sent;       /**< Last cumulative ACK transmitted for this channel */
+    uint16_t next_unreliable_seq; /**< Next unreliable sequence number to transmit (TX) */
+    uint16_t reserved;            /**< Explicit padding for strict 32-bit boundary alignment */
+    rudp_context_s ctx;           /**< Dedicated sliding window context (used if RELIABLE) */
+} rudp_channel_s;
+
+/**
+ * @brief Represents a peer session holding multiple independent channels.
+ */
+typedef struct {
+    rudp_channel_s channels[RUDP_MAX_CHANNELS]; /**< Multi-channel array */
+    uint8_t active_channels;                     /**< Number of configured channels */
+    uint8_t reserved[3];                         /**< Explicit padding to 32-bit boundary */
+} rudp_session_s;
+
+/* Compile-time verification of ABI struct sizes (C11 Static Asserts) */
+_Static_assert(sizeof(rudp_header_s) == 4, "rudp_header_s size must be 4 bytes");
+_Static_assert(sizeof(rudp_frame_s) == 8, "rudp_frame_s size must be 8 bytes");
+_Static_assert(sizeof(rudp_slot_s) == 16, "rudp_slot_s size must be 16 bytes");
+_Static_assert(sizeof(rudp_datagram_header_s) == 4, "rudp_datagram_header_s size must be 4 bytes");
+_Static_assert(sizeof(rudp_record_s) == 8, "rudp_record_s size must be 8 bytes");
+#if RUDP_WINDOW_SIZE == 64 && RUDP_MAX_CHANNELS == 4
+_Static_assert(sizeof(rudp_context_s) == 1036, "rudp_context_s size must be 1036 bytes");
+_Static_assert(sizeof(rudp_channel_s) == 1048, "rudp_channel_s size must be 1048 bytes");
+_Static_assert(sizeof(rudp_session_s) == 4196, "rudp_session_s size must be 4196 bytes");
+#endif
+
+/**
+ * @brief Initializes a multi-channel session.
+ *
+ * @param session Pointer to the session struct.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_session_init(rudp_session_s *session);
+
+/**
+ * @brief Resets a single channel state machine (sequence numbers, flags, and sliding window).
+ *
+ * @param session Pointer to the session struct.
+ * @param channel_id Channel identifier (0 to RUDP_MAX_CHANNELS - 1).
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_session_reset_channel(rudp_session_s *session, uint8_t channel_id);
+
+/**
+ * @brief Resets all channels and active channel count in a session.
+ *
+ * @param session Pointer to the session struct.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_session_reset(rudp_session_s *session);
+
+/**
+ * @brief Configures a channel within a session with specific capability flags.
+ *
+ * @param session Pointer to the session struct.
+ * @param channel_id Channel identifier (0 to RUDP_MAX_CHANNELS - 1).
+ * @param flags Bitwise combination of RUDP_CHANNEL_FLAG_*.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_session_config_channel(rudp_session_s *session, uint8_t channel_id, uint8_t flags);
+
+/**
+ * @brief Sends a reliable message over a session channel, queuing it into that channel's tx_buffer.
+ *
+ * @param session Pointer to the session.
+ * @param channel_id Channel identifier.
+ * @param payload 4-byte game payload.
+ * @param now Current timestamp in milliseconds.
+ * @return RUDP_OK on success, or negative error code on failure.
+ */
+int rudp_session_send_reliable(rudp_session_s *session, uint8_t channel_id, tfv_packet_u payload, uint32_t now);
+
+/**
+ * @brief Builds a unified datagram aggregating piggybacked ACK, multi-channel pending ACKs,
+ *        and in-flight reliable records into a single network packet up to max_len (Intra-Tick Bundler).
+ *
+ * @param session Pointer to the session.
+ * @param primary_ack_channel Channel ID to acknowledge in the 4-byte datagram header.
+ * @param out_buf Destination byte buffer.
+ * @param max_len Maximum writable buffer capacity.
+ * @return Total number of bytes written (>= 4), or negative error code.
+ */
+int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_channel,
+                                uint8_t *out_buf, size_t max_len);
+
+/**
+ * @brief Serializes a 4-byte datagram header into Big-Endian network format.
+ *
+ * @param header Pointer to the source datagram header.
+ * @param out_buf Destination byte buffer.
+ * @param max_len Maximum capacity of destination buffer (must be >= RUDP_WIRE_DATAGRAM_HEADER_SIZE).
+ * @return Number of bytes written (4 on success), or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_pack_datagram_header(const rudp_datagram_header_s *header, uint8_t *out_buf, size_t max_len);
+
+/**
+ * @brief Deserializes a 4-byte datagram header from Big-Endian network format.
+ *
+ * @param in_buf Raw network bytes.
+ * @param in_len Length of input buffer (must be >= RUDP_WIRE_DATAGRAM_HEADER_SIZE).
+ * @param out_header Pointer to destination datagram header.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_unpack_datagram_header(const uint8_t *in_buf, size_t in_len, rudp_datagram_header_s *out_header);
+
+/**
+ * @brief Serializes an 8-byte message record into Big-Endian network format.
+ *
+ * @param record Pointer to the source record.
+ * @param out_buf Destination byte buffer.
+ * @param max_len Maximum capacity of destination buffer (must be >= RUDP_WIRE_RECORD_SIZE).
+ * @return Number of bytes written (8 on success), or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_pack_record(const rudp_record_s *record, uint8_t *out_buf, size_t max_len);
+
+/**
+ * @brief Deserializes an 8-byte message record from Big-Endian network format.
+ *
+ * @param in_buf Raw network bytes.
+ * @param in_len Length of input buffer (must be >= RUDP_WIRE_RECORD_SIZE).
+ * @param out_record Pointer to destination record.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_unpack_record(const uint8_t *in_buf, size_t in_len, rudp_record_s *out_record);
+
+/**
+ * @brief Deserializes and validates an entire bundled datagram (header + count * records).
+ *        Strictly checks exact length: in_len == 4 + count * 8.
+ *
+ * @param in_buf Raw network bytes.
+ * @param in_len Length of input buffer.
+ * @param out_header Pointer to destination datagram header.
+ * @param out_records Pointer to array to receive unpacked records.
+ * @param max_records Capacity of out_records array.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_unpack_datagram(const uint8_t *in_buf, size_t in_len,
+                         rudp_datagram_header_s *out_header,
+                         rudp_record_s *out_records, size_t max_records);
+
+/**
+ * @brief Sends an unreliable fire-and-forget payload bypassing the tx_buffer.
+ *        Packs a complete 12-byte datagram (4B header + 8B record) with piggybacked ACK.
+ *
+ * @param session Pointer to the session struct.
+ * @param channel_id Channel identifier (0 to RUDP_MAX_CHANNELS - 1).
+ * @param payload 4-byte game payload.
+ * @param ack_channel Channel identifier whose expected_seq_num is piggybacked.
+ * @param out_buf Destination byte buffer.
+ * @param max_len Capacity of destination buffer (must be >= 12 bytes).
+ * @return Number of bytes written (12 on success), or RUDP_ERR_INVALID_ARG on error.
+ */
+int rudp_session_send_unreliable(rudp_session_s *session, uint8_t channel_id,
+                                 tfv_packet_u payload, uint8_t ack_channel,
+                                 uint8_t *out_buf, size_t max_len);
+
+/**
+ * @brief Processes an incoming datagram across session channels.
+ *        Dispatches piggybacked ACK, processes bundled records, and applies the
+ *        16-bit anti-rollback sequence filter on unreliable channels.
+ *
+ * @param session Pointer to the session.
+ * @param in_buf Received datagram bytes.
+ * @param in_len Received byte length.
+ * @param out_delivered Destination array to store delivered records for the game.
+ * @param max_delivered Capacity of out_delivered.
+ * @return Number of game records delivered (>= 0), or negative error code.
+ */
+int rudp_session_process_datagram(rudp_session_s *session, const uint8_t *in_buf, size_t in_len,
+                                  rudp_record_s *out_delivered, size_t max_delivered);
+
+/**
  * @brief Initializes a RUDP context.
  *
  * @param ctx Pointer to the RUDP context to initialize.
@@ -112,7 +334,7 @@ typedef struct {
 int rudp_init(rudp_context_s *ctx);
 
 /**
- * @brief Resets an existing RUDP context back to its initial connected state.
+ * @brief Resets a RUDP context to a healthy connected state, clearing in-flight buffers and sequence numbers.
  *
  * @param ctx Pointer to the RUDP context.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
@@ -141,6 +363,18 @@ int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now);
 int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_packet);
 
 /**
+ * @brief Processes an incoming cumulative ACK under the N+1 convention with explicit control
+ *        over whether duplicate ACKs count towards Tri-ACK Fast Retransmit.
+ *
+ * @param ctx Pointer to the RUDP context.
+ * @param ack_num Next expected sequence number from peer (N+1).
+ * @param count_duplicate_ack true if this ACK is a deliberate standalone ACK or explicit ACK record,
+ *                            false if this is a passive piggybacked ACK on unrelated data.
+ * @return 0 on success, -1 if the ACK is out-of-window or corrupted.
+ */
+int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate_ack);
+
+/**
  * @brief Processes an incoming cumulative ACK under the N+1 convention.
  *
  * @param ctx Pointer to the RUDP context.
@@ -148,6 +382,8 @@ int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_
  * @return 0 on success, -1 if the ACK is out-of-window or corrupted.
  */
 int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num);
+
+
 
 /**
  * @brief Serializes a 4-byte RUDP header into Big-Endian network format.
