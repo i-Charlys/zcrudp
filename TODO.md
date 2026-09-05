@@ -91,17 +91,15 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 
 - [ ] **RX Out-of-Order Reassembly Buffer (Selective Repeat)**: Add a lightweight sliding RX buffer to temporarily store ahead-of-order in-window packets instead of dropping them immediately (eliminating Go-Back-N retransmission cascades).
 - [ ] **3-Tier Multi-Resolution Packet Support**:
-  - **Tier 1 (4 bytes)**: Handle short header-only packets (`seq_num` + `ack`) for pure ACKs, heartbeats/pings, and connection signals.
-  - **Tier 2 (8 bytes)**: Standard game frames (Header 4B + TFV 4B).
-  - **Tier 3 (Multi-part Streaming)**: Stream large payloads (32-bit floats, text, files) via a TFV descriptor packet followed by $N$ pure 32-bit `packet.raw` frames (UTF-8 style scaling).
+  - [x] **Tier 1 (4 bytes)**: Handle short header-only packets (`seq_num` + `ack`) for pure ACKs, heartbeats/pings, and connection signals (`rudp_pack_ack()`, `rudp_unpack_ack()`).
+  - [x] **Tier 2 (8 bytes)**: Standard game frames (Header 4B + TFV 4B) with atomic modular encoders/decoders.
+  - [ ] **Tier 3 (Multi-part Streaming)**: Stream large payloads (32-bit floats, text, files) via a TFV descriptor packet followed by $N$ pure 32-bit `packet.raw` frames (UTF-8 style scaling).
 - [ ] **Multi-Channel Architecture & User-Configurable Profiles**: 
-  - Provide a modular, policy-free channel configuration API using bitwise capability flags:
-    - `RUDP_CHANNEL_RELIABLE`: Guarantees delivery with sliding-window retransmissions.
-    - `RUDP_CHANNEL_UNRELIABLE`: High-frequency fire-and-forget (0 tx_buffer footprint, ideal for positions).
-    - `RUDP_CHANNEL_ENCRYPTED`: Cryptographically protected via WireGuard / Noise AEAD.
-    - `RUDP_CHANNEL_ORDERED`: Enforces strict sequencing vs unordered delivery.
-  - Allow the user/game developer to configure up to `RUDP_MAX_CHANNELS` channels with complete autonomy (e.g. 10 encrypted channels, 10 reliable channels, or any customized mix).
-  - Channel egress scheduler with priority preemption (critical channels preempt background queues before `sendto()`) and optional IP TOS/DSCP QoS socket tagging.
+  - [x] Define bitwise capability flags (`RUDP_CHANNEL_FLAG_RELIABLE`, `RUDP_CHANNEL_FLAG_ORDERED`, `RUDP_CHANNEL_FLAG_ENCRYPTED`).
+  - [x] Implement multi-channel session structures (`rudp_channel_s`, `rudp_session_s`) with zero dynamic allocation (`RUDP_MAX_CHANNELS = 4`, ~4 KB footprint).
+  - [x] Implement session initialization and channel configuration API (`rudp_session_init`, `rudp_session_config_channel`).
+  - [ ] Channel egress scheduler with priority preemption (critical channels preempt background queues before `sendto()`) and optional IP TOS/DSCP QoS socket tagging.
+  - [ ] Unreliable channel send/receive bypass (0 `tx_buffer` footprint for high-frequency position data).
 - [ ] **1400-byte MTU Multiplexing / Bundling**: 
   - Implement batching of multiple payloads into a single standard 1400-byte UDP datagram.
   - Use implicit base-sequence indexing ($seq = base\_seq + k$) to eliminate 50% header overhead ($4\text{B header} + N \times 4\text{B payload}$ instead of repeating $8\text{B}$ per message).
