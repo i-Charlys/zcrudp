@@ -105,7 +105,7 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
     - **Track B (Rolling Delta / 0ms Instant Recovery)**: Embed state $N$ alongside compact delta of state $N-1$ in Tier 2 (8 bytes) to mathematically reconstruct dropped frames on the receiver with 0ms round-trip latency.
     - **Track C (Kinematic Adaptive Redundancy)**: Egress scheduler detects motion inflection points (acceleration/jerk) and automatically emits forward-cloned duplicates ($2\times$) without waiting for ACKs.
 - [ ] **1400-byte MTU Multiplexing / Bundling**: 
-  - Implement batching of multiple payloads into a single standard 1400-byte UDP datagram.
+  - **Intra-Tick Bundling (Anti-Nagle Principle)**: Batch multiple payloads generated synchronously within the *same game tick* into a single standard 1400-byte UDP datagram; never delay egress across future frames (672 ns wire padding vs 16.67 ms inter-frame penalty).
   - Use implicit base-sequence indexing ($seq = base\_seq + k$) to eliminate 50% header overhead ($4\text{B header} + N \times 4\text{B payload}$ instead of repeating $8\text{B}$ per message).
 
 ---
