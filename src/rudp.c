@@ -211,6 +211,10 @@ int rudp_session_init(rudp_session_s *session) {
     for (uint8_t i = 0; i < RUDP_MAX_CHANNELS; i++) {
         session->channels[i].channel_id = i;
         session->channels[i].flags = RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED;
+        session->channels[i].last_unreliable_seq = 0;
+        session->channels[i].has_unreliable_seq = 0;
+        session->channels[i].reserved = 0;
+        session->channels[i].next_unreliable_seq = 0;
         rudp_init(&session->channels[i].ctx);
     }
 
@@ -427,4 +431,224 @@ int rudp_get_unacked_slots(const rudp_context_s *ctx, uint16_t *out_indices, int
     }
 
     return count;
+}
+
+int rudp_pack_datagram_header(const rudp_datagram_header_s *header, uint8_t *out_buf, size_t max_len) {
+    if (!header || !out_buf || max_len < RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (header->ack_channel >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_buf[0] = (uint8_t)(header->ack >> 8);
+    out_buf[1] = (uint8_t)(header->ack & 0xFF);
+    out_buf[2] = header->ack_channel;
+    out_buf[3] = header->count;
+
+    return RUDP_WIRE_DATAGRAM_HEADER_SIZE;
+}
+
+int rudp_unpack_datagram_header(const uint8_t *in_buf, size_t in_len, rudp_datagram_header_s *out_header) {
+    if (!in_buf || !out_header || in_len < RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_header->ack         = ((uint16_t)in_buf[0] << 8) | in_buf[1];
+    out_header->ack_channel = in_buf[2];
+    out_header->count       = in_buf[3];
+
+    return RUDP_OK;
+}
+
+int rudp_pack_record(const rudp_record_s *record, uint8_t *out_buf, size_t max_len) {
+    if (!record || !out_buf || max_len < RUDP_WIRE_RECORD_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (record->channel_id >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_buf[0] = record->channel_id;
+    out_buf[1] = record->flags;
+    out_buf[2] = (uint8_t)(record->seq_num >> 8);
+    out_buf[3] = (uint8_t)(record->seq_num & 0xFF);
+
+    out_buf[4] = record->payload.type;
+    out_buf[5] = record->payload.flags;
+    out_buf[6] = (uint8_t)(record->payload.value >> 8);
+    out_buf[7] = (uint8_t)(record->payload.value & 0xFF);
+
+    return RUDP_WIRE_RECORD_SIZE;
+}
+
+int rudp_unpack_record(const uint8_t *in_buf, size_t in_len, rudp_record_s *out_record) {
+    if (!in_buf || !out_record || in_len < RUDP_WIRE_RECORD_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_record->channel_id = in_buf[0];
+    out_record->flags      = in_buf[1];
+    out_record->seq_num    = ((uint16_t)in_buf[2] << 8) | in_buf[3];
+
+    out_record->payload.type  = in_buf[4];
+    out_record->payload.flags = in_buf[5];
+    out_record->payload.value = ((uint16_t)in_buf[6] << 8) | in_buf[7];
+
+    return RUDP_OK;
+}
+
+int rudp_unpack_datagram(const uint8_t *in_buf, size_t in_len,
+                         rudp_datagram_header_s *out_header,
+                         rudp_record_s *out_records, size_t max_records) {
+    if (!in_buf || !out_header || in_len < RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    int ret = rudp_unpack_datagram_header(in_buf, in_len, out_header);
+    if (ret != RUDP_OK) {
+        return ret;
+    }
+
+    size_t expected_len = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)out_header->count * RUDP_WIRE_RECORD_SIZE);
+    if (in_len != expected_len) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    if (out_header->count > 0) {
+        if (!out_records || max_records < (size_t)out_header->count) {
+            return RUDP_ERR_INVALID_ARG;
+        }
+
+        for (uint8_t i = 0; i < out_header->count; i++) {
+            size_t offset = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)i * RUDP_WIRE_RECORD_SIZE);
+            ret = rudp_unpack_record(in_buf + offset, in_len - offset, &out_records[i]);
+            if (ret != RUDP_OK) {
+                return ret;
+            }
+        }
+    }
+
+    return RUDP_OK;
+}
+
+int rudp_session_send_unreliable(rudp_session_s *session, uint8_t channel_id,
+                                 tfv_packet_u payload, uint8_t ack_channel,
+                                 uint8_t *out_buf, size_t max_len) {
+    if (!session || !out_buf) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (channel_id >= RUDP_MAX_CHANNELS || ack_channel >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (max_len < (RUDP_WIRE_DATAGRAM_HEADER_SIZE + RUDP_WIRE_RECORD_SIZE)) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    rudp_channel_s *chan = &session->channels[channel_id];
+    rudp_channel_s *ack_chan = &session->channels[ack_channel];
+
+    rudp_datagram_header_s d_header;
+    d_header.ack = ack_chan->ctx.expected_seq_num;
+    d_header.ack_channel = ack_channel;
+    d_header.count = 1;
+
+    int ret = rudp_pack_datagram_header(&d_header, out_buf, max_len);
+    if (ret != RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return ret;
+    }
+
+    rudp_record_s record;
+    record.channel_id = channel_id;
+    record.flags = RUDP_RECORD_FLAG_UNRELIABLE;
+    record.seq_num = chan->next_unreliable_seq++;
+    record.payload = payload;
+
+    ret = rudp_pack_record(&record, out_buf + RUDP_WIRE_DATAGRAM_HEADER_SIZE,
+                           max_len - RUDP_WIRE_DATAGRAM_HEADER_SIZE);
+    if (ret != RUDP_WIRE_RECORD_SIZE) {
+        return ret;
+    }
+
+    return (RUDP_WIRE_DATAGRAM_HEADER_SIZE + RUDP_WIRE_RECORD_SIZE);
+}
+
+int rudp_session_process_datagram(rudp_session_s *session, const uint8_t *in_buf, size_t in_len,
+                                  rudp_record_s *out_delivered, size_t max_delivered) {
+    if (!session || !in_buf || in_len < RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    rudp_datagram_header_s header;
+    int ret = rudp_unpack_datagram_header(in_buf, in_len, &header);
+    if (ret != RUDP_OK) {
+        return ret;
+    }
+
+    if (header.ack_channel >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    size_t expected_len = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)header.count * RUDP_WIRE_RECORD_SIZE);
+    if (in_len != expected_len) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    /* 1. Dispatch piggybacked ACK to target channel sliding window */
+    rudp_recv_ack(&session->channels[header.ack_channel].ctx, header.ack);
+
+    /* If standalone ACK (count == 0), no records to deliver */
+    if (header.count == 0) {
+        return 0;
+    }
+
+    if (!out_delivered || max_delivered == 0) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    /* 2. Process bundled message records */
+    int delivered_count = 0;
+    for (uint8_t i = 0; i < header.count; i++) {
+        size_t offset = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)i * RUDP_WIRE_RECORD_SIZE);
+        rudp_record_s rec;
+        ret = rudp_unpack_record(in_buf + offset, in_len - offset, &rec);
+        if (ret != RUDP_OK) {
+            return ret;
+        }
+
+        if (rec.channel_id >= RUDP_MAX_CHANNELS) {
+            return RUDP_ERR_INVALID_ARG;
+        }
+
+        rudp_channel_s *chan = &session->channels[rec.channel_id];
+
+        if (rec.flags & RUDP_RECORD_FLAG_RELIABLE) {
+            /* Reliable delivery via channel sliding window */
+            if (rec.seq_num == chan->ctx.expected_seq_num) {
+                if ((size_t)delivered_count < max_delivered) {
+                    out_delivered[delivered_count++] = rec;
+                }
+                chan->ctx.expected_seq_num++;
+            }
+        } else {
+            /* Unreliable delivery via 16-bit anti-rollback sequence filter (RFC 1982) */
+            if (!chan->has_unreliable_seq) {
+                chan->last_unreliable_seq = rec.seq_num;
+                chan->has_unreliable_seq = 1;
+                if ((size_t)delivered_count < max_delivered) {
+                    out_delivered[delivered_count++] = rec;
+                }
+            } else {
+                uint16_t distance = (uint16_t)(rec.seq_num - chan->last_unreliable_seq);
+                if (distance != 0 && distance < 0x8000U) {
+                    chan->last_unreliable_seq = rec.seq_num;
+                    if ((size_t)delivered_count < max_delivered) {
+                        out_delivered[delivered_count++] = rec;
+                    }
+                }
+            }
+        }
+    }
+
+    return delivered_count;
 }
