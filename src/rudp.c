@@ -73,15 +73,18 @@
  *          ▼
  *  rudp_session_process_datagram()
  *          │
- *          ├─► 1. Dispatch Piggybacked ACK:
- *          │      rudp_recv_ack(&session->channels[header.ack_channel].ctx, header.ack);
+ *          ├─► Pass 1: Atomic Integrity & Wire Bounds Check
  *          │
- *          └─► 2. For each Record (0 .. count - 1):
- *                 chan = &session->channels[rec.channel_id];
+ *          └─► Pass 2: Dispatch & State Mutation:
+ *                 ├─► 1. Piggybacked ACK:
+ *                 │      rudp_recv_ack_ex(primary_chan, header.ack, count == 0);
  *                 │
- *                 ├── RELIABLE   ──► Sliding Window check (chan->ctx.expected_seq_num++)
- *                 │
- *                 └── UNRELIABLE ──► RFC 1982 Anti-Rollback filter (last_unreliable_seq)
+ *                 └─► 2. For each Record (0 .. count - 1):
+ *                        chan = &session->channels[rec.channel_id];
+ *                        │
+ *                        ├── ACK RECORD ──► rudp_recv_ack_ex(&chan->ctx, rec.seq_num, true)
+ *                        ├── RELIABLE   ──► In-order delivery (if buffer capacity) / Re-arm ACK if dup
+ *                        └── UNRELIABLE ──► RFC 1982 Anti-Rollback filter (last_unreliable_seq)
  * ============================================================================
  */
 /**
