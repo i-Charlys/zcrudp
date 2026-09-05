@@ -108,3 +108,25 @@ if ((int16_t)(ack_num - tail_seq) < 0) {
   - Subsequent calls to `rudp_tick()` and `rudp_send()` are inert and return `RUDP_ERR_DISCONNECTED`, preventing uint8 counter overflow from resurrecting dead sessions.
   - The application can call `rudp_get_unacked_slots()` to inspect unacknowledged in-flight packets and execute game rollbacks.
   - To reconnect, the application explicitly calls `rudp_reset(ctx)`.
+
+---
+
+## Physical Layer Realities & The "Zero-Wait" Bundling Principle
+
+### The Ethernet Minimum Frame Paradox (84-byte Wire Floor)
+Under the IEEE 802.3 Ethernet standard, any MAC frame carrying less than 46 bytes of IP payload is automatically padded with zeros up to 64 bytes (CSMA/CD collision detection floor). Adding the preamble, SFD, and Inter-Packet Gap (IPG) results in an exact physical wire footprint of **84 bytes**:
+- 4-byte UDP datagram  -> 32B IPv4/UDP + 14B MAC padding + 20B L1 = **84 bytes** (4.76% wire efficiency).
+- 8-byte UDP datagram  -> 36B IPv4/UDP + 10B MAC padding + 20B L1 = **84 bytes** (9.52% wire efficiency).
+
+### Transmission Time vs. Inter-Frame Latency
+A common theoretical misconception is to artificially buffer packets across frames to avoid Ethernet hardware padding. The physical timing proves this is an anti-pattern for real-time applications:
+- **Wire transmission delay of an 84-byte frame on a 1 Gbps link**:
+  $$T_{tx} = \frac{84 \times 8 \text{ bits}}{10^9 \text{ bps}} = 0.672 \;\mu\text{s} \quad (672 \text{ nanoseconds})$$
+- **Inter-frame waiting time for the next game tick**:
+  - At 60 Hz: $16.67 \text{ ms} = 16,670 \;\mu\text{s}$ ($24,800\times$ slower than sending immediately).
+  - At 128 Hz: $7.81 \text{ ms} = 7,810 \;\mu\text{s}$ ($11,620\times$ slower).
+
+### Architectural Principle: "Intra-Tick Bundling, Never Cross-Tick Delay"
+`zcrudp` adheres strictly to the **Anti-Nagle Principle**:
+1. **Zero Artificial Egress Delay**: An isolated urgent packet is transmitted immediately. Padding insertion is performed in hardware by the Network Interface Card (NIC) at zero CPU cost and sub-microsecond wire latency.
+2. **Intra-Tick Bundling Only**: MTU batching (up to 1400 bytes) aggregates *only* messages produced synchronously within the *same game frame / tick* (e.g. 1 position update + 1 reliable action + 1 ACK). It never delays egress waiting for future game ticks.

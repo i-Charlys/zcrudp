@@ -3,55 +3,88 @@
 
 /*
  * ============================================================================
- * RUDP MEMORY & PACKET ARCHITECTURE
+ * RUDP MULTI-CHANNEL & UNIFIED DATAGRAM ARCHITECTURE
  * ============================================================================
  *
- * 1. RUDP_CONTEXT_S (The "Engine" - Full Protocol State Machine)
- * +-------------------+------------+------------+---------------------------+
- * | current_seq_num   | head (2B)  | tail (2B)  | tx_buffer (64 Slots)      |
- * | (Next seq to use) | (Write idx)| (Read idx) | (~1 KB Ring Buffer)       |
- * +-------------------+------------+------------+---------------------------+
- *                                                              |
- *                                                              v
- * 2. TX_BUFFER (Circular Array - 64 Slots / Sliding Window)
- * +---------------+---------------+---------------+ ... +---------------+
- * |    Slot 0     |    Slot 1     |    Slot 2     |     |    Slot 63    |
- * +---------------+---------------+---------------+ ... +---------------+
- *         |
- *         v
- * 3. RUDP_SLOT_S (The "Storage Container" - 16B aligned)
- * +---------------------+-----------------------+-----------------------------+
- * | state (1B)          | timestamp (4B)        | FRAME (8B)                  |
- * | (FREE / IN_FLIGHT)  | (Sent time in ms)     | (Network Wire Packet)       |
- * +---------------------+-----------------------+-----------------------------+
- *   <------------- Local Memory ------------->    <------ Wire Payload ------>
- *                                                              |
- *                                                              v
- * 4. RUDP_FRAME_S (The "Wire Packet" - Exactly 8 Bytes on Network)
- * +-------------------------------------+-------------------------------------+
- * |             HEADER (4B)             |             PACKET (4B)             |
- * +------------------+------------------+---------+-----------+---------------+
- * | seq_num (2B)     | ack (2B)         | type    | flags     | value         |
- * | (16-bit sequence)| (Cumulative ACK) | (8-bit) | (8-bit)   | (16-bit val)  |
- * +------------------+------------------+---------+-----------+---------------+
- *   <------- Protocol Control ------->    <-------- TFV Data Payload ------->
+ * 1. LOCAL MEMORY HIERARCHY (ZERO-MALLOC, CACHE-FRIENDLY STATIC LAYOUT)
+ *
+ * +-------------------------------------------------------------------------+
+ * | RUDP_SESSION_S (4180 Bytes Total)                                       |
+ * |                                                                         |
+ * | channels[0..3] (4 Channels x 1044 Bytes = 4176 Bytes)                   |
+ * | active_channels (1 Byte) + padding (3 Bytes)                            |
+ * +-------------------------------------------------------------------------+
+ *   |
+ *   v
+ * +-------------------------------------------------------------------------+
+ * | RUDP_CHANNEL_S (1044 Bytes per Channel)                                 |
+ * |                                                                         |
+ * | Byte 0: flags (1B)                 | Byte 1: channel_id (1B)            |
+ * | Bytes 2..3: last_unreliable_seq(2B)| Byte 4: has_unreliable_seq (1B)    |
+ * | Byte 5: reserved padding (1B)      | Bytes 6..7: next_unreliable_seq(2B)|
+ * |                                                                         |
+ * | Bytes 8..1043: ctx (RUDP_CONTEXT_S - 1036 Bytes)                        |
+ * |   - tx_buffer[64] : 64 slots x 16 Bytes = 1024 Bytes                    |
+ * |   - State Machine : 12 Bytes (head, tail, seq, expected, ack, etc.)     |
+ * +-------------------------------------------------------------------------+
  *
  * ============================================================================
- * 5. PROTOCOL DATA FLOW & SYMMETRY (TX / RX PIPELINE)
+ * 2. UNIFIED WIRE FORMAT (NETWORK DATAGRAM & MULTI-CHANNEL BUNDLING)
  * ============================================================================
  *
- *  SENDER WORKFLOW (Game -> Network)         RECEIVER WORKFLOW (Network -> Game)
- *  ─────────────────────────────────         ───────────────────────────────────
- *  1. Game Data: tfv_packet_u                1. Raw Bytes from UDP socket
- *          │                                         │
- *          ▼                                         ▼
- *  2. rudp_send(ctx, packet, now);           2. rudp_unpack_frame(buf, len, &frame);
- *     (Assigns seq, ack, queues in tx_buf)      (Converts raw bytes to rudp_frame_s)
- *          │                                         │
- *          ▼                                         ▼
- *  3. rudp_pack_frame(&frame, buf, 8);       3. rudp_recv(ctx, &frame, &out_packet);
- *     (Serializes 8B Big-Endian for socket)     (Processes incoming ACK, drops dups,
- *                                                and delivers tfv_packet_u to game!)
+ * A single UDP Datagram can bundle multiple messages from DIFFERENT channels:
+ *
+ * +----------------------------------+---------------------------------------+
+ * | DATAGRAM HEADER (4 Bytes)        | BUNDLED RECORDS (count x 8 Bytes)     |
+ * +-----------------+--------+-------+---------------------------------------+
+ * | ack (2B)        | ack_ch | count | Record 0 (8B) | Record 1 (8B) | ...   |
+ * | (Cumulative ACK)| (1B)   | (1B)  | (Channel A)   | (Channel B)   |       |
+ * +-----------------+--------+-------+---------------+---------------+-------+
+ *
+ * A. STANDALONE ACK (count == 0, exactly 4 Bytes):
+ * +------------------------------------+
+ * | ack (2B)      | ack_chan (1B) | 0  |
+ * +------------------------------------+
+ *
+ * B. BUNDLED MULTI-CHANNEL DATAGRAM (e.g., count == 2, 20 Bytes on wire):
+ * +-------------------------------------------------------------------------+
+ * | Header (4B) : ack=42, ack_channel=0, count=2                            |
+ * +-------------------------------------------------------------------------+
+ * | Record 0 (8B) -> Channel 0 [RELIABLE]   | seq=5 | tfv=ChatMsg           |
+ * +-------------------------------------------------------------------------+
+ * | Record 1 (8B) -> Channel 1 [UNRELIABLE] | seq=9 | tfv=PlayerPos         |
+ * +-------------------------------------------------------------------------+
+ *   -> Total Wire Length: 4 + (2 x 8) = 20 Bytes (fits in 84B Ethernet floor)
+ *
+ * ============================================================================
+ * 3. RECORD WIRE LAYOUT (8 Bytes - Zero Padding)
+ * ============================================================================
+ * +--------------+------------+------------------+--------------------------+
+ * | channel_id   | flags      | seq_num          | tfv_packet_u             |
+ * | (1 Byte)     | (1 Byte)   | (2 Bytes)        | (4 Bytes)                |
+ * +--------------+------------+------------------+--------------------------+
+ *
+ * ============================================================================
+ * 4. MULTI-CHANNEL SESSION DISPATCH FLOW
+ * ============================================================================
+ *
+ *  SOCKET RX (in_buf, in_len)
+ *          │
+ *          ▼
+ *  rudp_session_process_datagram()
+ *          │
+ *          ├─► Pass 1: Atomic Integrity & Wire Bounds Check
+ *          │
+ *          └─► Pass 2: Dispatch & State Mutation:
+ *                 ├─► 1. Piggybacked ACK:
+ *                 │      rudp_recv_ack_ex(primary_chan, header.ack, count == 0);
+ *                 │
+ *                 └─► 2. For each Record (0 .. count - 1):
+ *                        chan = &session->channels[rec.channel_id];
+ *                        │
+ *                        ├── ACK RECORD ──► rudp_recv_ack_ex(&chan->ctx, rec.seq_num, true)
+ *                        ├── RELIABLE   ──► In-order delivery (if buffer capacity) / Re-arm ACK if dup
+ *                        └── UNRELIABLE ──► RFC 1982 Anti-Rollback filter (last_unreliable_seq)
  * ============================================================================
  */
 /**
@@ -146,7 +179,7 @@ int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_
  * @param ack_num The sequence number of the next expected packet (N+1).
  * @return RUDP_OK on success, or negative error code on failure.
  */
-int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
+int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate_ack) {
     if (!ctx) {
         return RUDP_ERR_INVALID_ARG;
     }
@@ -182,8 +215,8 @@ int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
         // Window moved: this is a new ACK acknowledging fresh packets
         ctx->last_ack_received = ack_num;
         ctx->duplicate_ack_count = 0;
-    } else if (ctx->tail != ctx->head) {
-        // Window is stalled and packets are still in-flight
+    } else if (count_duplicate_ack && ctx->tail != ctx->head) {
+        // Only deliberate ACKs (Standalone ACK or explicit ACK record) count toward Fast Retransmit!
         if (ack_num == ctx->last_ack_received) {
             ctx->duplicate_ack_count++;
 
@@ -200,6 +233,84 @@ int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
     }
 
     return RUDP_OK;
+}
+
+int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
+    return rudp_recv_ack_ex(ctx, ack_num, true);
+}
+
+int rudp_session_init(rudp_session_s *session) {
+    if (!session) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    session->active_channels = 0;
+    session->reserved[0] = 0;
+    session->reserved[1] = 0;
+    session->reserved[2] = 0;
+    for (uint8_t i = 0; i < RUDP_MAX_CHANNELS; i++) {
+        session->channels[i].channel_id = i;
+        session->channels[i].flags = RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED;
+        session->channels[i].last_unreliable_seq = 0;
+        session->channels[i].has_unreliable_seq = 0;
+        session->channels[i].ack_pending = 0;
+        session->channels[i].last_ack_sent = 0;
+        session->channels[i].next_unreliable_seq = 0;
+        session->channels[i].reserved = 0;
+        rudp_init(&session->channels[i].ctx);
+    }
+
+    return RUDP_OK;
+}
+
+int rudp_session_config_channel(rudp_session_s *session, uint8_t channel_id, uint8_t flags) {
+    if (!session || channel_id >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    session->channels[channel_id].flags = flags;
+    if (channel_id >= session->active_channels) {
+        session->active_channels = (uint8_t)(channel_id + 1);
+    }
+
+    return RUDP_OK;
+}
+
+int rudp_session_reset_channel(rudp_session_s *session, uint8_t channel_id) {
+    if (!session || channel_id >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    rudp_channel_s *chan = &session->channels[channel_id];
+    chan->last_unreliable_seq = 0;
+    chan->has_unreliable_seq = 0;
+    chan->ack_pending = 0;
+    chan->last_ack_sent = 0;
+    chan->next_unreliable_seq = 0;
+    chan->reserved = 0;
+
+    return rudp_reset(&chan->ctx);
+}
+
+int rudp_session_reset(rudp_session_s *session) {
+    if (!session) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    for (uint8_t i = 0; i < RUDP_MAX_CHANNELS; i++) {
+        rudp_session_reset_channel(session, i);
+    }
+    session->active_channels = 0;
+
+    return RUDP_OK;
+}
+
+int rudp_session_send_reliable(rudp_session_s *session, uint8_t channel_id, tfv_packet_u payload, uint32_t now) {
+    if (!session || channel_id >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    return rudp_send(&session->channels[channel_id].ctx, payload, now);
 }
 
 
@@ -399,4 +510,332 @@ int rudp_get_unacked_slots(const rudp_context_s *ctx, uint16_t *out_indices, int
     }
 
     return count;
+}
+
+int rudp_pack_datagram_header(const rudp_datagram_header_s *header, uint8_t *out_buf, size_t max_len) {
+    if (!header || !out_buf || max_len < RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (header->ack_channel >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_buf[0] = (uint8_t)(header->ack >> 8);
+    out_buf[1] = (uint8_t)(header->ack & 0xFF);
+    out_buf[2] = header->ack_channel;
+    out_buf[3] = header->count;
+
+    return RUDP_WIRE_DATAGRAM_HEADER_SIZE;
+}
+
+int rudp_unpack_datagram_header(const uint8_t *in_buf, size_t in_len, rudp_datagram_header_s *out_header) {
+    if (!in_buf || !out_header || in_len < RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_header->ack         = ((uint16_t)in_buf[0] << 8) | in_buf[1];
+    out_header->ack_channel = in_buf[2];
+    out_header->count       = in_buf[3];
+
+    return RUDP_OK;
+}
+
+int rudp_pack_record(const rudp_record_s *record, uint8_t *out_buf, size_t max_len) {
+    if (!record || !out_buf || max_len < RUDP_WIRE_RECORD_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (record->channel_id >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_buf[0] = record->channel_id;
+    out_buf[1] = record->flags;
+    out_buf[2] = (uint8_t)(record->seq_num >> 8);
+    out_buf[3] = (uint8_t)(record->seq_num & 0xFF);
+
+    out_buf[4] = record->payload.type;
+    out_buf[5] = record->payload.flags;
+    out_buf[6] = (uint8_t)(record->payload.value >> 8);
+    out_buf[7] = (uint8_t)(record->payload.value & 0xFF);
+
+    return RUDP_WIRE_RECORD_SIZE;
+}
+
+int rudp_unpack_record(const uint8_t *in_buf, size_t in_len, rudp_record_s *out_record) {
+    if (!in_buf || !out_record || in_len < RUDP_WIRE_RECORD_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    out_record->channel_id = in_buf[0];
+    out_record->flags      = in_buf[1];
+    out_record->seq_num    = ((uint16_t)in_buf[2] << 8) | in_buf[3];
+
+    out_record->payload.type  = in_buf[4];
+    out_record->payload.flags = in_buf[5];
+    out_record->payload.value = ((uint16_t)in_buf[6] << 8) | in_buf[7];
+
+    return RUDP_OK;
+}
+
+int rudp_unpack_datagram(const uint8_t *in_buf, size_t in_len,
+                         rudp_datagram_header_s *out_header,
+                         rudp_record_s *out_records, size_t max_records) {
+    if (!in_buf || !out_header || in_len < RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    int ret = rudp_unpack_datagram_header(in_buf, in_len, out_header);
+    if (ret != RUDP_OK) {
+        return ret;
+    }
+
+    size_t expected_len = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)out_header->count * RUDP_WIRE_RECORD_SIZE);
+    if (in_len != expected_len) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    if (out_header->count > 0) {
+        if (!out_records || max_records < (size_t)out_header->count) {
+            return RUDP_ERR_INVALID_ARG;
+        }
+
+        for (uint8_t i = 0; i < out_header->count; i++) {
+            size_t offset = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)i * RUDP_WIRE_RECORD_SIZE);
+            ret = rudp_unpack_record(in_buf + offset, in_len - offset, &out_records[i]);
+            if (ret != RUDP_OK) {
+                return ret;
+            }
+        }
+    }
+
+    return RUDP_OK;
+}
+
+int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_channel,
+                                uint8_t *out_buf, size_t max_len) {
+    if (!session || !out_buf || primary_ack_channel >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (max_len < RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return RUDP_ERR_BUFFER_FULL;
+    }
+
+    rudp_channel_s *prim_chan = &session->channels[primary_ack_channel];
+
+    /* Determine how many 8-byte records can fit into the provided buffer */
+    size_t cap_records = (max_len - RUDP_WIRE_DATAGRAM_HEADER_SIZE) / RUDP_WIRE_RECORD_SIZE;
+    if (cap_records > 255) {
+        cap_records = 255;
+    }
+
+    uint8_t count = 0;
+
+    /* 1. Bundling priority: Multi-channel explicit ACK records for any other channel with ack_pending */
+    for (uint8_t c = 0; c < RUDP_MAX_CHANNELS && count < cap_records; c++) {
+        if (c != primary_ack_channel && session->channels[c].ack_pending) {
+            rudp_channel_s *chan = &session->channels[c];
+            rudp_record_s rec;
+            rec.channel_id = c;
+            rec.flags = RUDP_RECORD_FLAG_ACK;
+            rec.seq_num = chan->ctx.expected_seq_num;
+            rec.payload.raw = 0;
+
+            size_t offset = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)count * RUDP_WIRE_RECORD_SIZE);
+            int ret = rudp_pack_record(&rec, out_buf + offset, max_len - offset);
+            if (ret != RUDP_WIRE_RECORD_SIZE) {
+                return ret;
+            }
+
+            chan->last_ack_sent = rec.seq_num;
+            chan->ack_pending = 0;
+            count++;
+        }
+    }
+
+    /* 2. Bundling priority: In-flight reliable slots waiting in channel tx_buffers */
+    for (uint8_t c = 0; c < RUDP_MAX_CHANNELS && count < cap_records; c++) {
+        rudp_channel_s *chan = &session->channels[c];
+        uint16_t curr = chan->ctx.tail;
+        while (curr != chan->ctx.head && count < cap_records) {
+            rudp_slot_s *slot = &chan->ctx.tx_buffer[curr];
+            if (slot->state == RUDP_SLOT_IN_FLIGHT) {
+                rudp_record_s rec;
+                rec.channel_id = c;
+                rec.flags = RUDP_RECORD_FLAG_RELIABLE;
+                rec.seq_num = slot->frame.header.seq_num;
+                rec.payload = slot->frame.packet;
+
+                size_t offset = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)count * RUDP_WIRE_RECORD_SIZE);
+                int ret = rudp_pack_record(&rec, out_buf + offset, max_len - offset);
+                if (ret != RUDP_WIRE_RECORD_SIZE) {
+                    return ret;
+                }
+                count++;
+            }
+            curr = (curr + 1) & (RUDP_WINDOW_SIZE - 1);
+        }
+    }
+
+    /* 3. Pack the primary 4-byte datagram header at the beginning of out_buf */
+    rudp_datagram_header_s d_header;
+    d_header.ack = prim_chan->ctx.expected_seq_num;
+    d_header.ack_channel = primary_ack_channel;
+    d_header.count = count;
+
+    int ret = rudp_pack_datagram_header(&d_header, out_buf, max_len);
+    if (ret != RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return ret;
+    }
+
+    prim_chan->last_ack_sent = d_header.ack;
+    prim_chan->ack_pending = 0;
+
+    return (int)(RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)count * RUDP_WIRE_RECORD_SIZE));
+}
+
+int rudp_session_send_unreliable(rudp_session_s *session, uint8_t channel_id,
+                                 tfv_packet_u payload, uint8_t ack_channel,
+                                 uint8_t *out_buf, size_t max_len) {
+    if (!session || !out_buf) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (channel_id >= RUDP_MAX_CHANNELS || ack_channel >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (max_len < (RUDP_WIRE_DATAGRAM_HEADER_SIZE + RUDP_WIRE_RECORD_SIZE)) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    rudp_channel_s *chan = &session->channels[channel_id];
+    rudp_channel_s *ack_chan = &session->channels[ack_channel];
+
+    rudp_datagram_header_s d_header;
+    d_header.ack = ack_chan->ctx.expected_seq_num;
+    d_header.ack_channel = ack_channel;
+    d_header.count = 1;
+
+    int ret = rudp_pack_datagram_header(&d_header, out_buf, max_len);
+    if (ret != RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return ret;
+    }
+
+    ack_chan->last_ack_sent = d_header.ack;
+    ack_chan->ack_pending = 0;
+
+    rudp_record_s record;
+    record.channel_id = channel_id;
+    record.flags = RUDP_RECORD_FLAG_UNRELIABLE;
+    record.seq_num = chan->next_unreliable_seq++;
+    record.payload = payload;
+
+    ret = rudp_pack_record(&record, out_buf + RUDP_WIRE_DATAGRAM_HEADER_SIZE,
+                           max_len - RUDP_WIRE_DATAGRAM_HEADER_SIZE);
+    if (ret != RUDP_WIRE_RECORD_SIZE) {
+        return ret;
+    }
+
+    return (RUDP_WIRE_DATAGRAM_HEADER_SIZE + RUDP_WIRE_RECORD_SIZE);
+}
+
+int rudp_session_process_datagram(rudp_session_s *session, const uint8_t *in_buf, size_t in_len,
+                                  rudp_record_s *out_delivered, size_t max_delivered) {
+    if (!session || !in_buf || in_len < RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    rudp_datagram_header_s header;
+    int ret = rudp_unpack_datagram_header(in_buf, in_len, &header);
+    if (ret != RUDP_OK) {
+        return ret;
+    }
+
+    if (header.ack_channel >= RUDP_MAX_CHANNELS) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    size_t expected_len = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)header.count * RUDP_WIRE_RECORD_SIZE);
+    if (in_len != expected_len) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    /* PASS 1: Atomicity & Integrity Validation
+     * Verify all records unpack successfully and have valid channel IDs BEFORE mutating any session state. */
+    if (header.count > 0 && (!out_delivered || max_delivered == 0)) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+
+    for (uint8_t i = 0; i < header.count; i++) {
+        size_t offset = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)i * RUDP_WIRE_RECORD_SIZE);
+        rudp_record_s rec;
+        ret = rudp_unpack_record(in_buf + offset, in_len - offset, &rec);
+        if (ret != RUDP_OK) {
+            return ret;
+        }
+        if (rec.channel_id >= RUDP_MAX_CHANNELS) {
+            return RUDP_ERR_INVALID_ARG;
+        }
+    }
+
+    /* PASS 2: State Mutation and Delivery */
+    /* 1. Dispatch piggybacked ACK to target channel sliding window.
+     * Note: Passive piggyback on datagrams with data (count > 0) does NOT count duplicate ACKs (RFC 5681). */
+    rudp_recv_ack_ex(&session->channels[header.ack_channel].ctx, header.ack, (header.count == 0));
+
+    /* If standalone ACK (count == 0), no records to deliver */
+    if (header.count == 0) {
+        return 0;
+    }
+
+    /* 2. Process bundled message records */
+    int delivered_count = 0;
+    for (uint8_t i = 0; i < header.count; i++) {
+        size_t offset = RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)i * RUDP_WIRE_RECORD_SIZE);
+        rudp_record_s rec;
+        (void)rudp_unpack_record(in_buf + offset, in_len - offset, &rec);
+
+        rudp_channel_s *chan = &session->channels[rec.channel_id];
+
+        if (rec.flags & RUDP_RECORD_FLAG_ACK) {
+            /* Explicit multi-channel ACK record: routes cumulative ACK and counts duplicate ACKs */
+            rudp_recv_ack_ex(&chan->ctx, rec.seq_num, true);
+        } else if (rec.flags & RUDP_RECORD_FLAG_RELIABLE) {
+            /* Reliable delivery via channel sliding window */
+            if (rec.seq_num == chan->ctx.expected_seq_num) {
+                if ((size_t)delivered_count < max_delivered) {
+                    out_delivered[delivered_count++] = rec;
+                    chan->ctx.expected_seq_num++;
+                    chan->ack_pending = 1;
+                }
+                /* If out_delivered is saturated, do not increment expected_seq_num and do not set ack_pending.
+                 * The un-delivered record will be dropped, forcing the sender to retransmit it later. */
+            } else {
+                /* Duplicate or retransmitted packet check (RFC 1982 sequence distance) */
+                int16_t diff = (int16_t)(rec.seq_num - chan->ctx.expected_seq_num);
+                if (diff < 0) {
+                    /* Peer retransmitted an earlier packet (its ACK may have been lost).
+                     * Re-arm ACK so next outgoing datagram unblocks the peer. */
+                    chan->ack_pending = 1;
+                }
+            }
+        } else {
+            /* Unreliable delivery via 16-bit anti-rollback sequence filter (RFC 1982) */
+            if (!chan->has_unreliable_seq) {
+                if ((size_t)delivered_count < max_delivered) {
+                    chan->last_unreliable_seq = rec.seq_num;
+                    chan->has_unreliable_seq = 1;
+                    out_delivered[delivered_count++] = rec;
+                }
+            } else {
+                uint16_t distance = (uint16_t)(rec.seq_num - chan->last_unreliable_seq);
+                if (distance != 0 && distance < 0x8000U) {
+                    if ((size_t)delivered_count < max_delivered) {
+                        chan->last_unreliable_seq = rec.seq_num;
+                        out_delivered[delivered_count++] = rec;
+                    }
+                }
+            }
+        }
+    }
+
+    return delivered_count;
 }

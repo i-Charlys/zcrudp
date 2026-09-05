@@ -1,0 +1,10 @@
+Host: Linux 6.18.33.2-microsoft-standard-WSL2 x86_64
+Compiler: 13.3.0
+Timer: CLOCK_MONOTONIC; 7 samples; 1000000 iterations/sample; 10000 warmup operations/case
+Latency = amortized ns/op, including loop/checksum; throughput = Mops/s (Mpps for frame/record rows). No sockets or allocation in measured loops.
+frame_encode_8B                  1.994 ns/op [1.932, 3.245]   501.529 Mops/s
+frame_decode_8B                  9.429 ns/op [8.779, 10.949]   106.060 Mops/s
+record_encode_8B                 1.964 ns/op [1.929, 3.661]   509.146 Mops/s
+record_decode_8B                 9.318 ns/op [9.234, 13.296]   107.316 Mops/s
+datagram_decode_16_records      21.508 ns/op [18.521, 30.856]    46.495 Mops/s
+Checksum: 20731850360

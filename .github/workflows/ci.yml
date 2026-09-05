@@ -22,3 +22,5 @@ jobs:
     - name: Run Memory Sanitizers (ASan & UBSan)
       run: make clean && make asan
 
+    - name: Test POSIX demo and benchmark reports
+      run: make test-tools
