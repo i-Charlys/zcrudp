@@ -140,8 +140,8 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 *Run in parallel / at the end to build the portfolio showcase.*
 
 - [ ] **Extended Test Suite**: Unit tests for edge cases (wraparound rollover, out-of-order delivery, corrupted ACKs, maximum retry limits).
-- [ ] **Interactive CLI Demo (`examples/demo_loss.c`)**: Runnable 2-node client/server demo with configurable simulated packet loss and latency injection.
-- [ ] **Benchmarking Suite (`bench/bench_rudp.c`)**: Measure packet encoding/decoding throughput (Mpps) and latency (ns) with performance graphs for `README.md`.
+- [x] **Interactive CLI Demo (`examples/demo_loss.c`)**: POSIX two-peer UDP demo with reliable/unreliable commands, configurable loss/latency/jitter, seeded simulation, bounded delay queue, automatic traffic and integration tests (`make demo`, `make test-tools`).
+- [x] **Benchmarking Suite (`bench/bench_rudp.c`)**: Codec throughput (Mops/s, Mpps for single frames/records) and amortized cost (ns/op), repeated samples and reproducible CSV/SVG performance graphs in `README.md` (`make bench`, `make bench-report`).
 - [ ] **CMake Integration (`CMakeLists.txt`)**: Modern CMake build script alongside `Makefile` for one-click integration into game engines (Raylib, SDL2, Unreal, Godot).
 - [ ] **One-Command Multi-Language Bindings (Python, Node/Bun, Rust, Go, C++)**:
   - Provide a single command (e.g. `make bindings` or `pip install -e .`) to build and expose the C-ABI shared library (`librudp.so`).

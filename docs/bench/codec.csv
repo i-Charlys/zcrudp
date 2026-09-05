@@ -1,0 +1,6 @@
+operation,iterations,samples,min_ns_per_op,median_ns_per_op,max_ns_per_op,Mops_per_s,Mrecords_per_s
+frame_encode_8B,1000000,7,1.932,1.994,3.245,501.529,501.529
+frame_decode_8B,1000000,7,8.779,9.429,10.949,106.060,106.060
+record_encode_8B,1000000,7,1.929,1.964,3.661,509.146,509.146
+record_decode_8B,1000000,7,9.234,9.318,13.296,107.316,107.316
+datagram_decode_16_records,1000000,7,18.521,21.508,30.856,46.495,743.921
