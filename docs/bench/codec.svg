@@ -4,15 +4,15 @@
 <text x="25" y="32" font-size="22">zcrudp: in-memory codecs (not network latency)</text>
 <text x="25" y="57" font-size="13">7 batches x 1000000 operations; median; warm cache; CLOCK_MONOTONIC</text>
 <text x="25" y="95" font-size="16">Amortized cost: ns/operation (lower is better)</text>
-<text x="25" y="129" font-size="13">frame_encode_8B</text><rect x="300" y="113" width="46.35" height="22" fill="#2563eb"/><text x="356.35" y="129" font-size="13">1.99</text>
-<text x="25" y="164" font-size="13">frame_decode_8B</text><rect x="300" y="148" width="219.19" height="22" fill="#2563eb"/><text x="529.19" y="164" font-size="13">9.43</text>
-<text x="25" y="199" font-size="13">record_encode_8B</text><rect x="300" y="183" width="45.66" height="22" fill="#2563eb"/><text x="355.66" y="199" font-size="13">1.96</text>
-<text x="25" y="234" font-size="13">record_decode_8B</text><rect x="300" y="218" width="216.63" height="22" fill="#2563eb"/><text x="526.63" y="234" font-size="13">9.32</text>
-<text x="25" y="269" font-size="13">datagram_decode_16_records</text><rect x="300" y="253" width="500.00" height="22" fill="#2563eb"/><text x="810.00" y="269" font-size="13">21.51</text>
+<text x="25" y="129" font-size="13">frame_encode_8B</text><rect x="300" y="113" width="39.03" height="22" fill="#2563eb"/><text x="349.03" y="129" font-size="13">2.01</text>
+<text x="25" y="164" font-size="13">frame_decode_8B</text><rect x="300" y="148" width="188.35" height="22" fill="#2563eb"/><text x="498.35" y="164" font-size="13">9.72</text>
+<text x="25" y="199" font-size="13">record_encode_8B</text><rect x="300" y="183" width="92.23" height="22" fill="#2563eb"/><text x="402.23" y="199" font-size="13">4.76</text>
+<text x="25" y="234" font-size="13">record_decode_8B</text><rect x="300" y="218" width="191.31" height="22" fill="#2563eb"/><text x="501.31" y="234" font-size="13">9.87</text>
+<text x="25" y="269" font-size="13">datagram_decode_16_records</text><rect x="300" y="253" width="500.00" height="22" fill="#2563eb"/><text x="810.00" y="269" font-size="13">25.80</text>
 <text x="25" y="320" font-size="16">Throughput: million operations/s (higher is better)</text>
-<text x="25" y="354" font-size="13">frame_encode_8B</text><rect x="300" y="338" width="492.52" height="22" fill="#0f766e"/><text x="802.52" y="354" font-size="13">501.53</text>
-<text x="25" y="389" font-size="13">frame_decode_8B</text><rect x="300" y="373" width="104.15" height="22" fill="#0f766e"/><text x="414.15" y="389" font-size="13">106.06</text>
-<text x="25" y="424" font-size="13">record_encode_8B</text><rect x="300" y="408" width="500.00" height="22" fill="#0f766e"/><text x="810.00" y="424" font-size="13">509.15</text>
-<text x="25" y="459" font-size="13">record_decode_8B</text><rect x="300" y="443" width="105.39" height="22" fill="#0f766e"/><text x="415.39" y="459" font-size="13">107.32</text>
-<text x="25" y="494" font-size="13">datagram_decode_16_records</text><rect x="300" y="478" width="45.66" height="22" fill="#0f766e"/><text x="355.66" y="494" font-size="13">46.50</text>
+<text x="25" y="354" font-size="13">frame_encode_8B</text><rect x="300" y="338" width="500.00" height="22" fill="#0f766e"/><text x="810.00" y="354" font-size="13">496.53</text>
+<text x="25" y="389" font-size="13">frame_decode_8B</text><rect x="300" y="373" width="103.60" height="22" fill="#0f766e"/><text x="413.60" y="389" font-size="13">102.88</text>
+<text x="25" y="424" font-size="13">record_encode_8B</text><rect x="300" y="408" width="211.56" height="22" fill="#0f766e"/><text x="521.56" y="424" font-size="13">210.10</text>
+<text x="25" y="459" font-size="13">record_decode_8B</text><rect x="300" y="443" width="102.00" height="22" fill="#0f766e"/><text x="412.00" y="459" font-size="13">101.29</text>
+<text x="25" y="494" font-size="13">datagram_decode_16_records</text><rect x="300" y="478" width="39.03" height="22" fill="#0f766e"/><text x="349.03" y="494" font-size="13">38.76</text>
 <text x="25" y="550" font-size="12">One operation = one 8B frame/record, or one 132B datagram (16 records) on the last row.</text></g></svg>

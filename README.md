@@ -1,15 +1,52 @@
 # zcrudp
 
-A zero-malloc, 32-bit fixed-frame Reliable UDP library in pure C.
+**Small packets. Fixed memory. Your event loop.**
 
-## Description
+Reliable and unreliable UDP messaging for tiny, frequent updates — in one C11
+source file and two headers. You own the buffers, the clock and the socket.
 
-`zcrudp` is a lightweight, high-performance Reliable UDP (RUDP) implementation designed for embedded systems and performance-critical applications. It operates with zero dynamic memory allocation, using a fixed-frame 32-bit structure for both headers and data.
+| 0 heap allocation calls in the core | 0 external core dependencies | 12-byte single-update datagram |
+| :---: | :---: | :---: |
+| Caller-owned, bounded storage | Compile directly into your project | Includes a 4-byte TFV payload and a channel-specific ACK |
+
+Built for game inputs, compact state updates and telemetry where memory ownership
+and small messages are part of the design. Reliable events use bounded TX windows;
+fresh unreliable updates bypass those windows and never wait for a missing sequence.
+
+**Try it in two terminals:**
+
+```bash
+make demo
+./build/demo_loss server --loss 20 --latency 40
+# In another terminal:
+./build/demo_loss client --loss 20 --latency 40
+```
+
+Type `r 1234` for a reliable event, `u 5678` for a fresh update, or `stats` to see
+loss and recovery. [Demo options](#interactive-loss-and-latency-demo) ·
+[Measure it yourself](#codec-benchmarks) · [Compare the designs](docs/COMPARISON.md)
+
+## A small core with a measurable budget
+
+- **1,040 bytes per context; 4,212 bytes per four-channel session** on the measured
+  host ABI with default settings. Run `make test` to inspect sizes on your target.
+  Each default TX ring has 64 slots and holds 63 outstanding reliable messages.
+- **4-byte ACK; 12-byte single-update datagram; 132 bytes for 16 data records.**
+  These are UDP payload sizes, excluding UDP/IP and link-layer overhead.
+- **No heap calls, background threads or socket API in the core.** Integrate
+  `src/rudp.c` and the two headers; call the protocol from your own loop.
+- **Evidence you can rerun:** strict C11 tests, loss/jitter demo, codec timing,
+  CSV output and generated graphs. [Raw results](docs/bench/codec.csv).
+
+The current codec baseline and its measurement conditions are shown below.
+These are in-memory operations, not network delivery rates or competitor speedups.
+
+![Codec cost and throughput](docs/bench/codec.svg)
 
 ## Key Features
 
 - **Zero-malloc**: All memory is managed through static or stack-allocated contexts.
-- **Fixed-frame RUDP**: Optimized for 32-bit architectures with a total frame size of 8 bytes (4-byte header + 4-byte payload).
+- **Explicit wire format**: Unified datagrams use a 4-byte envelope and 8-byte records (channel, flags, sequence, TFV). The legacy single-context frame is 8 bytes total.
 - **Cumulative ACKs**: Implements a sliding window (default 64 slots) with cumulative acknowledgment logic.
 - **Retransmission**: Built-in timeout handling and retransmission tracking.
 - **TFV Integration**: Uses a 32-bit Type-Flags-Value (TFV) structure for the payload.
@@ -185,8 +222,6 @@ UDP packet rate. The final row counts whole datagrams per operation; its CSV als
 reports the corresponding record throughput. Encoding and decoding are measured
 separately, with hot data, and not as an end-to-end transport workload.
 
-![Codec cost and throughput](docs/bench/codec.svg)
-
 The checked-in example was measured on an Intel Core Ultra 9 288V, x86-64 WSL2,
 with GCC 13.3.0, `-O2` and `-fno-lto`, using 1,000,000 operations per batch.
 See the [raw CSV](docs/bench/codec.csv) and [environment/run log](docs/bench/environment.txt).
@@ -207,25 +242,27 @@ reliable recovery under simulated loss/jitter, unreliable ordering, total loss,
 and CSV/SVG report validity. This target does not enforce timing-based performance
 thresholds and is separate from the portable core tests.
 
-## Comparison with Other Libraries
+## How it compares
 
-| Feature | `zcrudp` | `ENet` | `KCP` | `Valve GNS` | `QUIC (RFC 9000)` |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Allocation Model** | **Strict Zero-Malloc** | Dynamic (`malloc`) | Custom Hook / Heap | Object Pools / Heap | Dynamic Heap |
-| **Connection Footprint** | **1,040 B** (ctx) / **4,212 B** (4 ch) | ~20 - 64 KB | ~8 - 32 KB | > 100 KB | > 150 KB |
-| **Bare-Metal MCU Ready** | **Yes** (STM32, ESP32, lwIP) | No (OS-tied) | With static pool | No | No |
-| **Payload Specialization** | **Fixed 4-byte TFV (compact)** | Arbitrary MTU / Chunks | Arbitrary MTU / Chunks | Arbitrary MTU / Chunks | Arbitrary Byte Streams |
-| **Wire Header Size** | **4 B** (ack) / **8 B** (frame) | 28 - 48 B | 24 B | 15 - 40+ B | 20 - 50+ B |
-| **Multi-Channel Multiplexing**| **Native (4 isolated channels)** | Native | Manual (1 cb/stream)| Native (Multi-lane) | Native (Streams) |
-| **Head-of-Line Blocking** | **Zero Inter-Channel** (Go-Back-N intra-ch) | Partial | High (single stream)| None | None |
-| **Intra-Tick Multi-ACK Bundling**| **Yes** (`build_datagram`) | Piggybacked | Piggybacked | Batched frames | SACK frames |
-| **Codec Throughput (Single Core)**| **~2.0 ns / op** (~500 Mops/s) | ~120 - 250 ns | ~45 - 80 ns | ~300 - 800 ns | Complex AEAD |
-| **Distributed AI KV-Cache** | **Engineered (Prefill-Decode)**| Unsuitable | Unsuitable | Average | Average (HTTP/3) |
+For a single four-byte message, the unified zcrudp datagram occupies **12 bytes
+of UDP payload**, compared with **28 bytes for a KCP PUSH segment**: 57% fewer
+bytes at this layer in that specific case. ENet's reliable encoding is already
+close, at 12–14 bytes under the stated assumptions. These are calculations from
+wire definitions, not throughput measurements. See the
+[sourced layouts and assumptions](docs/COMPARISON.md#small-message-wire-comparison).
 
-> [!NOTE]
-> `zcrudp` eliminates Head-of-Line blocking between separate channels. Within a single reliable channel, strict in-order Go-Back-N delivery applies. Codec throughput reflects pure in-memory serialization (`bench/bench_rudp.c`), isolated from OS socket I/O.
+The strongest reason to choose zcrudp is its combination of caller-owned fixed
+storage, small records and separate reliable/unreliable paths. The current tests
+verify that automatic unreliable updates continue when the reliable TX window
+fills, that the simulation preserves deadline order, and that sequence gaps
+trigger ACKs without wrapping the duplicate-ACK counter.
 
-For complete technical benchmarks, packet layouts, and architectural analysis, see [docs/COMPARISON.md](docs/COMPARISON.md).
+For general large messages, built-in security or broader networking features,
+evaluate ENet, KCP, GNS or QUIC against those needs. This repository has no matched
+competitor timing or peak-memory measurements yet. It also does not demonstrate
+bulk KV-cache transfer or hardware-validated MCU integration. The
+[comparison guide](docs/COMPARISON.md) details the scope and the experiments needed
+to substantiate future speedup claims.
 
 ## License
 
