@@ -97,5 +97,4 @@ ACKs, clock wrap, timer boundaries, lost fast repair, reset and fixed-mode check
 `make test-tools` checks real UDP peers in both fixed and adaptive modes.
 The demo accepts `--adaptive 1`; `--timeout` sets its initial RTO (bounds 10..60000).
 
-[Current data and graphs](bench/comparison/README.md) ·
-[Preserved phase-4 results](bench/phase4-baseline/README.md).
+[Current data and graphs](bench/comparison/README.md).

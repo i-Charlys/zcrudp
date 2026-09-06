@@ -22,10 +22,10 @@ def run(engine, loss):
     return row[:15] + row[16:]
 
 
-for engine in range(4):
+for engine in range(5):
     for loss in (0, 1):
         assert run(engine, loss) == run(engine, loss)
-print("PASS: four engine profiles, reliable ordered delivery, loss, deterministic replay")
+print("PASS: five engine profiles, reliable ordered delivery, loss, deterministic replay")
 
 # Recovery gate: unchanged workload; adaptive timer policy explicitly enabled in harness.
 seeds = int(os.environ.get("RECOVERY_SEEDS", "5"))

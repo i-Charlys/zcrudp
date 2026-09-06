@@ -129,6 +129,5 @@ reversed chunks, data/ACK loss, backpressure and bounded oversized-message disca
 real POSIX UDP peers and DSCP option handling. `make test-compare` gates the ten
 2,400-message, 240 Hz, 1%/5% loss scenarios with the original five seeds.
 
-[Before/after results](bench/before-phase4/README.md) preserve the old failures.
 There is no datacenter, RDMA, congestion-control, security or production-readiness
 certification implied by completion of this phase.

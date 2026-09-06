@@ -6,10 +6,6 @@ small game updates and embedded telemetry. It uses caller-owned buffers, with no
 heap allocation or external dependencies. The application provides the clock,
 socket and event loop.
 
-<p align="center">
-  <img alt="zcrudp Multi-Channel Protocol Architecture and Operational Model" src="docs/visual/overview.svg" width="100%">
-</p>
-
 ## Why zcrudp?
 
 Standard reliable streams (like TCP) suffer from **Head-of-Line blocking**: when a single packet is dropped by Wi-Fi or cellular jitter, the entire connection freezes while waiting for a retransmission—causing visible stutter, lag spikes, and input delays in real-time games and embedded systems.
@@ -20,7 +16,7 @@ Standard reliable streams (like TCP) suffer from **Head-of-Line blocking**: when
 - **Zero Heap Overhead:** 0 dynamic memory allocations (`malloc`), 4-byte minimal ACKs, and a fixed 5,620-byte session footprint that fits in MCU RAM or CPU L1 cache.
 
 [Interactive web replay](docs/visual/index.html) ·
-[Transport benchmarks](#transport-benchmarks-vs-enet-and-kcp) ·
+[Transport benchmarks](#transport-benchmarks-vs-enet-enet-zpl-and-kcp) ·
 [Codec benchmarks](#codec-benchmarks) ·
 [Interactive CLI demo](#interactive-loss-and-latency-demo)
 
@@ -36,7 +32,7 @@ make demo
 
 Type `r 1234` for a reliable event, `u 5678` for a fresh update, or `stats` to see
 loss and recovery. [Demo options](#interactive-loss-and-latency-demo) ·
-[Measure it yourself](#codec-benchmarks) · [Compare throughput and latency](#transport-benchmarks-vs-enet-and-kcp)
+[Measure it yourself](#codec-benchmarks) · [Compare throughput and latency](#transport-benchmarks-vs-enet-enet-zpl-and-kcp)
 
 ## Memory and wire format
 
@@ -48,45 +44,40 @@ loss and recovery. [Demo options](#interactive-loss-and-latency-demo) ·
   These are UDP payload sizes, excluding UDP/IP and link-layer overhead.
 - **No heap calls, background threads or socket API in the core.** Integrate
   `src/rudp.c` and the two headers; call the protocol from your own loop.
-- **Optional phase-4 profiles:** bounded multipart messages, priority scheduling,
+- **Optional transport profiles:** bounded multipart messages, priority scheduling,
   compact4/rolling8 scalar telemetry and adaptive duplication. Add `src/profiles.c`
   when needed. [Wire formats, API contracts and tradeoffs](docs/PHASE4.md).
 
-## Transport benchmarks vs ENet and KCP
+## Transport benchmarks vs ENet, ENet (zpl), and KCP
 
-The comparative runner executes zcrudp, ENet and KCP (default and fast profiles):
-2,400 reliable ordered
-four-byte messages, six scenarios, five seeds — **120 recorded runs**.
+The comparative runner executes zcrudp, ENet (lsalzman), ENet-zpl (zpl-c), and KCP (default and fast profiles):
+2,400 reliable ordered four-byte messages, six scenarios, five seeds — **150 recorded runs**.
 
 ![Delivered throughput comparison](docs/bench/comparison/throughput.svg)
 
 ![Tail latency comparison](docs/bench/comparison/latency-p99.svg)
 
+![Datagram wire cost comparison](docs/bench/comparison/wire-cost.svg)
+
 These are **virtual-link transport measurements**: common delay/loss/jitter and
 1 ms service cadence, not physical-NIC benchmarks. The no-loss saturation cases
-show zcrudp matching ENet's goodput at the common 63-message admission limit.
-zcrudp emits fewer UDP-payload bytes in this tiny-message workload.
+show zcrudp matching ENet and ENet-zpl goodput at the common 63-message admission limit.
+zcrudp emits fewer UDP-payload bytes in this tiny-message workload (8.1 B vs 18.2 B per message).
 
 With adaptive recovery enabled, the median of the five per-run p99 values at
-5% loss is 57 ms, compared with 263 ms for fixed-timeout zcrudp and 167 ms for
-ENet. It costs 352 B of session state and about 9% more UDP-payload traffic than
-the fixed-timeout baseline (about 24% less than ENet in this workload).
+5% loss is 57 ms for zcrudp, compared with 167 ms for ENet, 378 ms for ENet-zpl,
+and 69 ms for KCP-fast. It costs 352 B of session state and uses substantially less
+UDP-payload traffic than ENet, ENet-zpl, and KCP.
 These results depend on the workload and transport settings, including KCP's
 selected profile. See [recovery settings and tradeoffs](docs/ADAPTIVE_RECOVERY.md).
 
-![Adaptive recovery compared with phase 4 and ENet](docs/bench/comparison/adaptive-recovery.svg)
-
 [p50 latency](docs/bench/comparison/latency-p50.svg) ·
-[Datagram traffic](docs/bench/comparison/wire-cost.svg) ·
 [Host execution cost](docs/bench/comparison/host-cost.svg) ·
 [Raw CSV](docs/bench/comparison/results.csv) ·
 [Methodology and exact settings](docs/bench/comparison/README.md)
 
-The earlier [RX-buffering regression results](docs/bench/before-phase4/README.md)
-are preserved separately, including failed runs.
-
 ```bash
-make compare COMPARE_PYTHON='uv run --with matplotlib==3.11.1 python'
+make compare COMPARE_PYTHON='uv run --with matplotlib python'
 make test-compare  # Small deterministic comparisons; no plotting package needed
 ```
 

@@ -9,9 +9,12 @@
     "-fno-lto",
     "-UNDEBUG",
     "-I/home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/include",
+    "-I/home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/bench",
     "-I/home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/build/compare-deps/kcp-b1a7a2101dcbb96017681a500d6b82bbe5a88766",
     "-I/home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/build/compare-deps/enet-5a9c537fd464b3c6d3c55e1d3bd47588faf71b42/include",
+    "-I/home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/build/compare-deps/enet-8b43b92591fa9458662262a598b092ecc5132865/include",
     "/home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/bench/compare_transport.c",
+    "/home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/bench/compare_enet_zpl.c",
     "/home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/src/rudp.c",
     "/home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/build/compare-deps/kcp-b1a7a2101dcbb96017681a500d6b82bbe5a88766/ikcp.c",
     "/home/charl/.gemini/antigravity/worktrees/zcrudp/feedback_project_analysis/build/compare-deps/enet-5a9c537fd464b3c6d3c55e1d3bd47588faf71b42/callbacks.c",
@@ -27,19 +30,28 @@
   "sources": {
     "enet": [
       "lsalzman",
+      "enet",
       "5a9c537fd464b3c6d3c55e1d3bd47588faf71b42",
       "537d42f31b0c0d27f5a9635f6c224f2451c1c1484bfde50e94c884e96181c290"
     ],
+    "enet-zpl": [
+      "zpl-c",
+      "enet",
+      "8b43b92591fa9458662262a598b092ecc5132865",
+      "355d615f088d82ae4f01623a82b2b4d5dce2a504a57ffaea9eb701b2da3e007e"
+    ],
     "kcp": [
       "skywind3000",
+      "kcp",
       "b1a7a2101dcbb96017681a500d6b82bbe5a88766",
       "291d08cd1fba918645a12078cbb6dfffa0825c57e33c0d0ec093604621bf3292"
     ]
   },
-  "zcrudp_source_sha256": "3c3d4094f6c6b658dfa2c5dfb3fae52ef43185bb8127339fb81599e7fb1cb04c",
-  "zcrudp_header_sha256": "60514f11a4e0d7cf20a4feb601fd20f016f3662f7eb5c4a257cb67f289493612",
-  "harness_sha256": "c8bd90679b943b7d3422851315a7e9a6fcaba662b5a08ed067992eaf348d1097",
-  "runner_sha256": "36d2420f3ab0e3373c14a5f920b8aa19089b60296c0f3a29d6a4aebaef73baf7",
+  "zcrudp_source_sha256": "3055d2fe3010661a697630218fe75c10cf813bc49a70453747f9b42162bbbff5",
+  "zcrudp_header_sha256": "abaed94c46599a163cc7af97df4ec1062162d4bf66fb2e79799bada86b2cd12a",
+  "harness_sha256": "eb5430cb3e88fb7d3c2958f2587d4d16124381d38580947bc63e964aea436146",
+  "enet_zpl_bridge_sha256": "542a6f6f7ec0af8606c0ac4dfd61dad485169b8745a7cf3736580964e8be1d15",
+  "runner_sha256": "9a5aaef585d716a77bd1723505bb01078638b9f1a6bd871016f28b1d6ee43486",
   "messages": 2400,
   "seeds": 5,
   "simulation": "1ms ticks; unlimited bandwidth; jitter 0..5ms when loss>0",

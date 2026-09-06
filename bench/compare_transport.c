@@ -2,6 +2,7 @@
 #include "protocol_rudp.h"
 #include "ikcp.h"
 #include <enet/enet.h>
+#include "compare_enet_zpl.h"
 #include <assert.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -39,7 +40,10 @@ static uint32_t random_next(void) {
 static int earlier(const datagram_s *a, const datagram_s *b) {
   return a->due < b->due || (a->due == b->due && a->order < b->order);
 }
-static void link_send(int from, const void *bytes, unsigned len) {
+int link_has_pending(void) {
+  return sizes[0] > 0 || sizes[1] > 0;
+}
+void link_send(int from, const void *bytes, unsigned len) {
   assert(from == 0 || from == 1); assert(len <= MTU);
   wire_bytes += len; wire_packets++;
   if (random_next() % 100 < loss_percent) { lost_packets++; return; }
@@ -54,7 +58,7 @@ static void link_send(int from, const void *bytes, unsigned len) {
   }
   heaps[to][i] = p;
 }
-static unsigned link_receive(int to, void *bytes) {
+unsigned link_receive(int to, void *bytes) {
   if (!sizes[to] || heaps[to][0].due > now) return 0;
   unsigned len = heaps[to][0].len;
   memcpy(bytes, heaps[to][0].bytes, len);
@@ -69,7 +73,7 @@ static unsigned link_receive(int to, void *bytes) {
   if (sizes[to]) heaps[to][i] = last;
   return len;
 }
-static void delivery(const uint8_t *bytes, size_t len) {
+void delivery(const uint8_t *bytes, size_t len) {
   assert(len == 4 && bytes[0] == 1 && bytes[1] == 0);
   unsigned id = ((unsigned)bytes[2] << 8) | bytes[3];
   assert(id == delivered && delivered < admitted); /* Exactly once, in order. */
@@ -126,7 +130,7 @@ static void enet_service(int side, int setup) {
   assert(ret == 0);
 }
 
-/* Engines: 0=zcrudp, 1=ENet defaults, 2=KCP defaults, 3=KCP fast profile. */
+/* Engines: 0=zcrudp, 1=ENet defaults, 2=ENet-zpl defaults, 3=KCP defaults, 4=KCP fast profile. */
 static void setup(unsigned engine) {
   sizes[0] = sizes[1] = 0; now = 1000;
   if (engine == 0) {
@@ -152,12 +156,14 @@ static void setup(unsigned engine) {
     }
     assert(connected == 2 && !sizes[0] && !sizes[1]);
     loss_percent = saved_loss;
+  } else if (engine == 2) {
+    zpl_enet_init_engine(&now, &loss_percent, &failed);
   } else {
     for (int side = 0; side < 2; side++) {
       k[side] = ikcp_create(42, (void *)(intptr_t)side); assert(k[side]);
       ikcp_setoutput(k[side], kcp_output);
       assert(ikcp_setmtu(k[side], MTU) == 0);
-      if (engine == 3) ikcp_nodelay(k[side], 1, 10, 2, 1);
+      if (engine == 4) ikcp_nodelay(k[side], 1, 10, 2, 1);
       ikcp_update(k[side], now);
     }
   }
@@ -169,6 +175,7 @@ static unsigned pending(unsigned engine) {
   if (engine == 0) return (z[0].channels[0].ctx.head - z[0].channels[0].ctx.tail) & (RUDP_WINDOW_SIZE - 1);
   if (engine == 1) return (unsigned)(enet_list_size(&remote->sentReliableCommands) +
     enet_list_size(&remote->outgoingCommands) + enet_list_size(&remote->outgoingSendReliableCommands));
+  if (engine == 2) return zpl_enet_pending();
   return (unsigned)ikcp_waitsnd(k[0]);
 }
 static void submit(unsigned engine) {
@@ -181,6 +188,8 @@ static void submit(unsigned engine) {
     else if (engine == 1) {
       ENetPacket *packet = enet_packet_create(bytes, 4, ENET_PACKET_FLAG_RELIABLE); assert(packet);
       assert(enet_peer_send(remote, 0, packet) == 0);
+    } else if (engine == 2) {
+      zpl_enet_submit((uint16_t)admitted);
     } else assert(ikcp_send(k[0], (const char *)bytes, 4) == 4);
     born[admitted++] = scheduled;
   }
@@ -188,6 +197,7 @@ static void submit(unsigned engine) {
 static void service(unsigned engine, int side) {
   uint8_t bytes[MTU]; unsigned len;
   if (engine == 1) { enet_service(side, 0); return; }
+  if (engine == 2) { zpl_enet_service(side, 0); return; }
   while ((len = link_receive(side, bytes)) != 0) {
     if (engine == 0) {
       rudp_record_s records[175];
@@ -223,13 +233,13 @@ static uint32_t percentile(unsigned pct) {
 
 int main(int argc, char **argv) {
   if (argc != 7) {
-    fprintf(stderr, "Usage: compare_transport ENGINE(0..3) COUNT RATE(0=saturated) DELAY_MS LOSS_PERCENT SEED\n"); return 2;
+    fprintf(stderr, "Usage: compare_transport ENGINE(0..4) COUNT RATE(0=saturated) DELAY_MS LOSS_PERCENT SEED\n"); return 2;
   }
   unsigned engine = (unsigned)strtoul(argv[1], NULL, 10);
   total = (unsigned)strtoul(argv[2], NULL, 10); offered_rate = (unsigned)strtoul(argv[3], NULL, 10);
   delay_ms = (unsigned)strtoul(argv[4], NULL, 10); loss_percent = (unsigned)strtoul(argv[5], NULL, 10);
   uint32_t seed = (uint32_t)strtoul(argv[6], NULL, 10);
-  assert(engine < 4 && total > 0 && total <= MAX_MESSAGES && delay_ms > 0 && loss_percent <= 100 && seed);
+  assert(engine < 5 && total > 0 && total <= MAX_MESSAGES && delay_ms > 0 && loss_percent <= 100 && seed);
   jitter_ms = loss_percent ? 5 : 0; rng = seed;
   setup(engine); rng = seed;
   uint64_t start = clock_ns();
@@ -245,13 +255,14 @@ int main(int argc, char **argv) {
   int complete = all_delivered && pending(engine) == 0 && !failed;
   if (!all_delivered) end = now;
   qsort(latencies, delivered, sizeof latencies[0], compare_u32);
-  const char *names[] = {"zcrudp", "ENet", "KCP-default", "KCP-fast"};
+  const char *names[] = {"zcrudp", "ENet", "ENet-zpl", "KCP-default", "KCP-fast"};
   printf("%s,%u,%u,%u,%u,%u,%u,%u,%.3f,%u,%u,%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.3f,%d\n",
     names[engine], seed, total, offered_rate, delay_ms, loss_percent, delivered, end-origin,
     (double)delivered*1000/(end-origin), delivered ? percentile(50) : 0,
     delivered ? percentile(95) : 0, delivered ? percentile(99) : 0,
     wire_bytes, wire_packets, lost_packets, (double)elapsed/(delivered ? delivered : 1), complete);
   if (engine == 1) { enet_host_destroy(hosts[0]); enet_host_destroy(hosts[1]); }
-  else if (engine >= 2) { ikcp_release(k[0]); ikcp_release(k[1]); }
+  else if (engine == 2) { zpl_enet_cleanup(); }
+  else if (engine >= 3) { ikcp_release(k[0]); ikcp_release(k[1]); }
   return complete ? 0 : 1;
 }
