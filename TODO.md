@@ -1,10 +1,11 @@
-# zcrudp Development Roadmap & Dependency Plan
+# Roadmap
 
-This roadmap is organized in **strict dependency order**. Complete each phase before moving to the next to ensure no architectural dead-ends.
+Completed work and remaining tasks. Phase numbers are kept for links from the
+implementation notes; tooling can progress independently of protocol changes.
 
 ---
 
-## 📌 Phase 1: Core Memory Layout & Fixes (Foundations)
+## Phase 1: Memory layout
 *Prerequisite for all subsequent network and serialization work.*
 
 - [x] **Documentation sync**: Update the ASCII diagram in `src/rudp.c` to match `rudp_header_s`.
@@ -16,7 +17,7 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 
 ---
 
-## 📌 Phase 2: Wire Format & Network Portability (Serialization)
+## Phase 2: Serialization
 *Depends on Phase 1 structures.*
 
 - [x] **Endianness & Byte Order**: Implemented zero-dependency `rudp_htons`/`rudp_ntohs` (16-bit) and `rudp_htonl`/`rudp_ntohl` (32-bit) with compiler builtins and Big-Endian Network Byte Order support.
@@ -27,7 +28,7 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 
 ---
 
-## 📌 Phase 3: Reliability Engine & Full-Duplex (TX / RX Loop)
+## Phase 3: Reliability
 *Depends on Phase 1 & 2.*
 
 - [x] **ACK N+1 Convention & In-Window Check**:
@@ -44,7 +45,7 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 
 ---
 
-## 📌 Phase 3.5: Protocol Hardening & Audit Remediation (GitHub Issue #3)
+## Phase 3.5: Fixes from issue #3
 *Comprehensive remediation of all 3 confirmed runtime defects, portability issues, API ergonomics, and doc/test drift before Phase 4.*
 
 - [x] **1. Dead Connection & Zombie Overflow Protection**:
@@ -86,19 +87,20 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
 
 ---
 
-## 📌 Phase 4: Multi-Resolution Architecture & Scalability
+## Phase 4: Receive buffering and channel profiles
 *Depends on Phase 3 working bidirectional engine.*
 
-- [ ] **RX Out-of-Order Reassembly Buffer (Selective Repeat)**: Add a lightweight sliding RX buffer to temporarily store ahead-of-order in-window packets instead of dropping them immediately (eliminating Go-Back-N retransmission cascades).
-- [ ] **3-Tier Multi-Resolution Packet Support**:
+- [x] **RX Out-of-Order Reassembly Buffer**: Bounded payload slots + bitmap, wrap-safe ordered drain and explicit application backpressure via `rudp_session_poll()`. Selective storage with cumulative ACKs, not selective ACK signaling; see `docs/PHASE4.md`.
+- [x] **Reliable paced-loss completion regression**: All five seeds of both 2,400-message `240hz-loss1` and `240hz-loss5` scenarios complete with unchanged workload, timeout, backoff and retry limit. Regression in `tests/test_comparison.py`; baseline preserved in `docs/bench/before-phase4/`.
+- [x] **3-Tier Multi-Resolution Packet Support**:
   - [x] **Tier 1 (4 bytes)**: Handle short header-only packets (`seq_num` + `ack`) for pure ACKs, heartbeats/pings, and connection signals (`rudp_pack_ack()`, `rudp_unpack_ack()`).
   - [x] **Tier 2 (8 bytes)**: Standard game frames (Header 4B + TFV 4B) with atomic modular encoders/decoders.
-  - [ ] **Tier 3 (Multi-part Streaming)**: Stream large payloads (32-bit floats, text, files) via a TFV descriptor packet followed by $N$ pure 32-bit `packet.raw` frames (UTF-8 style scaling).
-- [ ] **Multi-Channel Architecture & User-Configurable Profiles**: 
+  - [x] **Tier 3 (Multi-part Streaming)**: Optional caller-owned stream profiles, descriptor + raw four-byte chunks, up to 65,535 bytes per message on a dedicated reliable+ordered channel. Explicit endian-safe serialization, backpressure, bounded oversize discard and loss/reordering tests.
+- [x] **Multi-Channel Architecture & User-Configurable Profiles**:
   - [x] Define bitwise capability flags (`RUDP_CHANNEL_FLAG_RELIABLE`, `RUDP_CHANNEL_FLAG_ORDERED`, `RUDP_CHANNEL_FLAG_ENCRYPTED`).
-  - [x] Implement multi-channel session structures (`rudp_channel_s`, `rudp_session_s`) with zero dynamic allocation (`RUDP_MAX_CHANNELS = 4`, ~4 KB footprint).
+  - [x] Implement multi-channel session structures (`rudp_channel_s`, `rudp_session_s`) with zero dynamic allocation (`RUDP_MAX_CHANNELS = 4`, currently 5,620 B including RX and adaptive recovery state).
   - [x] Implement session initialization and channel configuration API (`rudp_session_init`, `rudp_session_config_channel`).
-  - [ ] Channel egress scheduler with priority preemption (critical channels preempt background queues before `sendto()`) and optional IP TOS/DSCP QoS socket tagging.
+  - [x] Channel egress scheduler with strict priority before encoding, rotating equal-priority ties, ACK precedence, and per-channel DSCP hints. POSIX demo `--dscp` applies optional socket-wide IP TOS; mixed bundles have one traffic class. See `docs/PHASE4.md` for starvation and integration limits.
   - [x] **Unified Datagram & Intra-Tick Bundling Architecture**:
     - [x] **Step 1: Wire Format Specifications**: 4-byte datagram header (`ack`, `ack_channel`, `count`) and 8-byte message records (`channel_id`, `flags`, `seq_num`, `payload`).
     - [x] **Step 2: Strict Wire Serialization & Bounded Validation**: Endian-safe bitshifts and strict bounded length check (`in_len == 4 + count * 8`).
@@ -111,38 +113,47 @@ This roadmap is organized in **strict dependency order**. Complete each phase be
       - Fixed Bug 2 (Zero Silent Loss): Two-pass atomic datagram validation and strict delivery bound check (`delivered_count < max_delivered`) preventing premature ACK generation on buffer saturation.
       - Fixed Bug 3 (RFC 793/1122): Retransmitted duplicate reliable packets re-arm `ack_pending = 1` to unblock peer sliding window.
       - C11 compile-time `_Static_assert` ABI checks on all structures.
-  - [ ] **Next-Gen Unreliable Channel Engine (The 3-Tier Trinity - Advanced Tracks)**:
-    - **Track A (Ultra-Dense 4B Game Datagram)**: Standalone 4B frames for compact input/angle telemetry.
-    - **Track B (Rolling Delta / 0ms Instant Recovery)**: Embed state $N$ alongside compact delta of state $N-1$ in Tier 2 (8 bytes) to mathematically reconstruct dropped frames on the receiver with 0ms round-trip latency.
-    - **Track C (Kinematic Adaptive Redundancy)**: Egress scheduler detects motion inflection points (acceleration/jerk) and automatically emits forward-cloned duplicates ($2\times$) without waiting for ACKs.
+  - [x] **Optional Unreliable Scalar Profiles** (`protocol_profiles.h`, `src/profiles.c`; explicitly bound, never length-dispatched against ACKs):
+    - [x] **Track A (Compact4)**: seq16 + scalar16; type/flags belong to the out-of-band profile, not an unchanged TFV payload.
+    - [x] **Track B (Rolling8)**: seq16 + current16 + previous delta16 + control16. Recovers the previous sample when the next datagram arrives, without a retransmission round trip; not zero elapsed time.
+    - [x] **Track C (Adaptive Redundancy)**: Fixed-cadence scalar acceleration/jerk threshold crossings produce one or two identical Rolling8 datagrams for caller emission; no ACK wait, receiver deduplication. Benefit under correlated loss is not guaranteed or benchmarked against other libraries.
   - [x] **Egress Scheduler & MTU Packing (Intra-Tick Bundler)**: Batch intra-tick payloads and multi-channel ACKs into MTU-sized UDP datagrams without cross-tick delay (Anti-Nagle Principle).
 
 ---
 
-## 📌 Phase 5: Security, Transport Intelligence & Dual Target (WireGuard & lwIP)
+## Phase 5: Recovery, security and platform support
 *Depends on Phase 4.*
 
 - [ ] **Dual-Target Network Stacks**:
   - **Target A (Standard OS / Game Engines)**: Desktop, dedicated servers, and consoles using standard POSIX/BSD and Winsock UDP sockets.
   - **Target B (Embedded / IoT / Robotics)**: Bare-metal and FreeRTOS microcontrollers (STM32, ESP32) using the lightweight **lwIP** stack with zero-malloc static buffers.
 - [ ] **WireGuard & Noise Protocol Cryptographic Layer**:
-  - Outsource encryption and authentication to the mathematically audited **Noise Protocol Framework** (ChaCha20-Poly1305 + Curve25519) for channels flagged with `RUDP_CHANNEL_ENCRYPTED`.
+  - Evaluate an existing Noise implementation for encryption and authentication; the channel flag alone provides neither.
   - On Target A: In-process lightweight Noise AEAD or native WireGuard tunnel encapsulation.
   - On Target B: Embedded integration with **`wireguard-lwip`** for encrypted bare-metal communication.
-  - Eliminates the need for fragile homemade crypto, providing military-grade mutual authentication and replay defense.
-- [ ] **Adaptive RTT & Dynamic Timeout (Van Jacobson Algorithm)**: Measure sample ping (in ms) on each received ACK, track smoothed RTT (SRTT) and jitter (RTTVAR) using integer EWMA bit-shifts (`>> 3`, `>> 2`), and dynamically compute elastic timeout (`RTO = SRTT + 4 * RTTVAR`).
+  - Specify peer authentication, key management and replay protection before exposing a secure-channel API.
+- [x] **Adaptive RTT & Dynamic Timeout**: Opt-in session recovery, timestamped receive API, fixed-point SRTT/RTTVAR, conservative Karn sampling at most once per RTT, configurable base-RTO bounds, and timeout-only backoff separate from fast repairs. Unchanged wire format and TX slots. See `docs/ADAPTIVE_RECOVERY.md`; `make test-recovery-stress` covers 200 paced-loss runs.
+- [ ] **Revisit recovery memory / traffic / latency tradeoffs (explicitly deferred)**: Preserve the measured adaptive-recovery baseline (5,620 B/session, +352 B versus phase 4; about +9% UDP-payload traffic at 5% loss, p99 median 57 ms versus 263 ms). Investigate packed timeout counters, optional recovery-state storage, shared RTT estimation only where path/queue semantics permit it, and selective ACK extensions that suppress redundant retransmissions. Target retaining the latency improvement while reducing added RAM and returning toward phase-4 traffic; these are experimental objectives, not guarantees. Validate with unchanged baseline workloads plus finite-rate links, bounded queues, reordering, correlated loss and application stalls before claiming a simultaneous improvement.
 - [ ] **Estimable / Dead-Reckoning Classification**: Categorize continuous data for local client-side physics interpolation/extrapolation on packet drop.
-- [ ] **XOR-based Forward Error Correction (FEC)**: Support generating and decoding XOR parity frames ($P = A \oplus B \oplus C$) to mathematically reconstruct lost frames locally on the receiver with 0ms round-trip latency.
+- [ ] **Transport recovery roadmap (same messages and delivery guarantees as ENet / KCP-fast)**:
+  - [ ] **Selective ACKs**: Specify a versioned, bounded extension exposing retained RX messages so the sender suppresses unnecessary retransmissions. Preserve sequence wrap safety, RX retention and flow-control invariants; an absent bit is not proof of loss. Measure control-byte overhead against saved retransmissions.
+  - [ ] **Reordering-tolerant time-based loss detection**: Combine new delivery evidence and elapsed transmission time with a tested reordering allowance; distinguish retransmission attempts from timeout backoff. Test lost repairs, repeated/stale ACKs, clock wrap and spurious retransmissions. Do not retransmit unconditionally on the first observed gap.
+  - [ ] **Tail-loss probe**: Add a bounded, rate-limited probe mechanism for application-limited traffic with no later messages to reveal a lost tail. Specify rearming, ACK-loss handling, retry limits and interaction with normal RTO; ensure probes do not create ACK loops or transmission storms.
+  - [ ] **Finite-rate comparison gate**: Extend the shared simulator with serialization delay, finite bandwidth and bounded queues, followed by the real-socket work in phase 6. Preserve the historical unlimited-link baseline. Compare ENet, KCP-fast and zcrudp on identical messages/semantics, with congestion, correlated loss, reordering and application stalls; publish completion, p99, useful throughput, total traffic and memory. No prediction/omission advantage in reliable comparisons.
+- [ ] **XOR-based Forward Error Correction (FEC)**: Optional parity frames ($P = A \oplus B \oplus C$) can reconstruct a single missing member once parity and all other members arrive, without a retransmission round trip, not at zero elapsed time. Account for block-formation delay, metadata, duplicate tracking and concurrent RX groups. Delta/XOR-against-reference encoding changes representation; parity adds recovery redundancy. Current Rolling8 already carries previous-sample redundancy through current+delta, so do not stack another protection layer without measuring its incremental benefit at matched traffic budgets.
 
 ---
 
-## 📌 Phase 6: Testing, Tooling & Master's Showcase
-*Run in parallel / at the end to build the portfolio showcase.*
+## Phase 6: Tests and tooling
 
-- [ ] **Extended Test Suite**: Unit tests for edge cases (wraparound rollover, out-of-order delivery, corrupted ACKs, maximum retry limits).
+- [x] **Extended Test Suite**: Existing `tests/test_rudp.c`, `tests/test_phase4.c` and `tests/test_window.c` cover wraparound, out-of-order delivery, malformed/future ACK handling, output backpressure and retry-limit disconnection. Revalidated through Make and Release CTest; broader fuzzing and adverse-network coverage remain separate work.
 - [x] **Interactive CLI Demo (`examples/demo_loss.c`)**: POSIX two-peer UDP demo with reliable/unreliable commands, configurable loss/latency/jitter, seeded simulation, bounded delay queue, automatic traffic and integration tests (`make demo`, `make test-tools`).
+- [x] **Visual protocol replay**: Real-engine deterministic trace, offline HTML/SVG replay with seek/pause controls and reduced-motion support, plus captured README GIF and static poster (`make visual-trace`, `make visual-report`). Scripted losses/reordering are labeled as explanatory, not comparative performance measurements.
 - [x] **Benchmarking Suite (`bench/bench_rudp.c`)**: Codec throughput (Mops/s, Mpps for single frames/records) and amortized cost (ns/op), repeated samples and reproducible CSV/SVG performance graphs in `README.md` (`make bench`, `make bench-report`).
-- [ ] **CMake Integration (`CMakeLists.txt`)**: Modern CMake build script alongside `Makefile` for one-click integration into game engines (Raylib, SDL2, Unreal, Godot).
+- [x] **Competitive transport benchmark (`bench/compare_transport.c`)**: Run the actual zcrudp, ENet and KCP engines (default and fast profiles) through the same virtual datagram link. Six scenarios, five seeds, 2,400 ordered 4-byte messages per run; measured goodput, p50/p95/p99 delay, emitted bytes and host simulation cost. Pinned/checksummed dependencies, CSV, environment metadata and comparative graphs (`make compare`, `make test-compare`). Failed runs remain visible.
+- [ ] **Physical network comparison**: Add a shared real-socket/proxy harness, finite link rates and queue disciplines, real end-to-end latency, CPU time and peak memory/allocation accounting. Current comparative latency/goodput are simulation metrics, not NIC benchmarks.
+- [ ] **Broader workloads and transports**: Add larger payloads after bulk-message support, mixed reliable/unreliable channels and GNS/QUIC adapters with matched security and delivery semantics.
+- [x] **CMake Integration (`CMakeLists.txt`)**: Static/shared core and optional profiles, CTest with active Release assertions, POSIX tool opt-in, ABI settings propagated to consumers, `add_subdirectory` targets and relocatable `find_package` installation. `make test-cmake` validates package/embedded consumers and custom configuration; Linux static/shared tested, individual game-engine integrations not certified.
 - [ ] **One-Command Multi-Language Bindings (Python, Node/Bun, Rust, Go, C++)**:
   - Provide a single command (e.g. `make bindings` or `pip install -e .`) to build and expose the C-ABI shared library (`librudp.so`).
   - Python binding (via `ctypes` or `cffi`) for rapid bot scripting, headless test simulation, and AI game client training.

@@ -24,3 +24,18 @@ jobs:
 
     - name: Test POSIX demo and benchmark reports
       run: make test-tools
+
+    - name: Compare engines and enforce paced-loss recovery regression
+      run: make test-compare
+
+    - name: Test CMake package and embedded consumers
+      run: make test-cmake
+
+    - name: Verify deterministic visual-demo trace
+      run: python3 bench/render_visual.py --output build/visual-smoke
+
+    - name: Test CMake shared libraries in Release mode
+      run: |
+        cmake -S . -B build/cmake-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DZCRUDP_WARNINGS_AS_ERRORS=ON
+        cmake --build build/cmake-shared --parallel 2
+        ctest --test-dir build/cmake-shared --output-on-failure

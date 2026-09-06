@@ -6,11 +6,39 @@ BUILD_DIR = build
 SRC = src/rudp.c
 TESTS = tests/test_rudp.c tests/test_tfv.c tests/test_window.c
 BINS = $(BUILD_DIR)/test_rudp $(BUILD_DIR)/test_tfv $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max
+BINS = $(BUILD_DIR)/test_rudp $(BUILD_DIR)/test_tfv $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max $(BUILD_DIR)/test_phase4
 
 .PHONY: all clean test test_rudp test_tfv test_window asan demo bench bench-report test-tools
 
 HEADERS = include/protocol_rudp.h include/protocol_tfv.h
 BENCH_ITERATIONS ?= 1000000
+COMPARE_PYTHON ?= python3
+VISUAL_PYTHON ?= python3
+
+.PHONY: visual-trace visual-report
+visual-trace:
+	$(VISUAL_PYTHON) bench/render_visual.py
+
+visual-report:
+	$(VISUAL_PYTHON) bench/render_visual.py --gif
+
+.PHONY: compare compare-smoke test-compare
+compare:
+	$(COMPARE_PYTHON) bench/run_comparison.py
+
+compare-smoke:
+	$(COMPARE_PYTHON) bench/run_comparison.py --messages 200 --seeds 1 --output $(BUILD_DIR)/comparison-smoke --no-plots
+
+test-compare: compare-smoke
+	$(COMPARE_PYTHON) tests/test_comparison.py
+
+.PHONY: test-recovery-stress
+test-recovery-stress: compare-smoke
+	RECOVERY_SEEDS=100 $(COMPARE_PYTHON) tests/test_comparison.py
+
+.PHONY: test-cmake
+test-cmake:
+	python3 tests/test_cmake.py
 
 $(BUILD_DIR)/demo_loss: examples/demo_loss.c $(SRC) $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(SRC) examples/demo_loss.c -o $@
@@ -27,6 +55,7 @@ bench-report: $(BUILD_DIR)/bench_rudp
 	mkdir -p docs/bench
 	./$(BUILD_DIR)/bench_rudp --iterations $(BENCH_ITERATIONS) --csv docs/bench/codec.csv --svg docs/bench/codec.svg > docs/bench/environment.txt
 
+test-tools: $(BUILD_DIR)/demo_loss $(BUILD_DIR)/bench_rudp
 $(BUILD_DIR)/test_demo_queue: tests/test_demo_queue.c examples/demo_loss.c $(SRC) $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(SRC) tests/test_demo_queue.c -o $@
 
@@ -41,6 +70,9 @@ $(BUILD_DIR):
 
 $(BUILD_DIR)/test_rudp: src/rudp.c tests/test_rudp.c $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) src/rudp.c tests/test_rudp.c -o $@
+
+$(BUILD_DIR)/test_phase4: src/profiles.c tests/test_phase4.c include/protocol_profiles.h $(SRC) $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(SRC) src/profiles.c tests/test_phase4.c -o $@
 
 $(BUILD_DIR)/test_tfv: tests/test_tfv.c $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) tests/test_tfv.c -o $@
@@ -62,12 +94,16 @@ test_window: $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max
 	./$(BUILD_DIR)/test_window_max
 
 test: all
+	./$(BUILD_DIR)/test_phase4
 	./$(BUILD_DIR)/test_rudp
 	./$(BUILD_DIR)/test_tfv
 	./$(BUILD_DIR)/test_window_min
 	./$(BUILD_DIR)/test_window_max
 
 asan: clean $(BUILD_DIR)
+asan: | $(BUILD_DIR)
+	$(CC) $(ASAN_CFLAGS) $(SRC) src/profiles.c tests/test_phase4.c -o $(BUILD_DIR)/test_phase4_asan
+	./$(BUILD_DIR)/test_phase4_asan
 	$(CC) $(ASAN_CFLAGS) src/rudp.c tests/test_rudp.c -o $(BUILD_DIR)/test_rudp_asan
 	$(CC) $(ASAN_CFLAGS) tests/test_tfv.c -o $(BUILD_DIR)/test_tfv_asan
 	$(CC) $(ASAN_CFLAGS) -DRUDP_WINDOW_SIZE=2 src/rudp.c tests/test_window.c -o $(BUILD_DIR)/test_window_min_asan

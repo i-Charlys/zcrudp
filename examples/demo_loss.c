@@ -119,7 +119,7 @@ static int send_value(int reliable, unsigned value) {
     uint16_t slot = session.channels[0].ctx.head;
     int ret = rudp_session_send_reliable(&session, 0, p, (uint32_t)now_ms());
     if (ret != RUDP_OK) { fprintf(stderr, "Reliable send rejected: %d\n", ret); return -1; }
-    emit_reliable(slot);
+    if (!session.channels[0].rto_min_ms) emit_reliable(slot);
   } else {
     uint8_t bytes[12];
     int n = rudp_session_send_unreliable(&session, 1, p, 0, bytes, sizeof bytes);
@@ -150,7 +150,9 @@ static void usage(const char *name) {
          "  --bind IPv4 --peer IPv4 (default 127.0.0.1)\n"
          "  --port N --peer-port N (server 9000/9001, client 9001/9000)\n"
          "  --loss 0..100 --latency MS --jitter MS --seed N\n"
+         "  --dscp 0..63 (optional IPv4 socket traffic class; network may ignore it)\n"
          "  --timeout MS (default 500, measured from enqueue)\n"
+         "  --adaptive 0|1 (default 0; session RTT recovery, initial --timeout, bounds 10..60000 ms)\n"
          "  --count N (send N reliable AND N unreliable values automatically)\n"
          "  --interval MS (default 100) --duration MS (0 = until q/Ctrl-C)\n"
          "Each peer injects loss/delay on its own outgoing traffic.\n", name);
@@ -162,6 +164,8 @@ int main(int argc, char **argv) {
   int server = !strcmp(argv[1], "server");
   unsigned port = server ? 9000 : 9001, peer_port = server ? 9001 : 9000;
   unsigned seed = server ? 1 : 2, timeout = 500, count = 0, interval = 100, duration = 0;
+  unsigned dscp = 0;
+  unsigned adaptive = 0;
   const char *bind_ip = "127.0.0.1", *peer_ip = "127.0.0.1";
   for (int i = 2; i < argc; i++) {
     const char *key = argv[i];
@@ -175,6 +179,8 @@ int main(int argc, char **argv) {
       else if (!strcmp(key, "--peer-port")) { target = &peer_port; max = 65535; }
       else if (!strcmp(key, "--seed")) { target = &seed; max = UINT32_MAX; }
       else if (!strcmp(key, "--loss")) { target = &loss; max = 100; }
+      else if (!strcmp(key, "--dscp")) { target = &dscp; max = 63; }
+      else if (!strcmp(key, "--adaptive")) { target = &adaptive; max = 1; }
       else if (!strcmp(key, "--latency")) target = &latency;
       else if (!strcmp(key, "--jitter")) target = &jitter;
       else if (!strcmp(key, "--timeout")) target = &timeout;
@@ -194,12 +200,21 @@ int main(int argc, char **argv) {
   }
   int fd = socket(AF_INET, SOCK_DGRAM, 0);
   if (fd < 0) { perror("socket"); return 1; }
+  if (dscp) {
+    int tos = (int)(dscp << 2);
+    if (setsockopt(fd, IPPROTO_IP, IP_TOS, &tos, sizeof tos) < 0) {
+      perror("setsockopt IP_TOS"); close(fd); return 1;
+    }
+  }
   if (bind(fd, (struct sockaddr *)&local, sizeof local) < 0) { perror("bind"); close(fd); return 1; }
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) { perror("fcntl"); close(fd); return 1; }
   rudp_session_init(&session);
   rudp_session_config_channel(&session, 0, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED);
   rudp_session_config_channel(&session, 1, RUDP_CHANNEL_FLAG_UNRELIABLE);
+  if (adaptive && rudp_session_config_recovery(&session, 0, timeout, 10, 60000) != RUDP_OK) {
+    fprintf(stderr, "Adaptive initial timeout must be 10..60000 ms\n"); close(fd); return 2;
+  }
   signal(SIGINT, stop); signal(SIGTERM, stop);
   setvbuf(stdout, NULL, _IOLBF, 0);
   printf("READY %s %s:%u -> %s:%u loss=%u%% latency=%ums jitter=0..%ums seed=%u\n",
@@ -225,10 +240,24 @@ int main(int argc, char **argv) {
       gen_unrel++;
       next_unrel = cur_ms + interval;
     }
-    uint16_t indices[RUDP_WINDOW_SIZE];
-    rudp_tick_result_s tick = rudp_tick(&session.channels[0].ctx, (uint32_t)now_ms(), timeout, indices, RUDP_WINDOW_SIZE);
-    if (tick.status != RUDP_OK) { fprintf(stderr, "Reliable channel disconnected (retry limit)\n"); status = 1; break; }
-    for (int i = 0; i < tick.count; i++) { emit_reliable(indices[i]); retried++; }
+    if (adaptive) {
+      uint8_t bytes[MAX_DGRAM_LEN];
+      unsigned before = 0, after = 0;
+      for (size_t i = 0; i < RUDP_WINDOW_SIZE; ++i) before += session.channels[0].ctx.tx_buffer[i].retries;
+      int pending_ack = session.channels[0].ack_pending;
+      int length = rudp_session_build_datagram(&session, 0, bytes, sizeof bytes, (uint32_t)now_ms(), timeout);
+      if (length < 0 || session.channels[0].ctx.state != RUDP_STATE_CONNECTED) {
+        fprintf(stderr, "Reliable channel disconnected (retry limit)\n"); status = 1; break;
+      }
+      for (size_t i = 0; i < RUDP_WINDOW_SIZE; ++i) after += session.channels[0].ctx.tx_buffer[i].retries;
+      retried += after - before;
+      if (length > 4 || pending_ack) enqueue(bytes, (size_t)length);
+    } else {
+      uint16_t indices[RUDP_WINDOW_SIZE];
+      rudp_tick_result_s tick = rudp_tick(&session.channels[0].ctx, (uint32_t)now_ms(), timeout, indices, RUDP_WINDOW_SIZE);
+      if (tick.status != RUDP_OK) { fprintf(stderr, "Reliable channel disconnected (retry limit)\n"); status = 1; break; }
+      for (int i = 0; i < tick.count; i++) { emit_reliable(indices[i]); retried++; }
+    }
     if (flush(fd, &peer) < 0) { status = 1; break; }
     int ready = poll(fds, 2, 5);
     if (ready < 0) { if (errno == EINTR) continue; perror("poll"); status = 1; break; }
@@ -238,7 +267,7 @@ int main(int argc, char **argv) {
       if (n < 0) { if (errno == EINTR) continue; perror("recvfrom"); status = 1; break; }
       if (from.sin_addr.s_addr != peer.sin_addr.s_addr || from.sin_port != peer.sin_port) continue;
       rudp_record_s records[255];
-      int got = rudp_session_process_datagram(&session, bytes, (size_t)n, records, 255);
+      int got = rudp_session_process_datagram_at(&session, bytes, (size_t)n, records, 255, (uint32_t)now_ms());
       received++;
       if (got < 0) fprintf(stderr, "Rejected datagram: %d\n", got);
       else for (int i = 0; i < got; i++) {

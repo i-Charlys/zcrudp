@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>zcrudp packet replay</title>
+<style>
+  :root {color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#080e19;color:#e5edf8}
+  body {margin:0;padding:28px 16px} main {max-width:960px;margin:auto}
+  #stage {display:block;width:100%;height:auto;border-radius:18px;box-shadow:0 20px 80px #0006}
+  svg text {font-family:Inter,ui-sans-serif,system-ui,sans-serif}
+  .controls {display:flex;gap:16px;align-items:center;padding:20px 0;flex-wrap:wrap}
+  button {border:1px solid #344359;background:#132239;border-radius:9px;padding:10px 18px;color:#ecf4ff;font:inherit;cursor:pointer}
+  button:hover {background:#203550} input {flex:1;min-width:160px;accent-color:#56c7ff}
+  .note {color:#a5b6cc;font-size:14px;line-height:1.65} a {color:#72d1ff}
+  :focus-visible {outline:2px solid #72d1ff;outline-offset:3px}
+</style>
+<main>
+<svg id="stage" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 570" role="img" aria-labelledby="title description">
+  <title id="title">zcrudp: real protocol recovery, slowed down</title>
+  <desc id="description">Two independent channels cross a simulated network. A reliable message is lost and others wait in a receive buffer. Retransmission restores ordered delivery, while fresh unreliable updates continue.</desc>
+</svg>
+<div class="controls">
+  <button id="play" type="button">Pause</button>
+  <button id="restart" type="button">Replay</button>
+  <input id="seek" aria-label="Simulated time in milliseconds" type="range" min="0" max="360" value="0">
+  <output id="time" for="seek">0 ms</output>
+</div>
+<p class="note"><strong>Real engine. Scripted network. Slowed playback.</strong> This is an explanatory trace, not a latency benchmark or an ENet/KCP comparison. The C engine sends 8 reliable events and 12 unreliable updates. The simulator drops R2 on its first transmission and U9, and delays R3 and U4. Normal one-way delay: 15 ms. Adaptive recovery: initial RTO 100 ms, base bounds 10–2,000 ms.</p>
+<p class="note">R = reliable event · U = unreliable update · A = cumulative ACK (next expected reliable sequence). Blue = initial reliable transmission; amber = retransmission / buffered reliable event; green = unreliable update or delivered reliable event. ACKs travel right to left. Session memory excludes the simulator, application, socket and browser. No claim of zero network-stack allocations.</p>
+<p class="note">Reproduce with <code>make visual-report</code>. The adjacent <code>trace.json</code> contains the source hashes and every simulated state. <a href="../bench/comparison/README.md">Transport benchmark methodology</a>.</p>
+</main>
+<script>
+const trace = __TRACE_DATA__;
+const stage = document.querySelector('#stage');
+const seek = document.querySelector('#seek');
+const time = document.querySelector('#time');
+const play = document.querySelector('#play');
+const colors = {reliable:'#65b9ff',unreliable:'#56e0b1',ack:'#8396b2'};
+function text(x,y,value,size=14,fill='#dce8f6',weight=400,extra='') {
+  return `<text x="${x}" y="${y}" font-size="${size}" fill="${fill}" font-weight="${weight}" ${extra}>${value}</text>`;
+}
+function rect(x,y,w,h,fill,stroke='none',r=12) {
+  return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${r}" fill="${fill}" stroke="${stroke}"/>`;
+}
+window.renderAt = function(value) {
+  const t = Math.max(0,Math.min(trace.duration,Math.round(value)));
+  const s = trace.snapshots[t];
+  let chapter = 'Reliable and unreliable channels';
+  let subtitle = 'Reliable events and fresh state updates travel independently.';
+  if(t>=40 && s.delivered<8) {
+    chapter = s.buffer.length ? 'Waiting for a missing reliable message' : 'Packet loss and reordering';
+    subtitle = s.buffer.length ? 'The RX window holds reliable events until the missing sequence arrives.' : 'Two packets are dropped; two others arrive late.';
+  }
+  if(s.delivered===8) {
+    chapter = 'Reliable delivery complete';
+    subtitle = s.pending ? 'All 8 reliable events delivered; final acknowledgements are returning.' : 'All reliable events acknowledged. No stale unreliable update delivered.';
+  }
+  let html = `<title id="title">zcrudp: real recovery at ${t} simulated milliseconds</title><desc id="description">${subtitle}</desc>`;
+  html += rect(0,0,960,570,'#0b1321','none',0);
+  html += text(28,37,'zcrudp',24,'#f2f8ff',800);
+  html += text(136,36,'PACKET REPLAY',11,'#91a6c1',600,'letter-spacing="1.5"');
+  html += rect(733,17,199,30,'#14263b');
+  html += text(747,37,'SIMULATED LINK · 30× SLOWER',10,'#7ad9ff',700);
+  html += text(28,88,chapter,28,'#f1f6ff',750);
+  html += text(28,116,subtitle,13,'#a5b8d1');
+  html += rect(28,138,904,4,'#22324a','none',2);
+  html += rect(28,138,Math.max(1,904*t/trace.duration),4,'#65b9ff','none',2);
+  html += rect(28,163,155,267,'#111f32','#25364e');
+  html += text(46,191,'SENDER',11,'#a5b8d1',700,'letter-spacing="2"');
+  html += text(46,219,'Application',18,'#eef4ff',650);
+  html += text(46,248,'Reliable events',12,'#65b9ff',600);
+  html += text(46,275,`${s.pending}`,29,'#f2f6ff',700);
+  html += text(76,273,'awaiting ACK',11,'#a5b8d1');
+  html += text(46,322,'Fresh updates',12,'#56e0b1',600);
+  html += text(46,346,'Bypass TX window',11,'#a5b8d1');
+  html += text(46,393,`Base RTO  ${s.rto} ms`,12,'#d8e5f6',600);
+  html += text(46,413,'Adaptive · integer-only',10,'#91a6c1');
+  html += rect(757,163,175,267,'#111f32','#25364e');
+  html += text(775,191,'RECEIVER',11,'#a5b8d1',700,'letter-spacing="2"');
+  html += text(775,215,'Ordered delivery',15,'#eef4ff',650);
+  for(let i=0;i<8;i++) {
+    const done=i<s.delivered, buffered=s.buffer.includes(i);
+    const x=775+(i%4)*36,y=229+Math.floor(i/4)*37;
+    html += rect(x,y,29,29,done?'#164c42':buffered?'#594329':'#192b41',done?'#56e0b1':buffered?'#ffbf69':'#304560',7);
+    html += text(x+14.5,y+20,i,13,done?'#8ff8d0':buffered?'#ffd89f':'#91a6c1',650,'text-anchor="middle"');
+  }
+  html += text(775,316,`${s.buffer.length} buffered · ${s.delivered}/8 delivered`,11,'#a5b8d1');
+  html += rect(775,333,139,47,'#12352f','none',8);
+  html += text(785,351,'LATEST FRESH STATE',9,'#73ddbc',700);
+  html += text(785,371,s.fresh?`U${s.latest}  ·  value ${s.latest}`:'Waiting for update',13,'#c5ffea',600);
+  html += text(775,412,`${s.late} late update ignored`,11,'#a5b8d1');
+  for (const [y,label,color] of [[238,'RELIABLE / ORDERED','#65b9ff'],[338,'UNRELIABLE / FRESH','#56e0b1'],[409,'ACK / NEXT EXPECTED','#8396b2']]) {
+    html += text(210,y-26,label,10,color,650,'letter-spacing="1.4"');
+    html += `<path d="M 203 ${y} H 738" stroke="${color}" stroke-opacity=".25" stroke-width="2" stroke-dasharray="4 7"/>`;
+  }
+  for(const p of trace.packets) {
+    const age=t-p.t, duration=p.arrival-p.t;
+    if(age<0 || age>duration+5) continue;
+    const y=(p.kind==='ack'?409:p.kind==='reliable'?238:338)+(p.kind==='ack'?0:(p.id%3-1)*10);
+    if(p.drop && age>=duration/2) {
+      if(age<duration/2+9) html+=text(470,y+6,'×',30,'#ff7f8b',700,'text-anchor="middle"');
+      continue;
+    }
+    if(age>duration) continue;
+    const ratio=Math.min(age/duration,1);
+    const x=p.from===0?203+535*ratio:738-535*ratio;
+    const color=p.retry?'#ffbf69':colors[p.kind];
+    const label=(p.kind==='ack'?'A':p.kind==='reliable'?'R':'U')+p.seq;
+    html+=rect(x-17,y-12,34,24,p.kind==='ack'?'#16263b':color,p.kind==='ack'?color:'none',6);
+    html+=text(x,y+4,label,11,p.kind==='ack'?'#c2d1e5':'#091522',750,'text-anchor="middle"');
+    if(p.retry) html+=text(x,y-18,'RETRY',8,'#ffcc85',700,'text-anchor="middle"');
+  }
+  const cards=[['RELIABLE DELIVERED',`${s.delivered} / 8`,'#65b9ff'],['RETRANSMISSIONS',s.retries,'#ffbf69'],['INJECTED DROPS',s.drops,'#ff8994'],['BYTES / SESSION',trace.sessionBytes.toLocaleString('en-US'),'#56e0b1']];
+  cards.forEach(([label,value,color],i)=>{
+    const x=28+i*230;
+    html+=rect(x,450,214,76,'#111f32','#25364e',10);
+    html+=text(x+15,474,label,10,'#a5b8d1',650,'letter-spacing="1"');
+    html+=text(x+15,509,value,27,color,750);
+  });
+  html+=text(28,551,'Scripted loss and reordering. Events recorded from zcrudp; not a performance benchmark.',10,'#91a6c1',550);
+  html+=text(932,551,`${t} ms simulated`,11,'#c4d6ef',600,'text-anchor="end"');
+  stage.innerHTML=html; seek.value=t; time.value=`${t} ms`; return s;
+};
+let running=!matchMedia('(prefers-reduced-motion: reduce)').matches;
+let cursor=0, previous=performance.now();
+const cycle=trace.duration+70;
+function updateButton(){play.textContent=running?'Pause':'Play';}
+play.addEventListener('click',()=>{running=!running;updateButton();});
+document.querySelector('#restart').addEventListener('click',()=>{cursor=0;renderAt(0);});
+seek.addEventListener('input',()=>{running=false;cursor=Number(seek.value);renderAt(cursor);updateButton();});
+function animate(now){
+  if(running && !window.captureMode){cursor=(cursor+Math.min(now-previous,100)/30)%cycle;renderAt(Math.min(cursor,trace.duration));}
+  previous=now;requestAnimationFrame(animate);
+}
+renderAt(0);updateButton();requestAnimationFrame(animate);
+</script>
+</html>
