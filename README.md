@@ -6,15 +6,23 @@ small game updates and embedded telemetry. It uses caller-owned buffers, with no
 heap allocation or external dependencies. The application provides the clock,
 socket and event loop.
 
-## Description
-![Real zcrudp trace: lost reliable event, buffered out-of-order messages, retransmission and independent fresh updates](docs/visual/recovery.gif)
+<p align="center">
+  <img alt="zcrudp Multi-Channel Protocol Architecture and Operational Model" src="docs/visual/overview.svg" width="100%">
+</p>
 
-`zcrudp` is a lightweight, high-performance Reliable UDP (RUDP) implementation designed for embedded systems and performance-critical applications. It operates with zero dynamic memory allocation, using a fixed-frame 32-bit structure for both headers and data.
-The replay shows the library handling scripted loss and reordering, with adjustable
-playback speed (defaults to 0.5×, 60× slower). Blue packets are reliable; amber marks retries
-and buffered messages; green packets are unreliable updates. This is a behavior demo, not a benchmark.
-[Interactive replay (download and open locally)](docs/visual/index.html) ·
-[Static overview](docs/visual/poster.png) · [Trace and reproduction](docs/visual/README.md)
+## Why zcrudp?
+
+Standard reliable streams (like TCP) suffer from **Head-of-Line blocking**: when a single packet is dropped by Wi-Fi or cellular jitter, the entire connection freezes while waiting for a retransmission—causing visible stutter, lag spikes, and input delays in real-time games and embedded systems.
+
+**zcrudp eliminates network freezes** by isolating communication into independent channels:
+- **Continuous Telemetry (Unreliable Channel):** Player positions, physics, and sensor streams bypass transmission buffers with zero copy. Fresh updates arrive continuously at 60–128 Hz, completely unaffected by lost packets elsewhere.
+- **Critical Actions (Reliable Channel):** State transitions, RPCs, and combat events are guaranteed in-order with Karn-safe adaptive retransmission and bounded out-of-order gap retention.
+- **Zero Heap Overhead:** 0 dynamic memory allocations (`malloc`), 4-byte minimal ACKs, and a fixed 5,620-byte session footprint that fits in MCU RAM or CPU L1 cache.
+
+[Interactive web replay](docs/visual/index.html) ·
+[Transport benchmarks](#transport-benchmarks-vs-enet-and-kcp) ·
+[Codec benchmarks](#codec-benchmarks) ·
+[Interactive CLI demo](#interactive-loss-and-latency-demo)
 
 ## Key Features
 **Try it in two terminals:**

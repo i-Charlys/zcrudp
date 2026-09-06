@@ -65,8 +65,8 @@ def generate(output, capture):
         # Shared palette avoids per-frame palette flicker. Runtime ~13 seconds.
         palette = frames[40].quantize(colors=128)
         quantized = [f.quantize(palette=palette, dither=Image.Dither.NONE) for f in frames]
-        durations = [90] * len(quantized)
-        durations[-1] = 2100
+        durations = [180] * len(quantized)
+        durations[-1] = 4200
         quantized[0].save(output / "recovery.gif", save_all=True, append_images=quantized[1:],
                           duration=durations, loop=0, optimize=True, disposal=1)
         with Image.open(output / "recovery.gif") as gif:

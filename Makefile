@@ -15,12 +15,14 @@ BENCH_ITERATIONS ?= 1000000
 COMPARE_PYTHON ?= python3
 VISUAL_PYTHON ?= python3
 
-.PHONY: visual-trace visual-report
+.PHONY: visual-trace visual-report visual-gif
 visual-trace:
 	$(VISUAL_PYTHON) bench/render_visual.py
 
-visual-report:
-	$(VISUAL_PYTHON) bench/render_visual.py --gif
+visual-gif:
+	$(VISUAL_PYTHON) bench/generate_terminal_gif.py
+
+visual-report: visual-trace visual-gif
 
 .PHONY: compare compare-smoke test-compare
 compare:

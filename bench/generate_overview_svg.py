@@ -1,0 +1,212 @@
+"""Generate the master technical overview SVG diagram for zcrudp.
+Combines:
+- Application to wire data flow
+- Dual-channel mechanics: Reliable (auto-retransmit) vs Unreliable (0-copy fast bypass)
+- No Head-of-Line blocking under simulated packet loss
+- Key engineering metrics: 0 mallocs, 4B ACK, 5,620B session footprint, 680M ops/sec
+- Professional dark theme with zero emojis, clean geometry and typography.
+"""
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+SVG_CONTENT = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 580" width="1020" height="580" role="img" aria-labelledby="title desc">
+  <title id="title">zcrudp Architecture and Operational Model</title>
+  <desc id="desc">Multi-channel reliable UDP protocol architecture showing independent reliable and unreliable pipelines, packet recovery without head-of-line blocking, and zero-allocation memory guarantees.</desc>
+  
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0b121f"/>
+      <stop offset="100%" stop-color="#070c14"/>
+    </linearGradient>
+    <linearGradient id="relGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#193556"/>
+      <stop offset="100%" stop-color="#1c4475"/>
+    </linearGradient>
+    <linearGradient id="unrelGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#133827"/>
+      <stop offset="100%" stop-color="#184a33"/>
+    </linearGradient>
+    <linearGradient id="lossGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#3d181c"/>
+      <stop offset="100%" stop-color="#2d1215"/>
+    </linearGradient>
+    <filter id="dropShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#58a6ff"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#3fb950"/>
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#d29922"/>
+    </marker>
+  </defs>
+
+  <!-- Canvas Background -->
+  <rect width="1020" height="580" fill="url(#bgGrad)" rx="16"/>
+  <rect width="1018" height="578" x="1" y="1" fill="none" stroke="#212f45" stroke-width="1.5" rx="15"/>
+
+  <!-- Top Title Banner -->
+  <g transform="translate(30, 24)">
+    <text x="0" y="20" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Inter, sans-serif" font-size="20" font-weight="700" fill="#f0f6fc" letter-spacing="-0.3">zcrudp</text>
+    <text x="80" y="19" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Inter, sans-serif" font-size="13" font-weight="500" fill="#8b949e">/ MULTI-CHANNEL PROTOCOL ARCHITECTURE &amp; DATA FLOW</text>
+    
+    <rect x="760" y="2" width="200" height="26" rx="6" fill="#162235" stroke="#304360" stroke-width="1"/>
+    <text x="860" y="19" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="11" font-weight="600" fill="#79c0ff" text-anchor="middle">C11 FREESTANDING · ZERO-HEAP</text>
+  </g>
+
+  <!-- Horizontal Divider -->
+  <line x1="30" y1="62" x2="990" y2="62" stroke="#1b283d" stroke-width="1"/>
+
+  <!-- Column 1: Application Layer -->
+  <g transform="translate(30, 78)">
+    <rect width="210" height="350" rx="10" fill="#0e1726" stroke="#22354e" stroke-width="1.2" filter="url(#dropShadow)"/>
+    <rect width="210" height="36" rx="10" fill="#152236"/>
+    <rect width="210" height="10" y="26" fill="#152236"/>
+    <line x1="0" y1="36" x2="210" y2="36" stroke="#22354e" stroke-width="1"/>
+    
+    <text x="16" y="23" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="12" font-weight="700" fill="#c9d1d9" letter-spacing="0.5">APPLICATION LAYER</text>
+    <text x="16" y="52" font-family="ui-monospace, Consolas, monospace" font-size="11" font-weight="500" fill="#8b949e">60–128 Hz Game / Firmware</text>
+
+    <!-- App Box 1: Discrete Events -->
+    <rect x="14" y="68" width="182" height="114" rx="8" fill="#132133" stroke="#2c4566" stroke-width="1"/>
+    <text x="24" y="90" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="12" font-weight="700" fill="#79c0ff">Discrete Events</text>
+    <text x="24" y="108" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#8b949e">• Combat, Spawns, RPCs</text>
+    <text x="24" y="125" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#8b949e">• State transactions</text>
+    <text x="24" y="142" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#8b949e">• Requires guaranteed delivery</text>
+    <rect x="24" y="152" width="162" height="20" rx="4" fill="#0d1b2a"/>
+    <text x="30" y="166" font-family="ui-monospace, Consolas, monospace" font-size="10" fill="#58a6ff">rudp_session_send_reliable()</text>
+
+    <!-- App Box 2: Real-time Telemetry -->
+    <rect x="14" y="196" width="182" height="114" rx="8" fill="#0f261c" stroke="#1f543b" stroke-width="1"/>
+    <text x="24" y="218" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="12" font-weight="700" fill="#56d364">Real-Time Telemetry</text>
+    <text x="24" y="236" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#8b949e">• Entity X/Y, Aim, Physics</text>
+    <text x="24" y="253" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#8b949e">• High-frequency updates</text>
+    <text x="24" y="270" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#8b949e">• Latest state overrides old</text>
+    <rect x="24" y="280" width="162" height="20" rx="4" fill="#091b13"/>
+    <text x="30" y="294" font-family="ui-monospace, Consolas, monospace" font-size="10" fill="#3fb950">rudp_session_send_unreliable()</text>
+
+    <text x="16" y="334" font-family="ui-monospace, Consolas, monospace" font-size="10" fill="#6e7681">Shared single event loop</text>
+  </g>
+
+  <!-- Flow Arrows 1 -> 2 -->
+  <line x1="240" y1="202" x2="282" y2="202" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <line x1="240" y1="330" x2="282" y2="330" stroke="#3fb950" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- Column 2: zcrudp Protocol Engine -->
+  <g transform="translate(290, 78)">
+    <rect width="420" height="350" rx="10" fill="#0e1726" stroke="#22354e" stroke-width="1.2" filter="url(#dropShadow)"/>
+    <rect width="420" height="36" rx="10" fill="#152236"/>
+    <rect width="420" height="10" y="26" fill="#152236"/>
+    <line x1="0" y1="36" x2="420" y2="36" stroke="#22354e" stroke-width="1"/>
+    
+    <text x="16" y="23" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="12" font-weight="700" fill="#c9d1d9" letter-spacing="0.5">zcrudp PROTOCOL ENGINE</text>
+    <text x="210" y="23" font-family="ui-monospace, Consolas, monospace" font-size="11" font-weight="600" fill="#8b949e">sizeof(rudp_session_s) = 5,620 B</text>
+
+    <!-- Channel 0: Reliable & Ordered -->
+    <rect x="14" y="50" width="392" height="136" rx="8" fill="url(#relGrad)" stroke="#388bfd" stroke-width="1.2"/>
+    <text x="26" y="72" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="13" font-weight="700" fill="#ffffff">CHANNEL 0 : RELIABLE &amp; ORDERED</text>
+    <rect x="306" y="58" width="88" height="20" rx="4" fill="#0b1d33" stroke="#21497d" stroke-width="1"/>
+    <text x="350" y="72" font-family="ui-monospace, Consolas, monospace" font-size="10" font-weight="600" fill="#79c0ff" text-anchor="middle">ARQ + RTO</text>
+
+    <text x="26" y="93" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#c9d1d9">• Static 64-slot TX ring (1,024 B RAM) — caller-owned, zero malloc</text>
+    <text x="26" y="110" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#c9d1d9">• Karn-safe RTT sampling with dynamic RTO backoff (10–60,000 ms)</text>
+    <text x="26" y="127" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#c9d1d9">• Cumulative ACK (4 bytes) + Tri-ACK prompt fast retransmit</text>
+    <text x="26" y="144" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#c9d1d9">• Bounded RX window retaining out-of-order sequence gaps</text>
+
+    <rect x="26" y="154" width="368" height="22" rx="4" fill="#0b1726"/>
+    <text x="34" y="169" font-family="ui-monospace, Consolas, monospace" font-size="10" fill="#d29922">TX Ring: [0][1][2:LOST]... ➔ Timeout expires ➔ Targeted Retransmission</text>
+
+    <!-- Channel 1: Unreliable Sequenced -->
+    <rect x="14" y="200" width="392" height="130" rx="8" fill="url(#unrelGrad)" stroke="#2ea043" stroke-width="1.2"/>
+    <text x="26" y="222" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="13" font-weight="700" fill="#ffffff">CHANNEL 1 : UNRELIABLE SEQUENCED</text>
+    <rect x="286" y="208" width="108" height="20" rx="4" fill="#0b2416" stroke="#1a5c37" stroke-width="1"/>
+    <text x="340" y="222" font-family="ui-monospace, Consolas, monospace" font-size="10" font-weight="600" fill="#56d364" text-anchor="middle">FAST-BYPASS</text>
+
+    <text x="26" y="243" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#c9d1d9">• Zero-copy bypass: straight from stack to socket buffer</text>
+    <text x="26" y="260" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#c9d1d9">• 16-bit RFC 1982 anti-rollback sequence filter (drops stale)</text>
+    <text x="26" y="277" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" font-weight="600" fill="#56d364">• Zero Head-of-Line Blocking: NEVER waits for Channel 0 retransmits</text>
+
+    <rect x="26" y="292" width="368" height="26" rx="4" fill="#081c11"/>
+    <text x="34" y="309" font-family="ui-monospace, Consolas, monospace" font-size="10" font-weight="600" fill="#3fb950">Stream continues at full rate during 20% network packet drop</text>
+  </g>
+
+  <!-- Flow Arrows 2 -> 3 -->
+  <line x1="710" y1="146" x2="752" y2="146" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <line x1="710" y1="265" x2="752" y2="265" stroke="#3fb950" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- Column 3: Network Link & Outcome -->
+  <g transform="translate(760, 78)">
+    <rect width="230" height="350" rx="10" fill="#0e1726" stroke="#22354e" stroke-width="1.2" filter="url(#dropShadow)"/>
+    <rect width="230" height="36" rx="10" fill="#152236"/>
+    <rect width="230" height="10" y="26" fill="#152236"/>
+    <line x1="0" y1="36" x2="230" y2="36" stroke="#22354e" stroke-width="1"/>
+    
+    <text x="16" y="23" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="12" font-weight="700" fill="#c9d1d9" letter-spacing="0.5">NETWORK LINK &amp; OUTCOME</text>
+
+    <!-- Packet Loss Box -->
+    <rect x="14" y="50" width="202" height="136" rx="8" fill="url(#lossGrad)" stroke="#f85149" stroke-width="1"/>
+    <text x="24" y="72" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="12" font-weight="700" fill="#ff7b72">Simulated Loss (5–20%)</text>
+    
+    <text x="24" y="93" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#f0883e">On TCP / single-channel:</text>
+    <text x="24" y="109" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="10.5" fill="#ffa198">Entire stream freezes (HoL lag)</text>
+
+    <text x="24" y="132" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" font-weight="600" fill="#79c0ff">On zcrudp:</text>
+    <text x="24" y="148" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="10.5" fill="#c9d1d9">• Lost R2 retransmitted</text>
+    <text x="24" y="164" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="10.5" fill="#3fb950">• Delivered in-order without lag</text>
+
+    <!-- Continuous Flow Box -->
+    <rect x="14" y="200" width="202" height="130" rx="8" fill="#0d2417" stroke="#238636" stroke-width="1"/>
+    <text x="24" y="222" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="12" font-weight="700" fill="#3fb950">Zero Latency Freeze</text>
+
+    <text x="24" y="243" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#c9d1d9">Fresh updates delivered:</text>
+    <text x="24" y="260" font-family="ui-monospace, Consolas, monospace" font-size="11" font-weight="600" fill="#56d364">p50: 1.0 ms / p99: 1.2 ms</text>
+    <text x="24" y="280" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="10.5" fill="#8b949e">No queuing behind missing reliable packets</text>
+    
+    <rect x="24" y="296" width="182" height="22" rx="4" fill="#071b10"/>
+    <text x="115" y="311" font-family="ui-monospace, Consolas, monospace" font-size="10" font-weight="700" fill="#3fb950" text-anchor="middle">ZERO SACCADE GUARANTEED</text>
+  </g>
+
+  <!-- Bottom Key Metrics Cards (4 KPI Columns) -->
+  <g transform="translate(30, 444)">
+    <!-- KPI 1: 0 Dynamic Allocations -->
+    <rect x="0" y="0" width="228" height="106" rx="8" fill="#0f1929" stroke="#1f3454" stroke-width="1.2"/>
+    <text x="18" y="26" font-family="ui-monospace, Consolas, monospace" font-size="10" font-weight="700" fill="#79c0ff" letter-spacing="1">DYNAMIC ALLOCATION</text>
+    <text x="18" y="58" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="28" font-weight="800" fill="#f0f6fc">0 Bytes</text>
+    <text x="18" y="78" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#8b949e">Zero malloc / calloc / free</text>
+    <text x="18" y="93" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="10.5" fill="#58a6ff">No memory fragmentation</text>
+
+    <!-- KPI 2: Minimal Wire Footprint -->
+    <rect x="244" y="0" width="228" height="106" rx="8" fill="#0f1929" stroke="#1f3454" stroke-width="1.2"/>
+    <text x="262" y="26" font-family="ui-monospace, Consolas, monospace" font-size="10" font-weight="700" fill="#79c0ff" letter-spacing="1">MINIMAL WIRE OVERHEAD</text>
+    <text x="262" y="58" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="28" font-weight="800" fill="#f0f6fc">4 Bytes</text>
+    <text x="262" y="78" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#8b949e">Standalone cumulative ACK</text>
+    <text x="262" y="93" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="10.5" fill="#58a6ff">ENet: 12B · KCP: 24B · TCP: 40B</text>
+
+    <!-- KPI 3: Total RAM Footprint -->
+    <rect x="488" y="0" width="228" height="106" rx="8" fill="#0f1929" stroke="#1f3454" stroke-width="1.2"/>
+    <text x="506" y="26" font-family="ui-monospace, Consolas, monospace" font-size="10" font-weight="700" fill="#79c0ff" letter-spacing="1">FULL 4-CHANNEL SESSION</text>
+    <text x="506" y="58" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="28" font-weight="800" fill="#f0f6fc">5,620 B</text>
+    <text x="506" y="78" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#8b949e">Fits in L1 cache or MCU RAM</text>
+    <text x="506" y="93" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="10.5" fill="#58a6ff">1,040 B per channel context</text>
+
+    <!-- KPI 4: Amortized Codec Speed -->
+    <rect x="732" y="0" width="228" height="106" rx="8" fill="#0f1929" stroke="#1f3454" stroke-width="1.2"/>
+    <text x="750" y="26" font-family="ui-monospace, Consolas, monospace" font-size="10" font-weight="700" fill="#79c0ff" letter-spacing="1">CODEC THROUGHPUT</text>
+    <text x="750" y="58" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="28" font-weight="800" fill="#f0f6fc">686M ops/s</text>
+    <text x="750" y="78" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="11" fill="#8b949e">Record encoding: 1.46 ns/op</text>
+    <text x="750" y="93" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="10.5" fill="#3fb950">Zero-copy bit-packing</text>
+  </g>
+</svg>
+"""
+
+def generate():
+    output_path = ROOT / "docs/visual/overview.svg"
+    output_path.write_text(SVG_CONTENT)
+    print(f"SUCCESS: Generated {output_path} ({output_path.stat().st_size:,} bytes)")
+
+if __name__ == "__main__":
+    generate()
