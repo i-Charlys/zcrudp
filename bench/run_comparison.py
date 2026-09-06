@@ -27,12 +27,15 @@ VERSIONS = {
 FIELDS = "library,seed,messages,offered_rate,delay_ms,loss_percent,delivered,elapsed_sim_ms,goodput_msg_s,p50_ms,p95_ms,p99_ms,wire_bytes,wire_packets,lost_packets,harness_ns_per_delivery,complete".split(",")
 LIBRARIES = ["zcrudp", "ENet", "ENet-zpl", "KCP-default", "KCP-fast"]
 SCENARIOS = [
-    ("saturated-local", 0, 1, 0),
-    ("saturated-wan", 0, 10, 0),
-    ("saturated-loss", 0, 10, 1),
-    ("240hz-clean", 240, 10, 0),
-    ("240hz-loss1", 240, 10, 1),
-    ("240hz-loss5", 240, 10, 5),
+    ("saturated-local", 0, 1, 0, 0),
+    ("saturated-wan", 0, 10, 0, 0),
+    ("saturated-loss", 0, 10, 1, 5),
+    ("240hz-clean", 240, 10, 0, 0),
+    ("240hz-loss1", 240, 10, 1, 5),
+    ("240hz-loss5", 240, 10, 5, 5),
+    ("240hz-jitter", 240, 20, 2, 40),
+    ("ping250-clean", 240, 125, 0, 0),
+    ("ping250-loss", 240, 125, 2, 10),
 ]
 
 
@@ -71,12 +74,21 @@ def plots(rows, output):
     import matplotlib.pyplot as plt
 
     colors = ["#2563eb", "#0f766e", "#059669", "#64748b", "#d97706"]
-    labels = ["Local: 1 ms, 0% loss", "WAN: 10 ms, 0% loss", "WAN: 10 ms, 1% loss", "240 Hz: 10 ms, 0% loss",
-              "240 Hz: 10 ms, 1% loss", "240 Hz: 10 ms, 5% loss"]
+    labels = {
+        "saturated-local": "Local: 1 ms, 0% loss",
+        "saturated-wan": "WAN: 10 ms, 0% loss",
+        "saturated-loss": "WAN: 10 ms, 1% loss",
+        "240hz-clean": "240 Hz: 10 ms\n0% loss",
+        "240hz-loss1": "240 Hz: 10 ms\n1% loss",
+        "240hz-loss5": "240 Hz: 10 ms\n5% loss",
+        "240hz-jitter": "240 Hz: 20 ms, 2% loss\n±40 ms jitter",
+        "ping250-clean": "Ping 250 ms: 125 ms\n0% loss",
+        "ping250-loss": "Ping 250 ms: 125 ms\n2% loss + jitter",
+    }
 
     def draw(filename, title, metric, ylabel, scenarios, divisor=1):
-        fig, ax = plt.subplots(figsize=(12, 5.7), layout="constrained")
-        width = 0.16
+        fig, ax = plt.subplots(figsize=(14.5 if len(scenarios) > 3 else 10.5, 5.8), layout="constrained")
+        width = 0.15
         for index, library in enumerate(LIBRARIES):
             values, lower, upper, failures = [], [], [], []
             for scenario in scenarios:
@@ -95,7 +107,7 @@ def plots(rows, output):
             for x, n in zip(positions, failures):
                 if n:
                     ax.text(x, .03, f"{n} failed", transform=ax.get_xaxis_transform(), ha="center", fontsize=7, color=colors[index])
-        ax.set_xticks(range(len(scenarios)), [labels[[s[0] for s in SCENARIOS].index(s)] for s in scenarios], fontsize=9)
+        ax.set_xticks(range(len(scenarios)), [labels[s] for s in scenarios], fontsize=8.5)
         ax.set_ylabel(ylabel); ax.set_title(title, loc="left", weight="bold", pad=42)
         if metric in ("p50_ms", "p99_ms"):
             ax.set_yscale("log")
@@ -138,11 +150,11 @@ def main():
         return
     command, compiler = build()
     rows = []
-    for scenario, rate, delay, loss in SCENARIOS:
+    for scenario, rate, delay, loss, jitter in SCENARIOS:
         for engine in range(len(LIBRARIES)):
             for seed in range(1, args.seeds+1):
                 run = subprocess.run([str(ROOT / "build/compare_transport"), str(engine), str(args.messages),
-                                      str(rate), str(delay), str(loss), str(seed)], capture_output=True, text=True, timeout=60)
+                                      str(rate), str(delay), str(loss), str(seed), str(jitter)], capture_output=True, text=True, timeout=60)
                 assert run.returncode in (0, 1) and run.stdout, (scenario, engine, seed, run.stdout, run.stderr)
                 row = dict(zip(FIELDS, next(csv.reader(io.StringIO(run.stdout)))), scenario=scenario)
                 assert (row["complete"] == "1") == (run.returncode == 0)
@@ -169,7 +181,7 @@ def main():
                    "harness_sha256": hashlib.sha256((ROOT / "bench/compare_transport.c").read_bytes()).hexdigest(),
                    "enet_zpl_bridge_sha256": hashlib.sha256((ROOT / "bench/compare_enet_zpl.c").read_bytes()).hexdigest(),
                    "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                   "messages": args.messages, "seeds": args.seeds, "simulation": "1ms ticks; unlimited bandwidth; jitter 0..5ms when loss>0",
+                   "messages": args.messages, "seeds": args.seeds, "simulation": "1ms ticks; unlimited bandwidth; jitter 0..40ms",
                    "kcp_fast": "ikcp_nodelay(1,10,2,1); default window sizes", "zcrudp_rto_ms": 100,
                    "zcrudp_recovery": "adaptive; initial=100ms min=10ms max_base=2000ms; timeout-only backoff"}
     (args.output / "environment.json").write_text(json.dumps(environment, indent=2) + "\n")

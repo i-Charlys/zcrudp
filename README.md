@@ -51,7 +51,7 @@ loss and recovery. [Demo options](#interactive-loss-and-latency-demo) ·
 ## Transport benchmarks vs ENet, ENet (zpl), and KCP
 
 The comparative runner executes zcrudp, ENet (lsalzman), ENet-zpl (zpl-c), and KCP (default and fast profiles):
-2,400 reliable ordered four-byte messages, six scenarios, five seeds — **150 recorded runs**.
+2,400 reliable ordered four-byte messages, nine scenarios, five seeds — **225 recorded runs**.
 
 ![Delivered throughput comparison](docs/bench/comparison/throughput.svg)
 
@@ -64,10 +64,12 @@ These are **virtual-link transport measurements**: common delay/loss/jitter and
 show zcrudp matching ENet and ENet-zpl goodput at the common 63-message admission limit.
 zcrudp emits fewer UDP-payload bytes in this tiny-message workload (8.1 B vs 18.2 B per message).
 
-With adaptive recovery enabled, the median of the five per-run p99 values at
-5% loss is 57 ms for zcrudp, compared with 167 ms for ENet, 378 ms for ENet-zpl,
-and 69 ms for KCP-fast. It costs 352 B of session state and uses substantially less
-UDP-payload traffic than ENet, ENet-zpl, and KCP.
+With adaptive recovery enabled, the median of the five per-run p99 values shows:
+- **5% loss (10 ms delay, 5 ms jitter)**: 57 ms for zcrudp, compared with 167 ms for ENet, 378 ms for ENet-zpl, and 69 ms for KCP-fast.
+- **High jitter (20 ms delay, 2% loss, 40 ms jitter)**: 189 ms for zcrudp, compared with 338 ms for ENet and 203 ms for ENet-zpl, with 22% less datagram wire traffic than ENet.
+- **High latency with loss (250 ms ping / 125 ms one-way, 2% loss, 10 ms jitter)**: 379 ms for zcrudp, compared with 803 ms for ENet (-53%) and 673 ms for ENet-zpl (-44%). In the clean 250 ms ping case, zcrudp, ENet, and ENet-zpl all deliver at the physical 125 ms one-way baseline.
+
+It costs 352 B of session state and uses substantially less UDP-payload traffic than ENet, ENet-zpl, and KCP.
 These results depend on the workload and transport settings, including KCP's
 selected profile. See [recovery settings and tradeoffs](docs/ADAPTIVE_RECOVERY.md).
 

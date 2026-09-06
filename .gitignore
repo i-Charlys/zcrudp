@@ -57,3 +57,8 @@ build/
 
 # IDE and Editor configurations
 .vscode/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class

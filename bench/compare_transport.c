@@ -151,7 +151,8 @@ static void setup(unsigned engine) {
     /* Exclude connection establishment; all engines start established. */
     uint32_t saved_loss = loss_percent;
     loss_percent = 0; /* Establish on this scenario's path, without handshake loss. */
-    for (; now < 2000 && (connected < 2 || sizes[0] || sizes[1]); now++) {
+    uint32_t handshake_limit = now + delay_ms * 10 + 2000;
+    for (; now < handshake_limit && (connected < 2 || sizes[0] || sizes[1]); now++) {
       enet_service(0, 1); enet_service(1, 1);
     }
     assert(connected == 2 && !sizes[0] && !sizes[1]);
@@ -232,15 +233,16 @@ static uint32_t percentile(unsigned pct) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 7) {
-    fprintf(stderr, "Usage: compare_transport ENGINE(0..4) COUNT RATE(0=saturated) DELAY_MS LOSS_PERCENT SEED\n"); return 2;
+  if (argc != 7 && argc != 8) {
+    fprintf(stderr, "Usage: compare_transport ENGINE(0..4) COUNT RATE(0=saturated) DELAY_MS LOSS_PERCENT SEED [JITTER_MS]\n"); return 2;
   }
   unsigned engine = (unsigned)strtoul(argv[1], NULL, 10);
   total = (unsigned)strtoul(argv[2], NULL, 10); offered_rate = (unsigned)strtoul(argv[3], NULL, 10);
   delay_ms = (unsigned)strtoul(argv[4], NULL, 10); loss_percent = (unsigned)strtoul(argv[5], NULL, 10);
   uint32_t seed = (uint32_t)strtoul(argv[6], NULL, 10);
   assert(engine < 5 && total > 0 && total <= MAX_MESSAGES && delay_ms > 0 && loss_percent <= 100 && seed);
-  jitter_ms = loss_percent ? 5 : 0; rng = seed;
+  jitter_ms = (argc == 8) ? (unsigned)strtoul(argv[7], NULL, 10) : (loss_percent ? 5 : 0);
+  rng = seed;
   setup(engine); rng = seed;
   uint64_t start = clock_ns();
   uint32_t end = origin;

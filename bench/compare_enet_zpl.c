@@ -274,7 +274,8 @@ void zpl_enet_init_engine(uint32_t *now_ptr, uint32_t *loss_percent_ptr, int *fa
   /* Exclude connection establishment from loss measurements */
   uint32_t saved_loss = *g_loss_percent;
   *g_loss_percent = 0;
-  for (; *g_now < 2000 && (zpl_connected < 2 || link_has_pending()); (*g_now)++) {
+  uint32_t handshake_limit = *g_now + 4000;
+  for (; *g_now < handshake_limit && (zpl_connected < 2 || link_has_pending()); (*g_now)++) {
     zpl_enet_service(0, 1);
     zpl_enet_service(1, 1);
   }
