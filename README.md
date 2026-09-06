@@ -10,9 +10,9 @@ socket and event loop.
 ![Real zcrudp trace: lost reliable event, buffered out-of-order messages, retransmission and independent fresh updates](docs/visual/recovery.gif)
 
 `zcrudp` is a lightweight, high-performance Reliable UDP (RUDP) implementation designed for embedded systems and performance-critical applications. It operates with zero dynamic memory allocation, using a fixed-frame 32-bit structure for both headers and data.
-The replay shows the library handling scripted loss and reordering, slowed down
-about 30×. Blue packets are reliable; amber marks retries and buffered messages;
-green packets are unreliable updates. This is a behavior demo, not a benchmark.
+The replay shows the library handling scripted loss and reordering, with adjustable
+playback speed (defaults to 0.5×, 60× slower). Blue packets are reliable; amber marks retries
+and buffered messages; green packets are unreliable updates. This is a behavior demo, not a benchmark.
 [Interactive replay (download and open locally)](docs/visual/index.html) ·
 [Static overview](docs/visual/poster.png) · [Trace and reproduction](docs/visual/README.md)
 

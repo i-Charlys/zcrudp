@@ -9,8 +9,10 @@
   #stage {display:block;width:100%;height:auto;border-radius:18px;box-shadow:0 20px 80px #0006}
   svg text {font-family:Inter,ui-sans-serif,system-ui,sans-serif}
   .controls {display:flex;gap:16px;align-items:center;padding:20px 0;flex-wrap:wrap}
-  button {border:1px solid #344359;background:#132239;border-radius:9px;padding:10px 18px;color:#ecf4ff;font:inherit;cursor:pointer}
-  button:hover {background:#203550} input {flex:1;min-width:160px;accent-color:#56c7ff}
+  button, select {border:1px solid #344359;background:#132239;border-radius:9px;padding:10px 18px;color:#ecf4ff;font:inherit;cursor:pointer}
+  button:hover, select:hover {background:#203550}
+  select option {background:#132239;color:#ecf4ff}
+  input {flex:1;min-width:160px;accent-color:#56c7ff}
   .note {color:#a5b6cc;font-size:14px;line-height:1.65} a {color:#72d1ff}
   :focus-visible {outline:2px solid #72d1ff;outline-offset:3px}
 </style>
@@ -22,6 +24,13 @@
 <div class="controls">
   <button id="play" type="button">Pause</button>
   <button id="restart" type="button">Replay</button>
+  <select id="speed" aria-label="Playback speed" title="Playback speed">
+    <option value="0.25">0.25×</option>
+    <option value="0.5" selected>0.5× (Slow)</option>
+    <option value="0.75">0.75×</option>
+    <option value="1">1× (Normal)</option>
+    <option value="1.5">1.5×</option>
+  </select>
   <input id="seek" aria-label="Simulated time in milliseconds" type="range" min="0" max="360" value="0">
   <output id="time" for="seek">0 ms</output>
 </div>
@@ -124,12 +133,15 @@ window.renderAt = function(value) {
 let running=!matchMedia('(prefers-reduced-motion: reduce)').matches;
 let cursor=0, previous=performance.now();
 const cycle=trace.duration+70;
+const speed=document.querySelector('#speed');
+let playbackSpeed=parseFloat(speed.value)||0.5;
+speed.addEventListener('change',()=>{playbackSpeed=parseFloat(speed.value)||0.5;});
 function updateButton(){play.textContent=running?'Pause':'Play';}
 play.addEventListener('click',()=>{running=!running;updateButton();});
 document.querySelector('#restart').addEventListener('click',()=>{cursor=0;renderAt(0);});
 seek.addEventListener('input',()=>{running=false;cursor=Number(seek.value);renderAt(cursor);updateButton();});
 function animate(now){
-  if(running && !window.captureMode){cursor=(cursor+Math.min(now-previous,100)/30)%cycle;renderAt(Math.min(cursor,trace.duration));}
+  if(running && !window.captureMode){cursor=(cursor+Math.min(now-previous,100)*playbackSpeed/30)%cycle;renderAt(Math.min(cursor,trace.duration));}
   previous=now;requestAnimationFrame(animate);
 }
 renderAt(0);updateButton();requestAnimationFrame(animate);

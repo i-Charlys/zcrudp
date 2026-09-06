@@ -17,7 +17,8 @@ events, receive-buffer contents, delivery counters, retries or RTO values.
 - Default link delay 15 ms each way. First R2 transmission and U9 are dropped.
 - First R3 transmission takes 70 ms; U4 takes 80 ms and arrives stale.
 - Adaptive recovery starts at 100 ms, with base-RTO bounds 10..2,000 ms.
-- 360 ms of simulated time, replayed approximately 30 times slower, with an
+- 360 ms of simulated time, replayed with selectable speed (defaults to 0.5×,
+  approximately 60 times slower, with options from 0.25× to 1.5×), and an
   end hold. This intentionally differs from the comparative benchmark workload.
 - Packet icons interpolate between actual simulated send/arrival times. A red
   cross in the middle is a graphical convention, not a measured loss location.
