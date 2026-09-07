@@ -124,14 +124,15 @@ implementation notes; tooling can progress independently of protocol changes.
 ## Phase 5: Recovery, security and platform support
 *Depends on Phase 4.*
 
-- [ ] **Dual-Target Network Stacks**:
-  - **Target A (Standard OS / Game Engines)**: Desktop, dedicated servers, and consoles using standard POSIX/BSD and Winsock UDP sockets.
-  - **Target B (Embedded / IoT / Robotics)**: Bare-metal and FreeRTOS microcontrollers (STM32, ESP32) using the lightweight **lwIP** stack with zero-malloc static buffers.
-- [ ] **WireGuard & Noise Protocol Cryptographic Layer**:
-  - Evaluate an existing Noise implementation for encryption and authentication; the channel flag alone provides neither.
-  - On Target A: In-process lightweight Noise AEAD or native WireGuard tunnel encapsulation.
-  - On Target B: Embedded integration with **`wireguard-lwip`** for encrypted bare-metal communication.
-  - Specify peer authentication, key management and replay protection before exposing a secure-channel API.
+- [ ] **Couche d'I/O unifiée Scatter-Gather (Zero-Copy Universal I/O)**:
+  - Une seule API d'entrée-sortie vectorielle (`rudp_iovec_s`) 100% portable et agnostique de l'OS.
+  - Élimine la scission en deux stacks ("Target A vs Target B") : le cœur zcrudp reste pur, unique et sans `malloc`.
+  - Sur PC (Linux, macOS, BSD, Windows) : délégation de l'envoi vectoriel à `sendmsg` (`struct iovec`) ou `WSASendTo` (`WSABUF`).
+  - Sur microcontrôleurs (STM32, ESP32) et bare-metal : délégation directe aux pbufs de lwIP (`PBUF_REF`) ou aux anneaux de descripteurs DMA matériels de la puce Ethernet.
+- [ ] **Couche cryptographique modulaire (Noise / WireGuard - Wrapper externe)**:
+  - Intégration strictement modulaire et découplée sous forme de surcouche (wrapper externe).
+  - Le cœur de zcrudp reste 100% autonome et sans dépendance externe obligatoire (pas de dépendance forcée à OpenSSL ou Libsodium).
+  - Fournir des adaptateurs optionnels : Noise AEAD (ChaCha20-Poly1305) léger pour l'embarqué ou encapsulation tunnel WireGuard.
 - [x] **Adaptive RTT & Dynamic Timeout**: Opt-in session recovery, timestamped receive API, fixed-point SRTT/RTTVAR, conservative Karn sampling at most once per RTT, configurable base-RTO bounds, and timeout-only backoff separate from fast repairs. Unchanged wire format and TX slots. See `docs/ADAPTIVE_RECOVERY.md`; `make test-recovery-stress` covers 200 paced-loss runs.
 - [ ] **Revisit recovery memory / traffic / latency tradeoffs (explicitly deferred)**: Preserve the measured adaptive-recovery baseline (5,620 B/session, +352 B versus phase 4; about +9% UDP-payload traffic at 5% loss, p99 median 57 ms versus 263 ms). Investigate packed timeout counters, optional recovery-state storage, shared RTT estimation only where path/queue semantics permit it, and selective ACK extensions that suppress redundant retransmissions. Target retaining the latency improvement while reducing added RAM and returning toward phase-4 traffic; these are experimental objectives, not guarantees. Validate with unchanged baseline workloads plus finite-rate links, bounded queues, reordering, correlated loss and application stalls before claiming a simultaneous improvement.
 - [ ] **Estimable / Dead-Reckoning Classification**: Categorize continuous data for local client-side physics interpolation/extrapolation on packet drop.
@@ -167,3 +168,40 @@ implementation notes; tooling can progress independently of protocol changes.
   - Python binding (via `ctypes` or `cffi`) for rapid bot scripting, headless test simulation, and AI game client training.
   - Foreign Function Interface (FFI) templates for Node.js (`node-addon-api` / Bun FFI), Rust (bindgen crate), and Go (cgo).
 - [x] **CI/CD & Memory Sanity**: GitHub Actions workflow with AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan) verifying 0 memory leaks and 0 undefined behaviors.
+
+---
+
+## Phase 7: Research tracks & next-gen architecture
+
+Exploratory tracks for zero-copy bulk streaming, asymmetric channel window partitioning, micro-pacing, and zero-RTT recovery.
+
+- [ ] **Zero-Copy Page Streaming & Universal Scatter-Gather (Tier 3 V2)**:
+  - Replace 4-byte micro-chunking with MTU-sized descriptors (512 to 1400 bytes) pointing directly to caller-owned memory (`rudp_iovec_s`).
+  - Strict zero-copy pipeline across all targets: POSIX `sendmsg(iovec)`, Windows `WSASendTo(WSABUF)`, lwIP `pbuf_chain(PBUF_REF)`, and bare-metal NIC DMA descriptor rings (`tx_desc_t`).
+  - Unify Desktop and Embedded: Eliminate the artificial "Dual-Target" divide in favor of a single, mathematically pure, zero-malloc engine.
+  - Extent/Range Addressing: Support 32-bit byte offsets (`offset` + `length`) inside descriptors, enabling streaming of blobs up to 4 GB without per-chunk allocations.
+
+- [ ] **Heterogeneous Per-Channel Windows via Shared Static Slot Pool**:
+  - Replace uniform per-channel arrays (`tx_buffer[RUDP_WINDOW_SIZE]`) with a single session-wide static slot pool (e.g. 256 total slots).
+  - Channels dynamically carve contiguous slices from the static pool at initialization:
+    - Channel 0 (Telemetry / Unreliable): 0 slots (saves 100% of unused TX/RX memory).
+    - Channel 1 (Inputs / Critical Actions): 16 slots.
+    - Channel 2 (Bulk Stream / Video Slices): 240 slots.
+  - Zero dynamic heap allocation (`malloc`), identical total session RAM footprint, but 4x higher in-flight pipeline capacity for high-throughput channels.
+
+- [ ] **Micro-Pacing & Delay-Gradient Congestion Control (SCReAM / L4S / BLADE)**:
+  - Replace coarse millisecond timers with microsecond pacing calibrated to physical line-rate (8.2 microseconds per 1 KB at 1 Gbps) to prevent switch queue bufferbloat.
+  - One-Way Delay (OWD) Gradient tracking: Measure transmit-to-receive delta trends (`Delta D = D_i - D_{i-1}`).
+  - Proactive rate adaptation: Detect queuing delay growth before packet loss occurs, avoiding the periodic latency spikes of BBR's ProbeBW phase.
+  - Mitigate Wi-Fi tail latency and radio contention spikes inspired by BLADE (USENIX NSDI 2023).
+
+- [ ] **Sliding-Window Convolutional FEC & In-Band SACK**:
+  - In-Band 64-bit SACK mask (8 bytes) packed into every datagram's MTU headroom (~440 bytes available).
+  - Sliding-Window FEC (RFC 8681): Generate parity across a moving window of in-flight segments, eliminating block-formation delay so any dropped packet is reconstructed at 0 RTT.
+  - Adaptive Parity Ratio: 0% parity under clean link conditions, scaling dynamically to 6% or 12% under measured loss.
+  - Unequal Error Protection (UEP): Apply high-priority protection to stream descriptors and slice headers, with lighter protection on high-frequency residuals.
+
+- [ ] **Intra-Refresh & Real-Time Screen / Sensor Matrix Streaming**:
+  - Integrate rolling Intra-Refresh slice transmission (e.g. 5% vertical column per tick) to maintain an entirely flat bitrate without I-frame lag spikes.
+  - Zero-copy UMA pipeline: Camera/GPU shared RAM directly addressed by `zcrudp` scatter-gather descriptors and delivered straight into display render buffers.
+
