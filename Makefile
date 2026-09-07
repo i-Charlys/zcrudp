@@ -57,7 +57,6 @@ bench-report: $(BUILD_DIR)/bench_rudp
 	mkdir -p docs/bench
 	./$(BUILD_DIR)/bench_rudp --iterations $(BENCH_ITERATIONS) --csv docs/bench/codec.csv --svg docs/bench/codec.svg > docs/bench/environment.txt
 
-test-tools: $(BUILD_DIR)/demo_loss $(BUILD_DIR)/bench_rudp
 $(BUILD_DIR)/test_demo_queue: tests/test_demo_queue.c examples/demo_loss.c $(SRC) $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(SRC) tests/test_demo_queue.c -o $@
 
@@ -102,7 +101,6 @@ test: all
 	./$(BUILD_DIR)/test_window_min
 	./$(BUILD_DIR)/test_window_max
 
-asan: clean $(BUILD_DIR)
 asan: | $(BUILD_DIR)
 	$(CC) $(ASAN_CFLAGS) $(SRC) src/profiles.c tests/test_phase4.c -o $(BUILD_DIR)/test_phase4_asan
 	./$(BUILD_DIR)/test_phase4_asan

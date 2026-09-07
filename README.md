@@ -253,9 +253,13 @@ Loss is an independent integer percentage applied to every outgoing datagram,
 including ACKs and retransmissions. Each surviving datagram waits `--latency`
 plus a uniform integer delay from zero through `--jitter` ms in a fixed 512-slot
 queue. Queue saturation is reported separately. Both peers apply their own
-settings, so injected round-trip delay is the sum of the two directions. The
-5 ms event-loop polling interval adds scheduling granularity. A seed fixes the
-PRNG stream; OS scheduling and retransmissions can still change the full trace.
+settings, so injected round-trip delay is the sum of the two directions. While a
+burst is outstanding (automatic generation still running, reliable slots unacked,
+or datagrams waiting in the delay queue) the event loop polls without blocking, so
+burst latency is not quantised to the OS scheduler tick; it falls back to a 5 ms
+wait only when the loop is idle. A seed fixes the PRNG stream; OS scheduling and
+retransmissions can still change the full trace. On Linux the intra-tick burst is
+flushed with a single `sendmmsg()` call; other POSIX hosts loop on `sendto()`.
 
 `--timeout` defaults to 500 ms and starts when the reliable message is queued,
 before injected delay. Set it above the expected round-trip delay to avoid

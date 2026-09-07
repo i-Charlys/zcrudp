@@ -1,3 +1,6 @@
+#if defined(__linux__)
+#define _GNU_SOURCE /* sendmmsg()/struct mmsghdr for the batched egress path */
+#endif
 #define _POSIX_C_SOURCE 200809L
 #include "protocol_rudp.h"
 #include <arpa/inet.h>
@@ -10,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -81,25 +85,71 @@ static void enqueue(const uint8_t *bytes, size_t len) {
   fprintf(stderr, "DROP simulation queue full\n");
 }
 
+/* Transmit every datagram whose deadline has passed, in (due, seq) order.
+ * On Linux one sendmmsg() call vectors the whole intra-tick burst into the
+ * kernel; elsewhere it is one sendto() per datagram. A blocked socket or a
+ * short send stops the drain and leaves the remainder queued for the next
+ * tick, so ordering across ticks is preserved. */
 static int flush(int fd, const struct sockaddr_in *peer) {
   uint64_t now = now_ms();
-  while (1) {
-    int best = -1;
-    for (unsigned i = 0; i < QUEUE_SIZE; i++) {
-      if (!queue[i].used || queue[i].due > now) continue;
-      if (best == -1 || queue[i].due < queue[best].due ||
-          (queue[i].due == queue[best].due && queue[i].seq < queue[best].seq)) {
-        best = (int)i;
-      }
-    }
-    if (best < 0) break;
-    ssize_t n = sendto(fd, queue[best].bytes, queue[best].len, 0,
-                       (const struct sockaddr *)peer, sizeof(*peer));
-    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) break;
-    if (n != (ssize_t)queue[best].len) { perror("sendto"); return -1; }
-    sent++;
-    queue[best].used = 0;
+  uint16_t order[QUEUE_SIZE];
+  unsigned n = 0;
+  for (unsigned i = 0; i < QUEUE_SIZE; i++) {
+    if (queue[i].used && queue[i].due <= now) order[n++] = (uint16_t)i;
   }
+  for (unsigned i = 1; i < n; i++) { /* insertion sort: bounded queue, near-sorted input */
+    uint16_t v = order[i];
+    unsigned j = i;
+    while (j > 0 && (queue[order[j - 1]].due > queue[v].due ||
+                     (queue[order[j - 1]].due == queue[v].due && queue[order[j - 1]].seq > queue[v].seq))) {
+      order[j] = order[j - 1];
+      j--;
+    }
+    order[j] = v;
+  }
+  if (n == 0) return 0;
+
+  unsigned done = 0;
+#if defined(__linux__)
+  struct mmsghdr msgs[64];
+  struct iovec iov[64];
+  while (done < n) {
+    unsigned batch = n - done < 64 ? n - done : 64;
+    for (unsigned i = 0; i < batch; i++) {
+      delayed_s *d = &queue[order[done + i]];
+      iov[i].iov_base = d->bytes;
+      iov[i].iov_len = d->len;
+      msgs[i].msg_hdr = (struct msghdr){0};
+      msgs[i].msg_hdr.msg_iov = &iov[i];
+      msgs[i].msg_hdr.msg_iovlen = 1;
+      msgs[i].msg_hdr.msg_name = (void *)peer;
+      msgs[i].msg_hdr.msg_namelen = sizeof *peer;
+      msgs[i].msg_len = 0;
+    }
+    int s = sendmmsg(fd, msgs, batch, 0);
+    if (s < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) break;
+      perror("sendmmsg");
+      return -1;
+    }
+    if (s == 0) break;
+    for (int k = 0; k < s; k++, done++) {
+      if (msgs[k].msg_len != queue[order[done]].len) { fprintf(stderr, "sendmmsg short write\n"); return -1; }
+      queue[order[done]].used = 0;
+      sent++;
+    }
+    if ((unsigned)s < batch) break; /* socket buffer full: resume the drain next tick */
+  }
+#else
+  for (; done < n; done++) {
+    ssize_t w = sendto(fd, queue[order[done]].bytes, queue[order[done]].len, 0,
+                       (const struct sockaddr *)peer, sizeof *peer);
+    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) break;
+    if (w != (ssize_t)queue[order[done]].len) { perror("sendto"); return -1; }
+    queue[order[done]].used = 0;
+    sent++;
+  }
+#endif
   return 0;
 }
 
@@ -259,7 +309,14 @@ int main(int argc, char **argv) {
       for (int i = 0; i < tick.count; i++) { emit_reliable(indices[i]); retried++; }
     }
     if (flush(fd, &peer) < 0) { status = 1; break; }
-    int ready = poll(fds, 2, 5);
+    /* Bench bias fix: while a burst is in flight (auto-generation still running,
+     * reliable slots unacked, or datagrams waiting in the delay queue) poll
+     * without blocking so measured latency is not quantised to the OS scheduler
+     * tick. Fall back to a bounded 5 ms wait only when the loop is truly idle. */
+    int busy = gen_rel < count || gen_unrel < count ||
+               session.channels[0].ctx.head != session.channels[0].ctx.tail;
+    for (unsigned i = 0; !busy && i < QUEUE_SIZE; i++) busy = queue[i].used;
+    int ready = poll(fds, 2, busy ? 0 : 5);
     if (ready < 0) { if (errno == EINTR) continue; perror("poll"); status = 1; break; }
     if (fds[0].revents & POLLIN) {
       uint8_t bytes[2048]; struct sockaddr_in from; socklen_t from_len = sizeof from;

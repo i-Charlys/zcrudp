@@ -1,8 +1,13 @@
 /* Exercise the actual demo queue without requiring a socket or wall-clock waits. */
 #define main demo_main
+#if defined(__linux__)
+#define sendmmsg capture_sendmmsg /* flush() vectors the burst through sendmmsg() here */
+#else
 #define sendto capture_sendto
+#endif
 #include "../examples/demo_loss.c"
 #undef main
+#undef sendmmsg
 #undef sendto
 #include <assert.h>
 
@@ -10,14 +15,32 @@ static uint8_t observed[8];
 static unsigned observed_count;
 static int would_block;
 
-ssize_t capture_sendto(int fd, const void *buf, size_t len, int flags,
-                      const struct sockaddr *dest, socklen_t dest_len) {
-  (void)fd; (void)flags; (void)dest; (void)dest_len;
-  if (would_block) { errno = EAGAIN; return -1; }
+static void observe(const void *buf) {
   assert(observed_count < sizeof observed);
   observed[observed_count++] = *(const uint8_t *)buf;
+}
+
+#if defined(__linux__)
+/* Mirror sendmmsg() semantics: a would-block on the first message reports -1,
+ * a later block reports the count already accepted. */
+int capture_sendmmsg(int fd, struct mmsghdr *msgs, unsigned int vlen, int flags) {
+  (void)fd; (void)flags;
+  for (unsigned int i = 0; i < vlen; i++) {
+    if (would_block) { errno = EAGAIN; return i == 0 ? -1 : (int)i; }
+    observe(msgs[i].msg_hdr.msg_iov[0].iov_base);
+    msgs[i].msg_len = (unsigned)msgs[i].msg_hdr.msg_iov[0].iov_len;
+  }
+  return (int)vlen;
+}
+#else
+ssize_t capture_sendto(int fd, const void *buf, size_t len, int flags,
+                       const struct sockaddr *dest, socklen_t dest_len) {
+  (void)fd; (void)flags; (void)dest; (void)dest_len;
+  if (would_block) { errno = EAGAIN; return -1; }
+  observe(buf);
   return (ssize_t)len;
 }
+#endif
 
 int main(void) {
   struct sockaddr_in peer = {0};
