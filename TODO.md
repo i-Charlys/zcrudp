@@ -129,6 +129,7 @@ implementation notes; tooling can progress independently of protocol changes.
   - Élimine la scission en deux stacks ("Target A vs Target B") : le cœur zcrudp reste pur, unique et sans `malloc`.
   - Sur PC (Linux, macOS, BSD, Windows) : délégation de l'envoi vectoriel à `sendmsg` (`struct iovec`) ou `WSASendTo` (`WSABUF`).
   - Sur microcontrôleurs (STM32, ESP32) et bare-metal : délégation directe aux pbufs de lwIP (`PBUF_REF`) ou aux anneaux de descripteurs DMA matériels de la puce Ethernet.
+  - **Support d'entropie multi-chemins (Inspiration AWS SRD ECMP)** : calcul en temps constant d'un hash d'entropie de flux (`path_entropy`) exposé dans les métadonnées d'I/O, permettant à la couche socket hôte de faire tourner dynamiquement le port source UDP et de répartir la charge sur tous les chemins physiques Spine-Leaf sans bloquer sur un lien unique.
 - [ ] **Couche cryptographique modulaire (Noise / WireGuard - Wrapper externe)**:
   - Intégration strictement modulaire et découplée sous forme de surcouche (wrapper externe).
   - Le cœur de zcrudp reste 100% autonome et sans dépendance externe obligatoire (pas de dépendance forcée à OpenSSL ou Libsodium).
@@ -204,4 +205,9 @@ Exploratory tracks for zero-copy bulk streaming, asymmetric channel window parti
 - [ ] **Intra-Refresh & Real-Time Screen / Sensor Matrix Streaming**:
   - Integrate rolling Intra-Refresh slice transmission (e.g. 5% vertical column per tick) to maintain an entirely flat bitrate without I-frame lag spikes.
   - Zero-copy UMA pipeline: Camera/GPU shared RAM directly addressed by `zcrudp` scatter-gather descriptors and delivered straight into display render buffers.
+
+- [ ] **AWS SRD Architectural Patterns (Multipath Packet Spraying & RACK-TLP Recovery)**:
+  - **ECMP Packet Spraying** : Dérivation d'une empreinte d'entropie (`uint16_t path_entropy = hash(channel, seq)`) injectée dans les ports sources UDP ou les en-têtes d'encapsulation. Permet d'exploiter 100% de la bande passante bisectionnelle des réseaux Spine-Leaf (Data Centers IA, clusters HPC) et multi-WAN.
+  - **Time-Based Loss Detection (RACK-TLP)** : Remplacement de l'heuristique rigide Tri-ACK par une tolérance temporelle glissante ($t_{\text{loss}} \ge \text{RTT} + \text{jitter}$). Évite les tempêtes de réémissions intempestives (*spurious retransmissions*) quand le spraying ou les liaisons radio désordonnent les paquets.
+  - **Anti-Incast Microsecond RTT Pacing** : Asservissement du débit aux micro-variations de latence ($\Delta \text{RTT} \sim \mu s$) inspiré de l'algorithme Swift/Timely de SRD, prévenant la saturation des files d'attente des commutateurs lors des synchronisations massives de gradients d'IA (AllReduce).
 
