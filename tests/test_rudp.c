@@ -4,7 +4,7 @@
 #include <string.h>
 
 // --- 1. Basic Happy Path Test ---
-void test_happy_path() {
+void test_happy_path(void) {
     rudp_context_s ctx;
     tfv_packet_u dummy_packet;
     dummy_packet.raw = 0;                       // not good practice, but for testing it's ok
@@ -39,7 +39,7 @@ void test_happy_path() {
 }
 
 // --- 2. Extreme Test: Domino Effect (Cumulative ACK) ---
-void test_cumulative_ack() {
+void test_cumulative_ack(void) {
     rudp_context_s ctx;
     tfv_packet_u dummy;
     dummy.raw = 0;
@@ -65,7 +65,7 @@ void test_cumulative_ack() {
 }
 
 // --- 3. Extreme Test: The 65535 Crash (Rollover) ---
-void test_seq_num_rollover() {
+void test_seq_num_rollover(void) {
     rudp_context_s ctx;
     tfv_packet_u dummy;
     dummy.raw = 0;
@@ -95,7 +95,7 @@ void test_seq_num_rollover() {
 }
 
 // --- 4. Extreme Test: Buffer Full and Memory Wrap-Around ---
-void test_buffer_full_and_wrap() {
+void test_buffer_full_and_wrap(void) {
     rudp_context_s ctx;
     tfv_packet_u dummy;
     dummy.raw = 0;
@@ -131,7 +131,7 @@ void test_buffer_full_and_wrap() {
 }
 
 // --- 5. Wire Serialization & Portability Test (Pack / Unpack) ---
-void test_wire_serialization() {
+void test_wire_serialization(void) {
     rudp_frame_s original_frame;
     original_frame.header.seq_num = 0x1234;
     original_frame.header.ack     = 0x5678;
@@ -241,7 +241,7 @@ void test_wire_serialization() {
 }
 
 // --- 6. Advanced Reliability Edge Cases Test ---
-void test_reliability_edge_cases() {
+void test_reliability_edge_cases(void) {
     rudp_context_s ctx;
     tfv_packet_u dummy;
     dummy.raw = 0;
@@ -309,7 +309,7 @@ void test_reliability_edge_cases() {
 }
 
 // --- 7. Reception Engine (RX) & Full-Duplex Bi-Directional Test ---
-void test_rx_and_full_duplex() {
+void test_rx_and_full_duplex(void) {
     rudp_context_s alice_ctx;
     rudp_context_s bob_ctx;
     tfv_packet_u alice_msg;
@@ -375,7 +375,7 @@ void test_rx_and_full_duplex() {
 }
 
 // --- 8. Fast Retransmit (Tri-ACK) Test ---
-void test_fast_retransmit_tri_ack() {
+void test_fast_retransmit_tri_ack(void) {
     rudp_context_s ctx;
     tfv_packet_u dummy;
     dummy.raw = 0;
@@ -440,7 +440,7 @@ void test_fast_retransmit_tri_ack() {
 }
 
 // --- 9. Dead Peer Detection & Retransmission Limit Test ---
-void test_dead_peer_detection() {
+void test_dead_peer_detection(void) {
     rudp_context_s ctx;
     tfv_packet_u dummy;
     dummy.raw = 0;

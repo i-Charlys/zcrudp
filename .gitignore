@@ -57,6 +57,8 @@ build/
 
 # IDE and Editor configurations
 .vscode/
+compile_commands.json
+.cache/
 
 # Python cache
 __pycache__/
