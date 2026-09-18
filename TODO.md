@@ -129,7 +129,7 @@ implementation notes; tooling can progress independently of protocol changes.
   - Élimine la scission en deux stacks ("Target A vs Target B") : le cœur zcrudp reste pur, unique et sans `malloc`.
   - Sur PC (Linux, macOS, BSD, Windows) : délégation de l'envoi vectoriel à `sendmsg` (`struct iovec`) ou `WSASendTo` (`WSABUF`).
   - Sur microcontrôleurs (STM32, ESP32) et bare-metal : délégation directe aux pbufs de lwIP (`PBUF_REF`) ou aux anneaux de descripteurs DMA matériels de la puce Ethernet.
-  - **Support d'entropie multi-chemins (Inspiration AWS SRD ECMP)** : calcul en temps constant d'un hash d'entropie de flux (`path_entropy`) exposé dans les métadonnées d'I/O, permettant à la couche socket hôte de faire tourner dynamiquement le port source UDP et de répartir la charge sur tous les chemins physiques Spine-Leaf sans bloquer sur un lien unique.
+  - **Support d'entropie multi-chemins pour diversité d'interfaces** : calcul en temps constant d'un hash d'entropie de flux (`path_entropy`) exposé dans les métadonnées d'I/O, permettant à la couche socket hôte de faire tourner dynamiquement le port source UDP et de répartir les paquets sur plusieurs interfaces physiques (Wi-Fi, cellulaire, liaisons radio multiples) pour assurer la redondance et éviter le blocage sur un lien unique.
 - [ ] **Couche cryptographique modulaire (Noise / WireGuard - Wrapper externe)**:
   - Intégration strictement modulaire et découplée sous forme de surcouche (wrapper externe).
   - Le cœur de zcrudp reste 100% autonome et sans dépendance externe obligatoire (pas de dépendance forcée à OpenSSL ou Libsodium).
@@ -161,8 +161,13 @@ implementation notes; tooling can progress independently of protocol changes.
 - [x] **Visual protocol replay**: Real-engine deterministic trace, offline HTML/SVG replay with seek/pause controls and reduced-motion support, plus captured README GIF and static poster (`make visual-trace`, `make visual-report`). Scripted losses/reordering are labeled as explanatory, not comparative performance measurements.
 - [x] **Benchmarking Suite (`bench/bench_rudp.c`)**: Codec throughput (Mops/s, Mpps for single frames/records) and amortized cost (ns/op), repeated samples and reproducible CSV/SVG performance graphs in `README.md` (`make bench`, `make bench-report`).
 - [x] **Competitive transport benchmark (`bench/compare_transport.c`)**: Run the actual zcrudp, ENet and KCP engines (default and fast profiles) through the same virtual datagram link. Nine scenarios, five seeds, 2,400 ordered 4-byte messages per run; measured goodput, p50/p95/p99 delay, emitted bytes and host simulation cost. Pinned/checksummed dependencies, CSV, environment metadata and comparative graphs (`make compare`, `make test-compare`). Failed runs remain visible.
-- [ ] **Physical network comparison**: Add a shared real-socket/proxy harness, finite link rates and queue disciplines, real end-to-end latency, CPU time and peak memory/allocation accounting. Current comparative latency/goodput are simulation metrics, not NIC benchmarks.
+- [ ] **Physical network comparison & Netem harness**:
+  - Add a shared real-socket test harness using Linux `netem` for adverse network emulation: Gilbert-Elliott burst loss models, Pareto delay/jitter distributions, and asymmetric packet reordering.
+  - Measure empirical Cumulative Distribution Functions (CDFs) of latency (p50, p95, p99), goodput, CPU time, and allocation accounting against ENet and TCP baselines under matching constraints.
 - [ ] **Broader workloads and transports**: Add larger payloads after bulk-message support, mixed reliable/unreliable channels and GNS/QUIC adapters with matched security and delivery semantics.
+- [ ] **Fuzzing & Invariant Verification (`libFuzzer` / `AFL++`)**:
+  - Run continuous fuzzing on datagram decoders and state machine transitions with ASan/UBSan to guarantee crash-free behavior on malformed or hostile network inputs.
+  - Formally document and verify state machine invariants (RFC 1982 sequence distance, wrap safety, strictly bounded time/space complexity without OS-dependent variability).
 - [x] **CMake Integration (`CMakeLists.txt`)**: Static/shared core and optional profiles, CTest with active Release assertions, POSIX tool opt-in, ABI settings propagated to consumers, `add_subdirectory` targets and relocatable `find_package` installation. `make test-cmake` validates package/embedded consumers and custom configuration; Linux static/shared tested, individual game-engine integrations not certified.
 - [ ] **One-Command Multi-Language Bindings (Python, Node/Bun, Rust, Go, C++)**:
   - Provide a single command (e.g. `make bindings` or `pip install -e .`) to build and expose the C-ABI shared library (`librudp.so`).
@@ -174,40 +179,44 @@ implementation notes; tooling can progress independently of protocol changes.
 
 ## Phase 7: Research tracks & next-gen architecture
 
-Exploratory tracks for zero-copy bulk streaming, asymmetric channel window partitioning, micro-pacing, and zero-RTT recovery.
+Exploratory tracks for zero-copy streaming, asymmetric channel window partitioning, delay-gradient micro-pacing, and resilient multi-interface transport.
 
 - [ ] **Zero-Copy Page Streaming & Universal Scatter-Gather (Tier 3 V2)**:
   - Replace 4-byte micro-chunking with MTU-sized descriptors (512 to 1400 bytes) pointing directly to caller-owned memory (`rudp_iovec_s`).
   - Strict zero-copy pipeline across all targets: POSIX `sendmsg(iovec)`, Windows `WSASendTo(WSABUF)`, lwIP `pbuf_chain(PBUF_REF)`, and bare-metal NIC DMA descriptor rings (`tx_desc_t`).
-  - Unify Desktop and Embedded: Eliminate the artificial "Dual-Target" divide in favor of a single, mathematically pure, zero-malloc engine.
-  - Extent/Range Addressing: Support 32-bit byte offsets (`offset` + `length`) inside descriptors, enabling streaming of blobs up to 4 GB without per-chunk allocations.
+  - Unified memory architecture: single, deterministic, zero-malloc engine with caller-provided static memory buffers.
+  - Extent/Range Addressing: Support 32-bit byte offsets (`offset` + `length`) inside descriptors, enabling streaming of firmware updates, sensor blocks, and tensor structures without per-chunk dynamic allocations.
 
 - [ ] **Heterogeneous Per-Channel Windows via Shared Static Slot Pool**:
   - Replace uniform per-channel arrays (`tx_buffer[RUDP_WINDOW_SIZE]`) with a single session-wide static slot pool (e.g. 256 total slots).
+  - Configurable compile-time ABI slot payload sizing (`ZCRUDP_SLOT_PAYLOAD_SIZE`):
+    - **Embedded / MCU profile**: 8-16 bytes per slot (~4 KB total RAM footprint for STM32/ESP32).
+    - **Media / Streaming profile**: 1,200-1,400 bytes per slot (~384 KB total static RAM for Linux/SBC/PC targets).
   - Channels dynamically carve contiguous slices from the static pool at initialization:
     - Channel 0 (Telemetry / Unreliable): 0 slots (saves 100% of unused TX/RX memory).
     - Channel 1 (Inputs / Critical Actions): 16 slots.
-    - Channel 2 (Bulk Stream / Video Slices): 240 slots.
-  - Zero dynamic heap allocation (`malloc`), identical total session RAM footprint, but 4x higher in-flight pipeline capacity for high-throughput channels.
+    - Channel 2 (Bulk Stream / Video Slices & Large Frames): 240 slots.
+  - Zero dynamic heap allocation (`malloc`), strictly bounded session RAM, and up to 4x higher in-flight pipeline capacity for high-throughput channels.
 
-- [ ] **Micro-Pacing & Delay-Gradient Congestion Control (SCReAM / L4S / BLADE)**:
-  - Replace coarse millisecond timers with microsecond pacing calibrated to physical line-rate (8.2 microseconds per 1 KB at 1 Gbps) to prevent switch queue bufferbloat.
-  - One-Way Delay (OWD) Gradient tracking: Measure transmit-to-receive delta trends (`Delta D = D_i - D_{i-1}`).
-  - Proactive rate adaptation: Detect queuing delay growth before packet loss occurs, avoiding the periodic latency spikes of BBR's ProbeBW phase.
-  - Mitigate Wi-Fi tail latency and radio contention spikes inspired by BLADE (USENIX NSDI 2023).
+- [ ] **Micro-Pacing & Delay-Gradient Congestion Control (SCReAM / L4S)**:
+  - Line-rate and link-capacity paced transmission to eliminate transmission bursts and prevent queue bufferbloat on congested wireless or low-bandwidth links.
+  - One-Way Delay (OWD) Gradient tracking: Measure transmit-to-receive delta trends ($\Delta D = D_i - D_{i-1}$).
+  - Proactive rate adaptation: Detect queuing delay growth before packet loss occurs, preventing tail-latency inflation without aggressive throughput throttling.
+  - Mitigate Wi-Fi and radio contention spikes with low-overhead delay tracking.
 
 - [ ] **Sliding-Window Convolutional FEC & In-Band SACK**:
-  - In-Band 64-bit SACK mask (8 bytes) packed into every datagram's MTU headroom (~440 bytes available).
-  - Sliding-Window FEC (RFC 8681): Generate parity across a moving window of in-flight segments, eliminating block-formation delay so any dropped packet is reconstructed at 0 RTT.
-  - Adaptive Parity Ratio: 0% parity under clean link conditions, scaling dynamically to 6% or 12% under measured loss.
-  - Unequal Error Protection (UEP): Apply high-priority protection to stream descriptors and slice headers, with lighter protection on high-frequency residuals.
+  - In-Band 64-bit SACK mask (8 bytes) packed into datagram headroom for fine-grained multi-packet loss recovery in a single RTT.
+  - Sliding-Window FEC (RFC 8681): Generate parity across a moving window of in-flight segments, eliminating block-formation delay so isolated drops are recovered at 0 RTT on lossy wireless channels.
+  - Adaptive Parity Ratio: 0% parity under clean link conditions, scaling dynamically (e.g., 6% to 12%) under measured loss rates.
+  - Unequal Error Protection (UEP): Apply high-priority protection to stream descriptors and state headers, with lighter protection on volatile samples.
 
-- [ ] **Intra-Refresh & Real-Time Screen / Sensor Matrix Streaming**:
-  - Integrate rolling Intra-Refresh slice transmission (e.g. 5% vertical column per tick) to maintain an entirely flat bitrate without I-frame lag spikes.
-  - Zero-copy UMA pipeline: Camera/GPU shared RAM directly addressed by `zcrudp` scatter-gather descriptors and delivered straight into display render buffers.
+- [ ] **Intra-Refresh Low-Latency Video Slices & Edge Media Streaming**:
+  - Integrate rolling Intra-Refresh slice transmission (e.g. progressive vertical column/macroblock refreshing per tick) maintaining a strictly flat bitrate without I-frame latency spikes.
+  - Zero-copy pipeline for continuous video slices (H.264/HEVC/AV1 NAL units) and camera frames directly addressed by scatter-gather descriptors into decoder/render buffers.
 
-- [ ] **AWS SRD Architectural Patterns (Multipath Packet Spraying & RACK-TLP Recovery)**:
-  - **ECMP Packet Spraying** : Dérivation d'une empreinte d'entropie (`uint16_t path_entropy = hash(channel, seq)`) injectée dans les ports sources UDP ou les en-têtes d'encapsulation. Permet d'exploiter 100% de la bande passante bisectionnelle des réseaux Spine-Leaf (Data Centers IA, clusters HPC) et multi-WAN.
-  - **Time-Based Loss Detection (RACK-TLP)** : Remplacement de l'heuristique rigide Tri-ACK par une tolérance temporelle glissante ($t_{\text{loss}} \ge \text{RTT} + \text{jitter}$). Évite les tempêtes de réémissions intempestives (*spurious retransmissions*) quand le spraying ou les liaisons radio désordonnent les paquets.
-  - **Anti-Incast Microsecond RTT Pacing** : Asservissement du débit aux micro-variations de latence ($\Delta \text{RTT} \sim \mu s$) inspiré de l'algorithme Swift/Timely de SRD, prévenant la saturation des files d'attente des commutateurs lors des synchronisations massives de gradients d'IA (AllReduce).
+- [ ] **Multipath Transport & Interface Diversity (Packet Spraying & RACK-TLP Recovery)**:
+  - **Interface Diversity & Packet Spraying**: Multi-interface transmission (e.g. concurrent Wi-Fi + Cellular or dual radio links) with per-packet path selection for link redundancy and failover.
+  - **Time-Based Loss Detection (RACK-TLP)**: Replace rigid Tri-ACK heuristics with time-based loss detection ($t_{\text{loss}} \ge \text{RTT} + \text{jitter}$) to prevent spurious retransmissions caused by packet reordering across asymmetric paths or wireless jitter.
+  - **Delay-Driven Anti-Bufferbloat Pacing**: Rate pacing driven by fine-grained RTT variations, preventing queue buildup on bottleneck links during concurrent telemetry and state streams.
+
 
