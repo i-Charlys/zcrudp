@@ -1,4 +1,4 @@
-CC = zig cc
+CC ?= zig cc
 .DEFAULT_GOAL := all
 CFLAGS = -Iinclude -Wall -Wextra -std=c11 -pedantic -Werror -O2 -UNDEBUG
 ASAN_CFLAGS = -Iinclude -Wall -Wextra -std=c11 -pedantic -Werror -g -fsanitize=address,undefined -UNDEBUG

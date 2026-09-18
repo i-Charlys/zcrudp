@@ -369,6 +369,9 @@ bool rudp_is_alive(const rudp_context_s *ctx, uint32_t now, uint32_t idle_timeou
     if (!ctx || ctx->state != RUDP_STATE_CONNECTED) {
         return false;
     }
+    if (idle_timeout == 0) {
+        return true;
+    }
     return ((uint32_t)(now - ctx->last_rx_time) <= idle_timeout);
 }
 

@@ -62,14 +62,18 @@ The comparative runner executes zcrudp, ENet (lsalzman), ENet-zpl (zpl-c), and K
 These are **virtual-link transport measurements**: common delay/loss/jitter and
 1 ms service cadence, not physical-NIC benchmarks. The no-loss saturation cases
 show zcrudp matching ENet and ENet-zpl goodput at the common 63-message admission limit.
-zcrudp emits fewer UDP-payload bytes in this tiny-message workload (8.1 B vs 18.2 B per message).
+In high-density saturation bursts, zcrudp aggregates records tightly to emit fewer
+UDP-payload bytes (8.1 B vs 18.2 B per message). In contrast, under low-occupancy,
+fixed-cadence streams (such as 240 Hz at 125 ms latency), datagrams carry fewer bundled
+records, yielding 32.0 B/msg for zcrudp vs 24.1 B/msg for ENet due to standalone datagram
+framing.
 
 With adaptive recovery enabled, the median of the five per-run p99 values shows:
 - **5% loss (10 ms delay, 5 ms jitter)**: 57 ms for zcrudp, compared with 167 ms for ENet, 378 ms for ENet-zpl, and 69 ms for KCP-fast.
 - **High jitter (20 ms delay, 2% loss, 40 ms jitter)**: 189 ms for zcrudp, compared with 338 ms for ENet and 203 ms for ENet-zpl, with 22% less datagram wire traffic than ENet.
 - **High latency with loss (250 ms ping / 125 ms one-way, 2% loss, 10 ms jitter)**: 379 ms for zcrudp, compared with 803 ms for ENet (-53%) and 673 ms for ENet-zpl (-44%). In the clean 250 ms ping case, zcrudp, ENet, and ENet-zpl all deliver at the physical 125 ms one-way baseline.
 
-It costs 352 B of session state and uses substantially less UDP-payload traffic than ENet, ENet-zpl, and KCP.
+It costs 352 B of session state and delivers significantly lower tail latency under packet loss.
 These results depend on the workload and transport settings, including KCP's
 selected profile. See [recovery settings and tradeoffs](docs/ADAPTIVE_RECOVERY.md).
 

@@ -16,6 +16,9 @@ jobs:
     - name: Set up GCC & Build Tools
       run: sudo apt-get update && sudo apt-get install -y gcc make
 
+    - name: Set up Zig
+      uses: mlugg/setup-zig@v1
+
     - name: Compile and Run Standard Tests
       run: make clean && make test
 

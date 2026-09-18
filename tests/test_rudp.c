@@ -1483,8 +1483,12 @@ static void test_negative_bounds_and_mutations(void) {
     rudp_touch(&ctx, 1000);
     assert(rudp_is_alive(&ctx, 1500, 1000) == true);
     assert(rudp_is_alive(&ctx, 2100, 1000) == false);
+    // idle_timeout == 0 disables idle check
+    assert(rudp_is_alive(&ctx, 5000, 0) == true);
+    assert(rudp_is_alive(NULL, 1000, 0) == false);
     ctx.state = RUDP_STATE_DISCONNECTED;
     assert(rudp_is_alive(&ctx, 1000, 1000) == false);
+    assert(rudp_is_alive(&ctx, 5000, 0) == false);
 
     printf("[OK] Negative Bounds & Mutations (M1-M6, Capability, Liveness): All boundary checks strictly validated\n");
 }
