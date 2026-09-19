@@ -8,12 +8,19 @@ socket and event loop.
 
 ## Why zcrudp?
 
-Standard reliable streams (like TCP) suffer from **Head-of-Line blocking**: when a single packet is dropped by Wi-Fi or cellular jitter, the entire connection freezes while waiting for a retransmission—causing visible stutter, lag spikes, and input delays in real-time games and embedded systems.
+An ordered reliable channel waits for a missing message before delivering later
+messages on that channel. Separate channels let an unreliable update continue
+while a reliable channel waits for retransmission.
 
-**zcrudp eliminates network freezes** by isolating communication into independent channels:
-- **Continuous Telemetry (Unreliable Channel):** Player positions, physics, and sensor streams bypass transmission buffers with zero copy. Fresh updates arrive continuously at 60–128 Hz, completely unaffected by lost packets elsewhere.
-- **Critical Actions (Reliable Channel):** State transitions, RPCs, and combat events are guaranteed in-order with Karn-safe adaptive retransmission and bounded out-of-order gap retention.
-- **Zero Heap Overhead:** 0 dynamic memory allocations (`malloc`), 4-byte minimal ACKs, and a fixed 5,620-byte session footprint that fits in MCU RAM or CPU L1 cache.
+The library provides:
+- **Unreliable updates:** They bypass the reliable TX window and are serialized
+  into a caller-provided UDP buffer. Older sequence numbers are discarded.
+- **Reliable messages:** Each channel has its own TX window and bounded RX buffer.
+  Ordered delivery is attempted until the retry limit is reached; applications
+  must handle disconnection and coordinate resets with their peers.
+- **Caller-owned storage:** The core does not call `malloc`. A default four-channel
+  session occupies 5,620 bytes on the tested ABI, including storage reserved for
+  channels configured as unreliable.
 
 [Interactive web replay](docs/visual/index.html) ·
 [Transport benchmarks](#transport-benchmarks-vs-enet-enet-zpl-and-kcp) ·
@@ -36,6 +43,17 @@ loss and recovery. [Demo options](#interactive-loss-and-latency-demo) ·
 
 ## Memory and wire format
 
+There are two wire formats. The original single-context format is a 4-byte ACK
+or an 8-byte frame (`rudp_header_s` + one 4-byte TFV). The session format is a
+4-byte datagram header followed by zero or more 8-byte records. A record carries
+a channel ID, flags, sequence number and TFV; a session is the local in-memory
+state for all channels, not a network record. These formats require an explicit
+choice by the application; do not infer one from UDP length alone.
+
+`tx_buffer` stores reliable messages awaiting ACKs. A session channel's
+`rx_buffer` stores reliable messages received ahead of a missing sequence until
+they can be delivered in order. Unreliable records bypass both windows.
+
 - **1,040 bytes per context; 5,620 bytes per four-channel session** on the measured
   host ABI with default settings. Run `make test` to inspect sizes on your target.
   Each default TX ring has 64 slots and holds 63 outstanding reliable messages.
@@ -44,9 +62,10 @@ loss and recovery. [Demo options](#interactive-loss-and-latency-demo) ·
   These are UDP payload sizes, excluding UDP/IP and link-layer overhead.
 - **No heap calls, background threads or socket API in the core.** Integrate
   `src/rudp.c` and the two headers; call the protocol from your own loop.
-- **Optional transport profiles:** bounded multipart messages, priority scheduling,
-  compact4/rolling8 scalar telemetry and adaptive duplication. Add `src/profiles.c`
-  when needed. [Wire formats, API contracts and tradeoffs](docs/PHASE4.md).
+- **Optional profiles:** bounded multipart messages, compact4/rolling8 scalar
+  telemetry and adaptive duplication. Add `src/profiles.c` when needed. Session
+  priorities and recovery state remain in the core and its fixed session size.
+  [Wire formats and tradeoffs](docs/PHASE4.md).
 
 ## Transport benchmarks vs ENet, ENet (zpl), and KCP
 
@@ -328,20 +347,14 @@ reliable recovery under simulated loss/jitter, unreliable ordering, total loss,
 and CSV/SVG report validity. This target does not enforce timing-based performance
 thresholds and is separate from the portable core tests.
 
-## Comparison with Other Libraries
 ## How it compares
 
-| Feature | `zcrudp` | `ENet` | `KCP` | `Valve GNS` | `QUIC (RFC 9000)` |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Allocation Model** | **Strict Zero-Malloc** | Dynamic (`malloc`) | Custom Hook / Heap | Object Pools / Heap | Dynamic Heap |
-| **Connection Footprint** | **1,036 B** (ctx) / **4,196 B** (4 ch) | ~20 - 64 KB | ~8 - 32 KB | > 100 KB | > 150 KB |
-| **Bare-Metal MCU Ready** | **Yes** (STM32, ESP32, lwIP) | No (OS-tied) | With static pool | No | No |
-| **Wire Header Size** | **4 B** (ack) / **8 B** (frame) | 28 - 48 B | 24 B | 15 - 40+ B | 20 - 50+ B |
-| **Multi-Channel Multiplexing**| **Native (4 isolated channels)** | Native | Manual (1 cb/stream)| Native (Multi-lane) | Native (Streams) |
-| **Head-of-Line Blocking** | **None** (per-channel isolated) | Partial | High (single stream)| None | None |
-| **Intra-Tick Multi-ACK Bundling**| **Yes** (`build_datagram`) | Piggybacked | Piggybacked | Batched frames | SACK frames |
-| **Encode Speed (Single Core)**| **~2.0 ns / op** (~500 Mops/s) | ~120 - 250 ns | ~45 - 80 ns | ~300 - 800 ns | Complex AEAD |
-| **Distributed AI KV-Cache** | **Engineered (Prefill-Decode)**| Unsuitable | Unsuitable | Average | Average (HTTP/3) |
+zcrudp specializes in small TFV updates with caller-owned, fixed storage. It
+provides independent channel state, but an ordered reliable channel can still
+wait for a missing message. The core provides no handshake, authentication,
+encryption, congestion control or socket management. QUIC targets a broader,
+secure transport; it is not an equivalent replacement for this small-message
+protocol, nor is this library a general QUIC replacement.
 For a single four-byte message, the unified zcrudp datagram occupies **12 bytes
 of UDP payload**, compared with **28 bytes for a KCP PUSH segment**: 57% fewer
 bytes at this layer in that specific case. ENet's reliable encoding is already
@@ -357,7 +370,7 @@ fills, that the simulation preserves deadline order, and that sequence gaps
 trigger ACKs without wrapping the duplicate-ACK counter.
 
 For general large messages, built-in security or broader networking features,
-evaluate ENet, KCP, GNS or QUIC against those needs. The repository now includes
+evaluate ENet, KCP, GNS or QUIC against those needs. The repository includes
 matched virtual-link runs for ENet and KCP. Peak-memory comparisons, physical-network
 tests, bulk KV-cache transfer and hardware-validated MCU integration remain open.
 The [comparison guide](docs/COMPARISON.md) separates measured transport behavior

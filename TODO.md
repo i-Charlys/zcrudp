@@ -164,7 +164,10 @@ implementation notes; tooling can progress independently of protocol changes.
 - [ ] **Physical network comparison & Netem harness**:
   - Add a shared real-socket test harness using Linux `netem` for adverse network emulation: Gilbert-Elliott burst loss models, Pareto delay/jitter distributions, and asymmetric packet reordering.
   - Measure empirical Cumulative Distribution Functions (CDFs) of latency (p50, p95, p99), goodput, CPU time, and allocation accounting against ENet and TCP baselines under matching constraints.
-- [ ] **Broader workloads and transports**: Add larger payloads after bulk-message support, mixed reliable/unreliable channels and GNS/QUIC adapters with matched security and delivery semantics.
+- [ ] **Broader workloads & Payload Scalability**:
+  - Benchmark framing efficiency across realistic payload distributions (64B, 256B, 512B, 1200B MTU slices) in addition to 4B micro-records, documenting the framing-to-payload efficiency curve.
+  - Stress-test WAN Bandwidth-Delay Product (BDP) limits at 80-150 ms RTT under high message rates (120 Hz) to quantify window saturation and validate backpressure mitigations.
+  - Mixed reliable/unreliable channels and GNS/QUIC adapters with matched security and delivery semantics.
 - [ ] **Fuzzing & Invariant Verification (`libFuzzer` / `AFL++`)**:
   - Run continuous fuzzing on datagram decoders and state machine transitions with ASan/UBSan to guarantee crash-free behavior on malformed or hostile network inputs.
   - Formally document and verify state machine invariants (RFC 1982 sequence distance, wrap safety, strictly bounded time/space complexity without OS-dependent variability).
