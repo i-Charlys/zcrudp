@@ -1,6 +1,6 @@
 # zcrudp
 
-A zero-malloc, 32-bit fixed-frame Reliable UDP library in pure C.
+A caller-owned, fixed-storage UDP message library in pure C.
 zcrudp is a C11 library for reliable and unreliable UDP messaging, intended for
 small game updates and embedded telemetry. It uses caller-owned buffers, with no
 heap allocation or external dependencies. The application provides the clock,
@@ -154,10 +154,12 @@ game engine. Packaging follows CMake's
 ```text
 .
 ├── include/
-│   ├── protocol_rudp.h    # Core RUDP definitions and context
-│   └── protocol_tfv.h     # 32-bit TFV packet structure
+│   ├── protocol_rudp.h    # Core context, session and wire definitions
+│   ├── protocol_tfv.h     # 32-bit TFV packet structure
+│   └── protocol_profiles.h # Optional stream and scalar profiles
 ├── src/
-│   └── rudp.c             # RUDP implementation logic
+│   ├── rudp.c             # Core transport logic
+│   └── profiles.c         # Optional profile logic
 ├── examples/demo_loss.c  # Interactive POSIX UDP peers with simulated loss/delay
 ├── bench/bench_rudp.c    # In-memory codec benchmarks and CSV/SVG reports
 ├── docs/bench/           # Recorded benchmark results
@@ -332,8 +334,6 @@ These host-specific observations are not performance guarantees for STM32 or
 other targets. CPU frequency, background load, compiler and virtualization affect
 the results. Regenerate on the target host before comparing changes; use the same
 build flags and batch size. Short runs are useful for smoke tests only.
-
-![Codec cost and throughput](docs/bench/codec.svg)
 
 ### Host-tool integration tests
 
