@@ -21,6 +21,7 @@ static datagram_s heaps[2][CAP];
 static unsigned sizes[2];
 static uint32_t now, delay_ms, jitter_ms, loss_percent, rng, origin;
 static uint64_t serial, wire_bytes, wire_packets, lost_packets;
+static uint32_t zcrudp_initial_rto_ms = 100;
 static unsigned delivered, admitted, total, offered_rate;
 static uint32_t born[MAX_MESSAGES], latencies[MAX_MESSAGES];
 static rudp_session_s z[2];
@@ -137,7 +138,7 @@ static void setup(unsigned engine) {
     for (int side = 0; side < 2; side++) {
       assert(rudp_session_init(&z[side]) == RUDP_OK);
       assert(rudp_session_config_channel(&z[side], 0, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED) == RUDP_OK);
-      assert(rudp_session_config_recovery(&z[side], 0, 100, 10, 2000) == RUDP_OK);
+      assert(rudp_session_config_recovery(&z[side], 0, zcrudp_initial_rto_ms, 10, 2000) == RUDP_OK);
     }
   } else if (engine == 1) {
     next_socket = connected = 0;
@@ -233,8 +234,8 @@ static uint32_t percentile(unsigned pct) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 7 && argc != 8) {
-    fprintf(stderr, "Usage: compare_transport ENGINE(0..4) COUNT RATE(0=saturated) DELAY_MS LOSS_PERCENT SEED [JITTER_MS]\n"); return 2;
+  if (argc != 7 && argc != 8 && argc != 9) {
+    fprintf(stderr, "Usage: compare_transport ENGINE(0..4) COUNT RATE(0=saturated) DELAY_MS LOSS_PERCENT SEED [JITTER_MS [ZCRUDP_INITIAL_RTO_MS]]\n"); return 2;
   }
   unsigned engine = (unsigned)strtoul(argv[1], NULL, 10);
   total = (unsigned)strtoul(argv[2], NULL, 10); offered_rate = (unsigned)strtoul(argv[3], NULL, 10);
@@ -242,7 +243,12 @@ int main(int argc, char **argv) {
   uint32_t seed = (uint32_t)strtoul(argv[6], NULL, 10);
   assert(engine < 5 && total > 0 && total <= MAX_MESSAGES && delay_ms > 0 && loss_percent <= 100 && seed);
   jitter_ms = (argc == 8) ? (unsigned)strtoul(argv[7], NULL, 10) : (loss_percent ? 5 : 0);
+  if (argc == 9) {
+    jitter_ms = (unsigned)strtoul(argv[7], NULL, 10);
+    zcrudp_initial_rto_ms = (uint32_t)strtoul(argv[8], NULL, 10);
+  }
   rng = seed;
+  assert(zcrudp_initial_rto_ms >= 10 && zcrudp_initial_rto_ms <= 2000);
   setup(engine); rng = seed;
   uint64_t start = clock_ns();
   uint32_t end = origin;

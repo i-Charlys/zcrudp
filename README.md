@@ -74,22 +74,41 @@ The comparative runner executes zcrudp, ENet (lsalzman), ENet-zpl (zpl-c), and K
 
 ![Delivered throughput comparison](docs/bench/comparison/throughput.svg)
 
-![Tail latency comparison](docs/bench/comparison/latency-p99.svg)
+![Tail latency by scenario, focused on zcrudp and ENet variants](docs/bench/comparison/latency-p99-detail.svg)
+
+The focused p99 chart uses a separate linear scale in each scenario so large KCP
+delays do not compress the differences among zcrudp and the ENet variants.
+KCP-fast values are printed in each panel; the [full five-engine chart](docs/bench/comparison/latency-p99.svg)
+and [CSV](docs/bench/comparison/results.csv) preserve the complete comparison.
 
 ![Datagram wire cost comparison](docs/bench/comparison/wire-cost.svg)
+
+The [240 Hz wire-cost chart](docs/bench/comparison/wire-cost-paced.svg) also
+shows the clean 250 ms ping case where zcrudp sends more UDP payload bytes than ENet.
+
+![Initial timeout sensitivity at 250 ms ping](docs/bench/comparison/rto-sensitivity.svg)
+
+This follow-up measures zcrudp with 100 ms and 300 ms initial retransmission
+timeouts on the same virtual 250 ms ping path. At 300 ms, clean traffic drops
+from 32.0 to 16.0 UDP payload bytes per delivered message with unchanged p99
+latency. Under 2% loss, its p99 rises from 379 to 1,429 ms. The 100 ms profile
+remains the published comparison; [the sensitivity data](docs/bench/comparison/rto-sensitivity.csv)
+shows the tradeoff rather than replacing it.
 
 These are **virtual-link transport measurements**: common delay/loss/jitter and
 1 ms service cadence, not physical-NIC benchmarks. The no-loss saturation cases
 show zcrudp matching ENet and ENet-zpl goodput at the common 63-message admission limit.
 In high-density saturation bursts, zcrudp aggregates records tightly to emit fewer
-UDP-payload bytes (8.1 B vs 18.2 B per message). In contrast, under low-occupancy,
-fixed-cadence streams (such as 240 Hz at 125 ms latency), datagrams carry fewer bundled
-records, yielding 32.0 B/msg for zcrudp vs 24.1 B/msg for ENet due to standalone datagram
-framing.
+UDP-payload bytes (8.1 B vs 18.2 B per message). In the clean 250 ms ping case,
+the benchmark's 100 ms initial retransmission timeout expires before an ACK can
+return. This causes unnecessary retransmissions: zcrudp emits 32.0 B/message
+versus 24.1 B/message for ENet. The 100 ms setting is part of the benchmark
+profile, not a suitable initial timeout for every network path.
 
 With adaptive recovery enabled, the median of the five per-run p99 values shows:
 - **5% loss (10 ms delay, 5 ms jitter)**: 57 ms for zcrudp, compared with 167 ms for ENet, 378 ms for ENet-zpl, and 69 ms for KCP-fast.
 - **High jitter (20 ms delay, 2% loss, 40 ms jitter)**: 189 ms for zcrudp, compared with 338 ms for ENet and 203 ms for ENet-zpl, with 22% less datagram wire traffic than ENet.
+- **KCP-fast under high jitter**: 159 ms p99, ahead of zcrudp's 189 ms in that scenario.
 - **High latency with loss (250 ms ping / 125 ms one-way, 2% loss, 10 ms jitter)**: 379 ms for zcrudp, compared with 803 ms for ENet (-53%) and 673 ms for ENet-zpl (-44%). In the clean 250 ms ping case, zcrudp, ENet, and ENet-zpl all deliver at the physical 125 ms one-way baseline.
 
 It costs 352 B of session state and delivers significantly lower tail latency under packet loss.

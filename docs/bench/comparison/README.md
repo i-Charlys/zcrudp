@@ -17,6 +17,9 @@ make test-compare
 
 # Replot the existing data without rebuilding or rerunning engines:
 uv run --with matplotlib python bench/run_comparison.py --plot-only
+
+# Rerun the separate initial-RTO sensitivity experiment and its graph:
+uv run --with matplotlib python bench/rto_sensitivity.py
 ```
 
 Alternatively, install Matplotlib in your existing Python environment and run
@@ -83,6 +86,13 @@ affects them. No CPU affinity or frequency pinning is applied.
 Bars are medians across five runs; whiskers show min/max. Latency graphs use a
 logarithmic scale. If any seed fails, that library/scenario has a failure label
 and no metric bar: survivor-only latency would give a misleading impression.
+The focused p99 and paced wire-cost charts use separate linear scales for each
+scenario to make nearby values legible. They draw zcrudp, ENet and ENet-zpl as
+bars and print KCP-fast's value in each panel. KCP-default remains in the full
+plots and CSV. Compare numbers across panels, not bar lengths: their scales
+differ. The 240 Hz clean cases have equal p99 values, and KCP-fast has the
+lowest p99 in the high-jitter case. The paced wire-cost chart also shows that
+zcrudp uses more UDP payload bytes than ENet in the clean 250 ms ping case.
 The CSV retains delivered counts, elapsed time and partial-run measurements for
 diagnosis (`complete=0`). Partial measurements must not be treated as successful
 workload completion. Protocol invariant violations abort the runner entirely.
@@ -111,6 +121,39 @@ retries. Key takeaways:
 - At 250 ms ping with 2% loss, zcrudp achieves p99 of 379 ms vs 803 ms for ENet (-53%) and 673 ms for ENet-zpl (-44%).
 - In clean conditions (no loss), all three engines track the physical link delay exactly (10 ms and 125 ms).
 
+The clean 250 ms ping case exposes a tuning limit of the published zcrudp
+profile. Its initial RTO is 100 ms, below the roughly 250 ms ACK round trip.
+The sender therefore retransmits before the first ACK arrives. For seed 1,
+zcrudp sends 9,600 datagrams and 76,800 UDP payload bytes for 2,400 delivered
+messages, versus 4,800 datagrams and 38,400 bytes in the clean 10 ms case.
+The four datagrams per message are consistent with original data, its ACK,
+an unnecessary retransmission and a duplicate ACK. Retransmitted slots are
+excluded from RTT estimation, so this scenario does not teach the adaptive
+estimator the longer path delay. Raising the configured initial RTO above the
+expected round trip would avoid this particular early timeout; that alternative
+configuration is not part of the recorded comparison.
+
+## Initial-RTO sensitivity at 250 ms ping
+
+The [separate sensitivity graph](rto-sensitivity.svg) and
+[20 raw zcrudp runs](rto-sensitivity.csv) compare the published 100 ms initial
+RTO with 300 ms on the same two 250 ms ping scenarios. Five seeds and the same
+2,400-message, 240 Hz workload are used in each cell. ENet's values in the
+graph come from the original [results CSV](results.csv).
+
+| Scenario | zcrudp initial RTO | Completed | Median p99 | Median UDP payload bytes / delivered message |
+| --- | ---: | ---: | ---: | ---: |
+| 0% loss | 100 ms | 5/5 | 125 ms | 32.0 B |
+| 0% loss | 300 ms | 5/5 | 125 ms | 16.0 B |
+| 2% loss, 0–10 ms jitter | 100 ms | 5/5 | 379 ms | 18.9 B |
+| 2% loss, 0–10 ms jitter | 300 ms | 5/5 | 1,429 ms | 9.2 B |
+
+At 300 ms, a clean ACK arrives before the first timeout, eliminating the
+unnecessary retransmission and allowing an RTT sample. With actual loss, the
+longer starting timer delays repair and increases tail latency. This is a
+configuration tradeoff, not evidence that either RTO wins on every path.
+The original 225-run dataset and its graphs retain the 100 ms configuration.
+
 These findings are evidence of a specific improvement, not a claim that
 zcrudp is universally faster. The run does not evaluate real network stacks,
 finite-bandwidth congestion, multi-channel traffic, authentication or larger messages.
@@ -120,8 +163,10 @@ finite-bandwidth congestion, multi-channel traffic, authentication or larger mes
 - [All 225 runs](results.csv)
 - [Versions, checksums, build command and machine](environment.json)
 - [Throughput](throughput.svg)
-- [p50 latency](latency-p50.svg), [p99 latency](latency-p99.svg) (p95 is in CSV)
-- [Datagram cost](wire-cost.svg)
+- [p50 latency](latency-p50.svg), [full p99 latency](latency-p99.svg),
+  [focused p99 latency](latency-p99-detail.svg) (p95 is in CSV)
+- [Saturation datagram cost](wire-cost.svg), [paced datagram cost](wire-cost-paced.svg)
+- [Initial-RTO sensitivity graph](rto-sensitivity.svg) and [raw runs](rto-sensitivity.csv)
 - [Host simulation cost](host-cost.svg)
 
 The source revisions and archive checksums are pinned in

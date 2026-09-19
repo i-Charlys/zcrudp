@@ -81,7 +81,7 @@ def plots(rows, output):
         "240hz-clean": "240 Hz: 10 ms\n0% loss",
         "240hz-loss1": "240 Hz: 10 ms\n1% loss",
         "240hz-loss5": "240 Hz: 10 ms\n5% loss",
-        "240hz-jitter": "240 Hz: 20 ms, 2% loss\n±40 ms jitter",
+        "240hz-jitter": "240 Hz: 20 ms, 2% loss\n0–40 ms jitter",
         "ping250-clean": "Ping 250 ms: 125 ms\n0% loss",
         "ping250-loss": "Ping 250 ms: 125 ms\n2% loss + jitter",
     }
@@ -133,6 +133,54 @@ def plots(rows, output):
     rows = normalized
     draw("wire-cost.svg", "Datagram traffic per delivered message — lower is better", "bytes_per_delivery", "UDP payload bytes / delivered message (both directions)", saturated)
     rows = original
+
+    def focused(filename, title, metric, ylabel, formatter):
+        # Each panel has its own linear scale so large values in another scenario
+        # cannot hide meaningful differences here. Keep the full five-engine plots.
+        selected_libraries = ["zcrudp", "ENet", "ENet-zpl"]
+        fig, axes = plt.subplots(2, 3, figsize=(14, 8.5), layout="constrained")
+        for ax, scenario in zip(axes.flat, paced):
+            values = []
+            for library in selected_libraries:
+                group = [row for row in rows if row["library"] == library and row["scenario"] == scenario]
+                if not group or any(row["complete"] != "1" for row in group):
+                    values.append(None)
+                else:
+                    values.append(statistics.median(metric(row) for row in group))
+            kcp_fast = [row for row in rows if row["library"] == "KCP-fast" and row["scenario"] == scenario]
+            fast_value = (statistics.median(metric(row) for row in kcp_fast)
+                          if kcp_fast and all(row["complete"] == "1" for row in kcp_fast) else None)
+            valid = [value for value in values if value is not None]
+            limit = max(valid, default=1) * 1.25
+            for index, (library, value) in enumerate(zip(selected_libraries, values)):
+                if value is None:
+                    ax.text(.02, index, "incomplete", va="center", transform=ax.get_yaxis_transform())
+                    continue
+                ax.barh(index, value, color=colors[LIBRARIES.index(library)], height=.68)
+                ax.text(value + limit*.015, index, formatter(value), va="center", fontsize=9)
+            ax.set_yticks(range(len(selected_libraries)), selected_libraries, fontsize=9)
+            ax.invert_yaxis()
+            ax.set_xlim(0, limit)
+            ax.set_title(labels[scenario].replace("\n", " · ") + "\nKCP-fast: " +
+                         (formatter(fast_value) if fast_value is not None else "incomplete"),
+                         loc="left", fontsize=10, weight="bold")
+            ax.grid(axis="x", alpha=.2)
+            ax.set_axisbelow(True)
+            ax.spines[["top", "right"]].set_visible(False)
+        fig.suptitle(title, fontsize=16, weight="bold")
+        fig.supxlabel(ylabel + " · median of five seeds · separate linear scale in each panel\n"
+                      "KCP-fast values shown as text; full plots and CSV include both KCP settings.", fontsize=9)
+        fig.savefig(output / filename, metadata={"Date": None})
+        fig.savefig(ROOT / "build" / filename.replace(".svg", ".png"), dpi=120)
+        plt.close(fig)
+
+    focused("latency-p99-detail.svg", "Tail latency by scenario — lower is better",
+            lambda row: float(row["p99_ms"]), "p99 delivery delay (simulated ms)",
+            lambda value: f"{value:.0f} ms")
+    focused("wire-cost-paced.svg", "UDP payload cost at 240 Hz — lower is better",
+            lambda row: float(row["wire_bytes"]) / int(row["delivered"]),
+            "UDP payload bytes per delivered message, both directions",
+            lambda value: f"{value:.1f} B")
 
 
 def main():
