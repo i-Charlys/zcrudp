@@ -17,13 +17,18 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y gcc make
 
     - name: Set up Zig
-      uses: mlugg/setup-zig@v1
+      uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
 
-    - name: Compile and Run Standard Tests
-      run: make clean && make test
+    - name: Compile and Run Tests with Zig
+      run: zig version && make clean && make CC='zig cc' test
+
+    - name: Compile and Run Tests with GCC
+      run: make clean && make CC=gcc test
 
     - name: Run Memory Sanitizers (ASan & UBSan)
-      run: make clean && make asan
+      run: make clean && make CC=gcc asan
 
     - name: Test POSIX demo and benchmark reports
       run: make test-tools

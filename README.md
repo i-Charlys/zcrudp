@@ -233,6 +233,11 @@ The project includes a `Makefile` for compilation, strict C11 compliance, and sa
 make test
 ```
 
+The Makefile uses the system C compiler (`cc`) by default; Zig is not required.
+You can choose another compiler explicitly, for example `make CC=clang test` or
+`make CC='zig cc' test` if Zig is installed. GitHub CI runs the test suite with
+both Zig and GCC.
+
 ### Run Memory & Undefined Behavior Sanitizers (ASan & UBSan)
 ```bash
 make asan
