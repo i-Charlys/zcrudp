@@ -3,16 +3,20 @@
 
 #include <stdint.h>
 
+
+//Compatibility as a C++ library
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+//Check BYTE ORDER (ENDIANNESS)
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     #define RUDP_IS_LITTLE_ENDIAN 1
 #else
     #define RUDP_IS_LITTLE_ENDIAN 0
 #endif
 
+//Check compilateur build in bit swap for ENDIANNESS change
 #if defined(__GNUC__) || defined(__clang__)
     #define rudp_bswap16(x) __builtin_bswap16(x)
     #define rudp_bswap32(x) __builtin_bswap32(x)

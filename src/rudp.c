@@ -2,8 +2,8 @@
 #include <string.h>
 
 /* Current structure sizes, wire formats and call relationships are documented
- * in ARCHITECTURE.md and relation.md. Keep those descriptions synchronized with
- * include/protocol_rudp.h when changing the layout. */
+ * in ARCHITECTURE.md. Keep it synchronized with include/protocol_rudp.h when
+ * changing the layout or state machine. */
 
 /*
  * ============================================================================
@@ -21,7 +21,7 @@
  * @brief Initializes a RUDP context.
  *
  * @param ctx The RUDP context to initialize.
- * @return 0 on success, -1 on failure.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG.
  */
 
 int rudp_init(rudp_context_s *ctx) {
@@ -49,7 +49,8 @@ int rudp_init(rudp_context_s *ctx) {
  * @param ctx The RUDP context.
  * @param packet The packet to send.
  * @param now Current timestamp in milliseconds.
- * @return RUDP_OK on success, or negative error code on failure.
+ * @return RUDP_OK on success, RUDP_ERR_BUFFER_FULL if the window is full,
+ * RUDP_ERR_DISCONNECTED if the context has failed, or RUDP_ERR_INVALID_ARG.
  */
 int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now) {
     if (!ctx) {
@@ -103,7 +104,8 @@ int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_
  *
  * @param ctx The RUDP context.
  * @param ack_num The sequence number of the next expected packet (N+1).
- * @return RUDP_OK on success, or negative error code on failure.
+ * @return RUDP_OK on success, RUDP_ERR_OUT_OF_WINDOW for a stale or future
+ * ACK, or RUDP_ERR_INVALID_ARG.
  */
 int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate_ack) {
     if (!ctx) {
@@ -175,7 +177,7 @@ int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num) {
  * @param timeout Retransmission timeout in milliseconds.
  * @param out_indices Array provided by the caller, to be filled with the indices of expired slots.
  * @param max_indices Maximum capacity of the out_indices array.
- * @return Number of packets marked for retransmission (>= 0), or negative error code.
+ * @return Result containing the number of collected indices and a RUDP status.
  */
 rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout, uint16_t *out_indices, int max_indices) {
     if (!ctx || !out_indices || max_indices <= 0) {
@@ -990,4 +992,3 @@ int rudp_unpack_ack(const uint8_t *in_buf, size_t in_len, uint16_t *out_ack) {
     *out_ack = header.ack;
     return RUDP_OK;
 }
-

@@ -10,6 +10,7 @@
 #error "RUDP_WINDOW_SIZE must be a power of 2 between 2 and 32768"
 #endif
 
+//Compatibility as a C++ library
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -63,13 +64,13 @@ extern "C" {
 
 /* Channel Capability Bitwise Flags */
 #define RUDP_CHANNEL_FLAG_UNRELIABLE                                           \
-  (0U) /**< Fire-and-forget unreliable channel */
+  (0U) /**< No reliable capability; zero is not a testable flag bit */
 #define RUDP_CHANNEL_FLAG_RELIABLE                                             \
-  (1U << 0) /**< Delivery guaranteed via sliding window retransmission */
+  (1U << 0) /**< Allows reliable sends through the sliding TX window */
 #define RUDP_CHANNEL_FLAG_ORDERED                                              \
-  (1U << 1) /**< Packets delivered strictly in sequential order */
+  (1U << 1) /**< Declarative hint; reliable session delivery is always ordered */
 #define RUDP_CHANNEL_FLAG_ENCRYPTED                                            \
-  (1U << 2) /**< Egress payload encapsulated in WireGuard/Noise AEAD */
+  (1U << 2) /**< Integration hint only; the library performs no encryption */
 
 #ifndef RUDP_DEFAULT_MTU
 #define RUDP_DEFAULT_MTU                                                       \
@@ -108,8 +109,7 @@ typedef struct {
 } rudp_frame_s;
 
 /**
- * @brief Represents a RUDP slot, containing a frame, a state, and a timestamp.
- * Length: 13 bytes (padded to 16 bytes).
+ * @brief Represents one local TX-window slot. ABI size: 16 bytes.
  */
 typedef struct {
   rudp_frame_s frame;
@@ -254,30 +254,77 @@ _Static_assert((RUDP_MAX_CHANNELS & (RUDP_MAX_CHANNELS - 1)) == 0,
  */
 int rudp_session_init(rudp_session_s *session);
 
-/** Drain contiguous buffered reliable records. ACK advances only on delivery.
+/**
+ * @brief Drains reliable records that have become contiguous in sequence.
+ *
+ * The cumulative receive position advances only for records copied to @p out.
+ * Call this after a previous receive filled the caller's output array.
+ *
+ * @param session Pointer to the session.
+ * @param out Destination array for delivered records.
+ * @param capacity Number of records available in @p out; must be nonzero.
+ * @return Number of records delivered, or RUDP_ERR_INVALID_ARG.
  */
 int rudp_session_poll(rudp_session_s *session, rudp_record_s *out,
                       size_t capacity);
-/** Set strict egress priority and an optional DSCP hint (socket owner applies
- * it). */
+
+/**
+ * @brief Sets egress priority and a DSCP integration hint for one channel.
+ *
+ * Lower priority values are scheduled first. Equal priorities use round-robin
+ * order. The library stores @p dscp but does not configure a socket.
+ *
+ * @param session Pointer to the session.
+ * @param channel Channel identifier (0 to RUDP_MAX_CHANNELS - 1).
+ * @param priority Egress priority; lower values run first.
+ * @param dscp DSCP value from 0 to 63 for the socket owner to apply.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG.
+ */
 int rudp_session_set_qos(rudp_session_s *session, uint8_t channel,
                          uint8_t priority, uint8_t dscp);
 
-/** Opt-in adaptive recovery. Bounds: 1 <= min <= initial <= max <= 60000 ms.
+/**
+ * @brief Enables adaptive recovery for one session channel.
+ *
+ * Bounds: 1 <= min <= initial <= max <= 60000 ms.
  * Configure only with empty TX/RX windows. Does not change the wire format.
- * Use process_datagram_at to collect Karn-safe RTT samples. The bundler uses
- * its timeout argument only in fixed mode; adaptive mode uses channel rto_ms.
- * Reset retains bounds and resets the estimate to the configured maximum. */
+ * Use rudp_session_process_datagram_at() to collect Karn-safe RTT samples. The
+ * bundler uses its timeout argument only in fixed mode; adaptive mode uses the
+ * channel RTO. Reset retains the bounds and resets that RTO to the maximum.
+ *
+ * @param session Pointer to the session.
+ * @param channel Channel identifier (0 to RUDP_MAX_CHANNELS - 1).
+ * @param initial_ms Initial retransmission timeout in milliseconds.
+ * @param min_ms Minimum adaptive timeout in milliseconds.
+ * @param max_ms Maximum adaptive timeout in milliseconds.
+ * @return RUDP_OK on success, RUDP_ERR_BUFFER_FULL if the channel has queued
+ * data, or RUDP_ERR_INVALID_ARG.
+ */
 int rudp_session_config_recovery(rudp_session_s *session, uint8_t channel,
                                  uint32_t initial_ms, uint32_t min_ms,
                                  uint32_t max_ms);
+
+/**
+ * @brief Processes a session datagram and supplies receive time for RTT input.
+ *
+ * Apart from adaptive RTT sampling, delivery and validation match
+ * rudp_session_process_datagram().
+ *
+ * @param session Pointer to the session.
+ * @param in Received datagram bytes.
+ * @param length Exact datagram length.
+ * @param out Destination array for delivered records.
+ * @param capacity Number of records available in @p out.
+ * @param now Receive timestamp in milliseconds using the sender's local clock.
+ * @return Number of records delivered, or RUDP_ERR_INVALID_ARG.
+ */
 int rudp_session_process_datagram_at(rudp_session_s *session, const uint8_t *in,
                                      size_t length, rudp_record_s *out,
                                      size_t capacity, uint32_t now);
 
 /**
- * @brief Resets a single channel state machine (sequence numbers, flags, and
- * sliding window).
+ * @brief Clears one channel's sequence, window and recovery state while
+ * retaining its capability and QoS configuration.
  *
  * @param session Pointer to the session struct.
  * @param channel_id Channel identifier (0 to RUDP_MAX_CHANNELS - 1).
@@ -298,7 +345,10 @@ int rudp_session_reset(rudp_session_s *session);
  *
  * @param session Pointer to the session struct.
  * @param channel_id Channel identifier (0 to RUDP_MAX_CHANNELS - 1).
- * @param flags Bitwise combination of RUDP_CHANNEL_FLAG_*.
+ * @param flags Bitwise combination of RUDP_CHANNEL_FLAG_*. RELIABLE controls
+ * whether reliable sends are accepted. ORDERED and ENCRYPTED are currently
+ * metadata only; reliable session receive is always ordered and encryption is
+ * the responsibility of the integration.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
 int rudp_session_config_channel(rudp_session_s *session, uint8_t channel_id,
@@ -312,7 +362,8 @@ int rudp_session_config_channel(rudp_session_s *session, uint8_t channel_id,
  * @param channel_id Channel identifier.
  * @param payload 4-byte game payload.
  * @param now Current timestamp in milliseconds.
- * @return RUDP_OK on success, or negative error code on failure.
+ * @return RUDP_OK on success, RUDP_ERR_BUFFER_FULL if the TX window is full,
+ * RUDP_ERR_DISCONNECTED if the channel has failed, or RUDP_ERR_INVALID_ARG.
  */
 int rudp_session_send_reliable(rudp_session_s *session, uint8_t channel_id,
                                tfv_packet_u payload, uint32_t now);
@@ -329,7 +380,8 @@ int rudp_session_send_reliable(rudp_session_s *session, uint8_t channel_id,
  * @param max_len Maximum writable buffer capacity.
  * @param now Current timestamp in milliseconds.
  * @param timeout Retransmission timeout threshold in milliseconds.
- * @return Total number of bytes written (>= 4), or negative error code.
+ * @return Total bytes written (at least 4), RUDP_ERR_BUFFER_FULL if even the
+ * header does not fit, or RUDP_ERR_INVALID_ARG.
  */
 int rudp_session_build_datagram(rudp_session_s *session,
                                 uint8_t primary_ack_channel, uint8_t *out_buf,
@@ -454,7 +506,7 @@ int rudp_session_send_unreliable(rudp_session_s *session, uint8_t channel_id,
  * @param out_delivered Destination array to store delivered records for the
  * game.
  * @param max_delivered Capacity of out_delivered.
- * @return Number of game records delivered (>= 0), or negative error code.
+ * @return Number of game records delivered, or RUDP_ERR_INVALID_ARG.
  */
 int rudp_session_process_datagram(rudp_session_s *session,
                                   const uint8_t *in_buf, size_t in_len,
@@ -465,7 +517,7 @@ int rudp_session_process_datagram(rudp_session_s *session,
  * @brief Initializes a RUDP context.
  *
  * @param ctx Pointer to the RUDP context to initialize.
- * @return 0 on success, -1 on error.
+ * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG.
  */
 int rudp_init(rudp_context_s *ctx);
 
@@ -484,7 +536,6 @@ int rudp_reset(rudp_context_s *ctx);
  * @param ctx Pointer to the RUDP context.
  * @param packet TFV packet payload to send.
  * @param now Current timestamp in milliseconds.
- * @return 0 on success, -1 if the transmission buffer is full.
  * @return RUDP_OK on success, RUDP_ERR_BUFFER_FULL if buffer is full,
  * RUDP_ERR_DISCONNECTED if disconnected, or RUDP_ERR_INVALID_ARG.
  */
@@ -497,8 +548,6 @@ int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now);
  * @param ctx Pointer to the RUDP context.
  * @param frame Pointer to the received RUDP frame.
  * @param out_packet Pointer to store the extracted TFV packet.
- * @return 1 on new in-order packet delivered, 0 if duplicate/out-of-order, -1
- * on error (e.g., NULL pointers).
  * @return 1 on new packet delivered, 0 if duplicate/out-of-order, or negative
  * RUDP_ERR_* code on error.
  */
@@ -515,7 +564,6 @@ int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame,
  * @param count_duplicate_ack true if this ACK is a deliberate standalone ACK or
  * explicit ACK record, false if this is a passive piggybacked ACK on unrelated
  * data.
- * @return 0 on success, -1 if the ACK is out-of-window or corrupted.
  * @return RUDP_OK on success, RUDP_ERR_OUT_OF_WINDOW if stale/ahead, or
  * RUDP_ERR_INVALID_ARG.
  */
@@ -527,7 +575,6 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num,
  *
  * @param ctx Pointer to the RUDP context.
  * @param ack_num Next expected sequence number from peer (N+1).
- * @return 0 on success, -1 if the ACK is out-of-window or corrupted.
  * @return RUDP_OK on success, RUDP_ERR_OUT_OF_WINDOW if stale/ahead, or
  * RUDP_ERR_INVALID_ARG.
  */
@@ -663,8 +710,8 @@ int rudp_get_unacked_slots(const rudp_context_s *ctx, uint16_t *out_indices,
  * @param out_indices Array provided by the caller to be filled with expired
  * slot indices.
  * @param max_indices The maximum number of indices the array can hold.
- * @return The number of packets marked for retransmission, or negative error
- * code.
+ * @return A result whose count is the number of collected slot indices and
+ * whose status is RUDP_OK, RUDP_ERR_INVALID_ARG, or RUDP_ERR_DISCONNECTED.
  */
 rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now,
                              uint32_t timeout, uint16_t *out_indices,
