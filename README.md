@@ -98,6 +98,8 @@ shows the tradeoff rather than replacing it.
 These are **virtual-link transport measurements**: common delay/loss/jitter and
 1 ms service cadence, not physical-NIC benchmarks. The no-loss saturation cases
 show zcrudp matching ENet and ENet-zpl goodput at the common 63-message admission limit.
+This is a matched in-flight-capacity result, not a measurement of each engine's
+maximum throughput with its native/default window capacity.
 In high-density saturation bursts, zcrudp aggregates records tightly to emit fewer
 UDP-payload bytes (8.1 B vs 18.2 B per message). In the clean 250 ms ping case,
 the benchmark's 100 ms initial retransmission timeout expires before an ACK can

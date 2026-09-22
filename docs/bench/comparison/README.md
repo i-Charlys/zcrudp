@@ -100,8 +100,10 @@ workload completion. Protocol invariant violations abort the runner entirely.
 ## Results with opt-in adaptive recovery
 
 The no-loss saturation cases show equal delivered goodput for zcrudp, ENet and ENet-zpl
-under the shared admission limit. zcrudp emits fewer UDP-payload bytes for this
-small-message workload. KCP results change substantially with its update profile.
+under the shared admission limit. This equality is partly imposed by the 63-message
+cap and must not be presented as equal native/default maximum throughput. zcrudp emits
+fewer UDP-payload bytes for this small-message workload. KCP results change substantially
+with its update profile.
 
 223 of 225 runs complete (KCP-default timed out on 2 of 5 seeds in `ping250-loss` due to conservative window stalls).
 
