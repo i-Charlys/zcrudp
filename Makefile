@@ -10,7 +10,7 @@ BINS = $(BUILD_DIR)/test_rudp $(BUILD_DIR)/test_tfv $(BUILD_DIR)/test_window_min
 
 .PHONY: all clean test test_rudp test_tfv test_window asan demo bench bench-report test-tools
 
-HEADERS = include/protocol_rudp.h include/protocol_tfv.h
+HEADERS = include/protocol_rudp.h include/protocol_tfv.h include/rudp_io.h
 BENCH_ITERATIONS ?= 1000000
 COMPARE_PYTHON ?= python3
 VISUAL_PYTHON ?= python3

@@ -312,8 +312,7 @@ int rudp_session_init(rudp_session_s *session) {
 
     session->active_channels = 0;
     session->rr_cursor = 0;
-    session->reserved[0] = 0;
-    session->reserved[1] = 0;
+    session->session_seed = 0;
     for (uint8_t i = 0; i < RUDP_MAX_CHANNELS; i++) {
         session->channels[i].channel_id = i;
         session->channels[i].flags = RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED;
@@ -773,8 +772,7 @@ int rudp_session_reset(rudp_session_s *session) {
     }
     session->active_channels = 0;
     session->rr_cursor = 0;
-    session->reserved[0] = 0;
-    session->reserved[1] = 0;
+    session->session_seed = 0;
 
     return RUDP_OK;
 }
@@ -991,4 +989,41 @@ int rudp_unpack_ack(const uint8_t *in_buf, size_t in_len, uint16_t *out_ack) {
 
     *out_ack = header.ack;
     return RUDP_OK;
+}
+
+int rudp_iovec_add(rudp_iovec_collection_s *col, const void *base, uint32_t len) {
+    if (!col || !base) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (col->count >= RUDP_IOVEC_MAX) {
+        return RUDP_ERR_BUFFER_FULL;
+    }
+    if ((uint32_t)col->total_len + len > 65535U) {
+        return RUDP_ERR_BUFFER_FULL;
+    }
+    col->iovecs[col->count].base = base;
+    col->iovecs[col->count].len = len;
+    col->count++;
+    col->total_len = (uint16_t)(col->total_len + len);
+    return RUDP_OK;
+}
+
+int rudp_iovec_flatten(const rudp_iovec_collection_s *col, uint8_t *out_buf, size_t max_len) {
+    if (!col || !out_buf) {
+        return RUDP_ERR_INVALID_ARG;
+    }
+    if (max_len < col->total_len) {
+        return RUDP_ERR_BUFFER_FULL;
+    }
+    size_t offset = 0;
+    for (uint8_t i = 0; i < col->count; i++) {
+        if (col->iovecs[i].len > 0) {
+            if (!col->iovecs[i].base) {
+                return RUDP_ERR_INVALID_ARG;
+            }
+            memcpy(out_buf + offset, col->iovecs[i].base, col->iovecs[i].len);
+            offset += col->iovecs[i].len;
+        }
+    }
+    return (int)offset;
 }

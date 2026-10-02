@@ -141,47 +141,47 @@ void test_wire_serialization(void) {
 
     uint8_t wire_buffer[RUDP_WIRE_FRAME_SIZE];
 
-    // 1. Test de l'empaquetage (Pack)
+    // 1. Pack test (rudp_pack_frame)
     int written = rudp_pack_frame(&original_frame, wire_buffer, sizeof(wire_buffer));
     assert(written == RUDP_WIRE_FRAME_SIZE);
 
-    // 2. Vérification binaire exacte sur le câble (Big-Endian)
+    // 2. Exact binary wire verification (Big-Endian)
     assert(wire_buffer[0] == 0x12 && wire_buffer[1] == 0x34); // seq_num
     assert(wire_buffer[2] == 0x56 && wire_buffer[3] == 0x78); // ack
     assert(wire_buffer[4] == 42);                             // type
     assert(wire_buffer[5] == 0x0F);                           // flags
     assert(wire_buffer[6] == 0xAB && wire_buffer[7] == 0xCD); // value
 
-    // 3. Test du dépaquetage (Unpack)
+    // 3. Unpack test (rudp_unpack_frame)
     rudp_frame_s restored_frame;
     assert(rudp_unpack_frame(wire_buffer, sizeof(wire_buffer), &restored_frame) == 0);
 
-    // Vérification de l'intégrité complète
+    // Complete integrity verification
     assert(restored_frame.header.seq_num == original_frame.header.seq_num);
     assert(restored_frame.header.ack     == original_frame.header.ack);
     assert(restored_frame.packet.type    == original_frame.packet.type);
     assert(restored_frame.packet.flags   == original_frame.packet.flags);
     assert(restored_frame.packet.value   == original_frame.packet.value);
 
-    // 4. Tests de l'ACK Standalone (Tier 1 : 4 octets)
+    // 4. Standalone ACK tests (Tier 1: 4 bytes)
     uint8_t ack_wire_buffer[RUDP_WIRE_HEADER_SIZE];
     int ack_written = rudp_pack_ack(0x5678, ack_wire_buffer, sizeof(ack_wire_buffer));
     assert(ack_written == RUDP_WIRE_HEADER_SIZE);
     assert(ack_wire_buffer[0] == 0x00 && ack_wire_buffer[1] == 0x00); // seq_num is 0
     assert(ack_wire_buffer[2] == 0x56 && ack_wire_buffer[3] == 0x78); // ack is Big-Endian 0x5678
 
-    // 5. Test du déballage de header (rudp_unpack_header)
+    // 5. Header unpack test (rudp_unpack_header)
     rudp_header_s standalone_header;
     assert(rudp_unpack_header(ack_wire_buffer, sizeof(ack_wire_buffer), &standalone_header) == RUDP_OK);
     assert(standalone_header.seq_num == 0);
     assert(standalone_header.ack == 0x5678);
 
-    // 6. Test du déballage direct d'ACK (rudp_unpack_ack)
+    // 6. Direct ACK unpack test (rudp_unpack_ack)
     uint16_t extracted_ack = 0;
     assert(rudp_unpack_ack(ack_wire_buffer, sizeof(ack_wire_buffer), &extracted_ack) == RUDP_OK);
     assert(extracted_ack == 0x5678);
 
-    // 7. Tests atomiques de payload (rudp_pack_payload, rudp_unpack_payload)
+    // 7. Atomic payload tests (rudp_pack_payload, rudp_unpack_payload)
     uint8_t payload_wire[sizeof(tfv_packet_u)];
     tfv_packet_u orig_p;
     orig_p.type = 99;
@@ -195,7 +195,7 @@ void test_wire_serialization(void) {
     assert(rudp_unpack_payload(payload_wire, sizeof(payload_wire), &restored_p) == RUDP_OK);
     assert(restored_p.type == 99 && restored_p.flags == 0xAA && restored_p.value == 0x1234);
 
-    // 8. Tests de sécurité (Pointeurs NULL et tailles invalides)
+    // 8. Safety tests (NULL pointers and invalid sizes)
     assert(rudp_pack_header(NULL, wire_buffer, sizeof(wire_buffer)) == RUDP_ERR_INVALID_ARG);
     assert(rudp_pack_header(&original_frame.header, NULL, sizeof(wire_buffer)) == RUDP_ERR_INVALID_ARG);
     assert(rudp_pack_header(&original_frame.header, wire_buffer, 3) == RUDP_ERR_INVALID_ARG);
@@ -227,7 +227,7 @@ void test_wire_serialization(void) {
     assert(rudp_unpack_frame(wire_buffer, sizeof(wire_buffer), NULL) == RUDP_ERR_INVALID_ARG);
     assert(rudp_unpack_frame(wire_buffer, 7, &restored_frame) == RUDP_ERR_INVALID_ARG); // Too small
 
-    // 9. Test de l'accesseur de slot (rudp_get_slot_frame)
+    // 9. Slot accessor test (rudp_get_slot_frame)
     rudp_context_s dummy_ctx;
     rudp_init(&dummy_ctx);
     dummy_ctx.tx_buffer[0].frame = original_frame;
