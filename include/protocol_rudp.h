@@ -1,6 +1,11 @@
 #ifndef PROTOCOL_RUDP_H
 #define PROTOCOL_RUDP_H
 
+#include "protocol_tfv.h"
+#include "rudp_io.h"
+#include <stdbool.h>
+#include <stddef.h>
+
 #ifndef RUDP_WINDOW_SIZE
 #define RUDP_WINDOW_SIZE 64
 #endif
@@ -86,10 +91,6 @@ extern "C" {
 #define RUDP_ERR_OUT_OF_WINDOW                                                 \
   -4 /**< Sequence or ACK is outside active window boundaries */
 
-#include "protocol_tfv.h"
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
 
 /**
  * @brief Represents the header of a RUDP frame. Length: 4 bytes.
@@ -211,7 +212,7 @@ typedef struct {
   rudp_channel_s channels[RUDP_MAX_CHANNELS]; /**< Multi-channel array */
   uint8_t active_channels; /**< Number of configured channels */
   uint8_t rr_cursor;   /**< Round-robin egress cursor for channel fairness */
-  uint8_t reserved[2]; /**< Explicit padding to 32-bit boundary */
+  uint16_t session_seed; /**< Seed for path entropy calculation */
 } rudp_session_s;
 
 /* Compile-time verification of ABI struct sizes (C11 Static Asserts) */

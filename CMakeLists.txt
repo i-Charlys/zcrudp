@@ -113,7 +113,7 @@ install(TARGETS ${zcrudp_install_targets} EXPORT zcrudpTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(FILES include/protocol_rudp.h include/protocol_tfv.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES include/protocol_rudp.h include/protocol_tfv.h include/rudp_io.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(EXPORT zcrudpTargets NAMESPACE zcrudp:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/zcrudp)
 configure_package_config_file(cmake/zcrudpConfig.cmake.in
   ${CMAKE_CURRENT_BINARY_DIR}/zcrudpConfig.cmake

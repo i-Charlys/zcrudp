@@ -124,17 +124,17 @@ implementation notes; tooling can progress independently of protocol changes.
 ## Phase 5: Recovery, security and platform support
 *Depends on Phase 4.*
 
-- [ ] **Couche d'I/O unifiée Scatter-Gather (Zero-Copy Universal I/O)**:
-  - Une seule API d'entrée-sortie vectorielle (`rudp_iovec_s`) 100% portable et agnostique de l'OS.
-  - Élimine la scission en deux stacks ("Target A vs Target B") : le cœur zcrudp reste pur, unique et sans `malloc`.
-  - Sur PC (Linux, macOS, BSD, Windows) : délégation de l'envoi vectoriel à `sendmsg` (`struct iovec`) ou `WSASendTo` (`WSABUF`).
-  - Sur microcontrôleurs (STM32, ESP32) et bare-metal : délégation directe aux pbufs de lwIP (`PBUF_REF`) ou aux anneaux de descripteurs DMA matériels de la puce Ethernet.
-  - **Support d'entropie multi-chemins pour diversité d'interfaces** : calcul en temps constant d'un hash d'entropie de flux (`path_entropy`) exposé dans les métadonnées d'I/O, permettant à la couche socket hôte de faire tourner dynamiquement le port source UDP et de répartir les paquets sur plusieurs interfaces physiques (Wi-Fi, cellulaire, liaisons radio multiples) pour assurer la redondance et éviter le blocage sur un lien unique.
-- [ ] **Couche cryptographique modulaire (Noise / WireGuard - Wrapper externe)**:
-  - Intégration strictement modulaire et découplée sous forme de surcouche (wrapper externe).
-  - Le cœur de zcrudp reste 100% autonome et sans dépendance externe obligatoire (pas de dépendance forcée à OpenSSL ou Libsodium).
-  - Fournir des adaptateurs optionnels : Noise AEAD (ChaCha20-Poly1305) léger pour l'embarqué ou encapsulation tunnel WireGuard.
-  - **Audit #1, garantie complète**: Authentifier le datagramme UDP complet avant toute mutation de l'état RUDP, y compris ACK, contrôles, données et réparations FEC. Une enveloppe doit lier un identifiant de session/nonce, maintenir une fenêtre anti-rejeu bornée et rejeter `ACK`, `HELLO`, `RESET` ou données dont le tag est invalide. Conserver un état à taille fixe fourni par l'appelant et aucune allocation dans le cœur. C'est la correction complète de l'injection d'ACK; les séquences initiales aléatoires ne fournissent qu'un durcissement contre l'injection aveugle.
+- [ ] **Unified Scatter-Gather I/O Layer (Zero-Copy Universal I/O)**:
+  - A single, 100% portable and OS-agnostic vectored I/O API (`rudp_iovec_s`).
+  - Eliminates the split into two stacks ("Target A vs Target B"): the core zcrudp remains pure, unified, and `malloc`-free.
+  - On PC (Linux, macOS, BSD, Windows): delegate vectored sending to `sendmsg` (`struct iovec`) or `WSASendTo` (`WSABUF`).
+  - On microcontrollers (STM32, ESP32) and bare-metal: direct delegation to lwIP pbufs (`PBUF_REF`) or hardware DMA descriptor rings of the Ethernet MAC/PHY.
+  - **Multi-path entropy support for interface diversity**: Constant-time computation of a flow entropy hash (`path_entropy`) exposed in I/O metadata, enabling the host socket layer to dynamically rotate the UDP source port and distribute packets across multiple physical interfaces (Wi-Fi, cellular, multiple radio links) to ensure redundancy and prevent blackholing on a single path.
+- [ ] **Modular Cryptographic Layer (Noise / WireGuard - External Wrapper)**:
+  - Strictly modular, decoupled integration as an external wrapper.
+  - The core of zcrudp remains 100% autonomous with no mandatory external dependencies (no forced dependency on OpenSSL or Libsodium).
+  - Provide optional adapters: lightweight Noise AEAD (ChaCha20-Poly1305) for embedded systems or WireGuard tunnel encapsulation.
+  - **Audit #1, comprehensive guarantee**: Authenticate the entire UDP datagram before any mutation of RUDP state, including ACKs, controls, data, and FEC repairs. An envelope must bind a session ID / nonce, maintain a bounded anti-replay window, and reject `ACK`, `HELLO`, `RESET`, or data whose tag is invalid. Preserve caller-supplied fixed-size state and zero allocations in the core. This is the complete fix for ACK injection; randomized initial sequence numbers provide hardening only against blind injection.
 - [x] **Adaptive RTT & Dynamic Timeout**: Opt-in session recovery, timestamped receive API, fixed-point SRTT/RTTVAR, conservative Karn sampling at most once per RTT, configurable base-RTO bounds, and timeout-only backoff separate from fast repairs. Unchanged wire format and TX slots. See `docs/ADAPTIVE_RECOVERY.md`; `make test-recovery-stress` covers 200 paced-loss runs.
 - [ ] **Breaking core wire/recovery redesign (single format, no legacy-wire compatibility)**:
   Replace the current session-only timing policy with one bounded recovery engine used directly by `rudp_context_s` and wrapped by `rudp_session_s`. This is an intentional wire break: both endpoints must use the new format; do not add downgrade negotiation or preserve decoding of the previous format.
