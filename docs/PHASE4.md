@@ -1,7 +1,8 @@
 # Phase 4: bounded receive and optional profiles
 
 The core remains C11, caller-owned, and free of heap allocation. Compile
-`src/rudp.c` as before; add `src/profiles.c` and `protocol_profiles.h` only when
+the transport modules listed in [MODULES.md](MODULES.md); link optional profile
+targets and include `protocol_profiles.h` only when
 using multipart or scalar profiles. No background thread or implicit socket I/O
 is introduced. These APIs require external serialization per session/context.
 

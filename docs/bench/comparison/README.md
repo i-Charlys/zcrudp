@@ -27,6 +27,9 @@ Alternatively, install Matplotlib in your existing Python environment and run
 of the zcrudp core. Archives stay under the ignored `build/compare-deps/` folder;
 SHA-256 checks are enforced before extracting. Original licenses are retained there.
 
+Generated reports and optional plots go to `build/bench/comparison/`.
+The CSV and environment files preserved here are the published dataset.
+
 ## Controlled workload
 
 - 2,400 messages per run; one established connection, one reliable ordered channel.
@@ -59,11 +62,11 @@ KCP-fast is included because comparing only to KCP's conservative defaults would
 not represent its low-latency configuration. These profiles are not a search for
 the optimal configuration of each engine. No congestion-control equivalence is claimed.
 
-## Metrics and graph interpretation
+## Metrics
 
 **Goodput:** delivered messages divided by simulated time from first application
 submission through last delivery. The saturation cases always offer enough work
-to fill the common admission limit. These graphs show protocol behavior under
+to fill the common admission limit. These measurements show protocol behavior under
 the given RTT/window/timer constraints, not maximum CPU throughput or NIC capacity.
 Multiply messages/s by 32 for application bits/s in this four-byte workload.
 
@@ -83,15 +86,9 @@ Initialization, handshake, final sorting and destruction are excluded. These
 host-specific values are not isolated library CPU timings; process scheduling
 affects them. No CPU affinity or frequency pinning is applied.
 
-Bars are medians across five runs; whiskers show min/max. Latency graphs use a
-logarithmic scale. If any seed fails, that library/scenario has a failure label
-and no metric bar: survivor-only latency would give a misleading impression.
-The focused p99 and paced wire-cost charts use separate linear scales for each
-scenario to make nearby values legible. They draw zcrudp, ENet and ENet-zpl as
-bars and print KCP-fast's value in each panel. KCP-default remains in the full
-plots and CSV. Compare numbers across panels, not bar lengths: their scales
-differ. The 240 Hz clean cases have equal p99 values, and KCP-fast has the
-lowest p99 in the high-jitter case. The paced wire-cost chart also shows that
+Summary values are medians across five runs. Failed seeds remain in the data;
+survivor-only latency would give a misleading impression. The 240 Hz clean cases
+have equal p99 values, and KCP-fast has the lowest p99 in the high-jitter case.
 zcrudp uses more UDP payload bytes than ENet in the clean 250 ms ping case.
 The CSV retains delivered counts, elapsed time and partial-run measurements for
 diagnosis (`complete=0`). Partial measurements must not be treated as successful
@@ -137,11 +134,9 @@ configuration is not part of the recorded comparison.
 
 ## Initial-RTO sensitivity at 250 ms ping
 
-The [separate sensitivity graph](rto-sensitivity.svg) and
-[20 raw zcrudp runs](rto-sensitivity.csv) compare the published 100 ms initial
+The [20 raw zcrudp runs](rto-sensitivity.csv) compare the published 100 ms initial
 RTO with 300 ms on the same two 250 ms ping scenarios. Five seeds and the same
-2,400-message, 240 Hz workload are used in each cell. ENet's values in the
-graph come from the original [results CSV](results.csv).
+2,400-message, 240 Hz workload are used in each cell. ENet's reference values come from the original [results CSV](results.csv).
 
 | Scenario | zcrudp initial RTO | Completed | Median p99 | Median UDP payload bytes / delivered message |
 | --- | ---: | ---: | ---: | ---: |
@@ -154,7 +149,7 @@ At 300 ms, a clean ACK arrives before the first timeout, eliminating the
 unnecessary retransmission and allowing an RTT sample. With actual loss, the
 longer starting timer delays repair and increases tail latency. This is a
 configuration tradeoff, not evidence that either RTO wins on every path.
-The original 225-run dataset and its graphs retain the 100 ms configuration.
+The original 225-run dataset retains the 100 ms configuration.
 
 These findings are evidence of a specific improvement, not a claim that
 zcrudp is universally faster. The run does not evaluate real network stacks,
@@ -164,12 +159,7 @@ finite-bandwidth congestion, multi-channel traffic, authentication or larger mes
 
 - [All 225 runs](results.csv)
 - [Versions, checksums, build command and machine](environment.json)
-- [Throughput](throughput.svg)
-- [p50 latency](latency-p50.svg), [full p99 latency](latency-p99.svg),
-  [focused p99 latency](latency-p99-detail.svg) (p95 is in CSV)
-- [Saturation datagram cost](wire-cost.svg), [paced datagram cost](wire-cost-paced.svg)
-- [Initial-RTO sensitivity graph](rto-sensitivity.svg) and [raw runs](rto-sensitivity.csv)
-- [Host simulation cost](host-cost.svg)
+- [Initial-RTO sensitivity runs](rto-sensitivity.csv)
 
 The source revisions and archive checksums are pinned in
 [`run_comparison.py`](../../../bench/run_comparison.py). Implementation references:

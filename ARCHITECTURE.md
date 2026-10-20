@@ -1,7 +1,9 @@
 # zcrudp architecture
 
 This document describes the code currently implemented in
-`include/protocol_rudp.h` and `src/rudp.c`. Future wire changes are tracked in
+the public module headers and the implementation modules in `src/`.
+`protocol_rudp.h` remains a compatibility facade. See [MODULES.md](docs/MODULES.md)
+for link dependencies, source lists and the optional caller-owned RX storage ABI. Future wire changes are tracked in
 `TODO.md` and are not described here as existing behavior.
 
 The application owns the UDP socket, the clock, output buffers and object
@@ -11,17 +13,9 @@ lifetime. The core uses fixed-size storage and performs no heap allocation.
 
 zcrudp currently exposes two related interfaces:
 
-```text
-Application / optional profiles
-              |
-      rudp_session_s                 multichannel datagrams
-              |
-      rudp_context_s                 one reliable sliding window
-              |
-        byte codecs                  explicit network-byte-order packing
-              |
-       caller-owned UDP I/O
-```
+Applications and optional profiles call the multichannel session API or the
+single-context reliability API. Both use explicit byte codecs; the caller provides
+UDP I/O.
 
 `rudp_context_s` is the small single-window ARQ engine. `rudp_session_s` owns
 one context per channel and adds multiplexing, unreliable records, reliable RX
@@ -33,19 +27,19 @@ UDP payload length alone is not a format negotiation mechanism.
 
 The single-context API carries one TFV packet at a time:
 
-```text
-Standalone ACK (4 B): seq_num:2 (unused) | ack:2
-Frame          (8 B): seq_num:2 | ack:2 | TFV payload:4
-```
+| Standalone item | Wire fields in order | Size |
+| --- | --- | --- |
+| ACK | Unused sequence (2 B), ACK (2 B) | 4 B |
+| Frame | Sequence (2 B), ACK (2 B), TFV payload (4 B) | 8 B |
 
 The session API can bundle records from several channels:
 
-```text
-Datagram (4 + 8*N B)
-  header (4 B): ack:2 | ack_channel:1 | count:1
-  record (8 B), repeated count times:
-    channel_id:1 | flags:1 | seq_num:2 | TFV payload:4
-```
+| Session item | Wire fields in order | Size |
+| --- | --- | --- |
+| Header | ACK (2 B), ACK channel (1 B), record count (1 B) | 4 B |
+| Record | Channel (1 B), flags (1 B), sequence (2 B), TFV payload (4 B) | 8 B |
+
+A datagram contains one header and `count` records: `4 + 8 * count` bytes.
 
 `rudp_datagram_header_s` describes the datagram once. `rudp_record_s` describes
 one data item or explicit ACK inside that datagram. It is therefore different
@@ -60,21 +54,18 @@ structure memory, including `tfv_packet_u.raw`, is not a portable wire format.
 
 ## State and memory
 
-```text
-rudp_session_s
-  channels[RUDP_MAX_CHANNELS] : rudp_channel_s
-    flags, channel_id, priority, dscp
-    unreliable TX/RX sequence state and pending ACK state
-    ctx : rudp_context_s
-      tx_buffer[RUDP_WINDOW_SIZE] : rudp_slot_s
-        frame : rudp_frame_s = rudp_header_s + tfv_packet_u
-        timestamp, state, retries, fast_retransmit, tx_count
-      head, tail, TX/RX sequences, duplicate ACK and liveness state
-    rx_buffer[RUDP_WINDOW_SIZE] : tfv_packet_u
-    rx_present[] : bitmap of retained reliable RX records
-    timeout_backoffs[] and adaptive RTT/RTO state
-  active_channels, rr_cursor
-```
+A `rudp_session_s` contains `channels[RUDP_MAX_CHANNELS]`, `active_channels`
+and `rr_cursor`. Each `rudp_channel_s` holds channel flags, ID, priority, DSCP,
+unreliable sequence state, pending ACK state and a `rudp_context_s`.
+
+The context owns `tx_buffer[RUDP_WINDOW_SIZE]` of `rudp_slot_s`, ring indices,
+sequence numbers, duplicate ACK and liveness state. Each slot contains a
+`rudp_frame_s` (header and TFV payload), timestamp, state, retries,
+`fast_retransmit` and `tx_count`.
+
+Channels also hold reliable RX storage and its presence bitmap, timeout backoffs
+and adaptive RTT/RTO state. The default layout embeds RX arrays; external RX mode
+attaches caller-owned storage through pointers.
 
 With the default 64-slot window and four channels on the checked ABI:
 
@@ -86,10 +77,10 @@ With the default 64-slot window and four channels on the checked ABI:
 | `rudp_session_s` | `4 * 1,404 + 4` | 5,620 B |
 
 The exact formulas and default-size `_Static_assert` checks live beside the
-structures in `protocol_rudp.h`. Changing `RUDP_WINDOW_SIZE`,
+structures in `rudp_types.h`. Changing `RUDP_WINDOW_SIZE`,
 `RUDP_MAX_CHANNELS`, compiler ABI or packing options can change public object
 sizes. The library and its caller must use matching compile settings. Every
-session channel currently reserves its reliable TX and RX arrays, including a
+default-layout session channel reserves its reliable TX and RX arrays, including a
 channel used only for unreliable traffic.
 
 ### Why the TX ring keeps one slot free
@@ -113,25 +104,18 @@ drops out-of-order frames.
 
 ## Send, receive and recovery paths
 
-```text
-Single context
-  rudp_init
-    -> rudp_send -> rudp_get_slot_frame -> rudp_pack_frame -> caller UDP send
-    -> caller UDP receive -> rudp_unpack_frame -> rudp_recv -> rudp_recv_ack_ex
-    -> rudp_tick -> expired slot indices -> caller retransmission
+For a single context, initialize with `rudp_init()`, enqueue with `rudp_send()`,
+retrieve frames with `rudp_get_slot_frame()`, and serialize with `rudp_pack_frame()`.
+Decode received frames with `rudp_unpack_frame()` before `rudp_recv()`, which
+processes passive ACKs through `rudp_recv_ack_ex()`. `rudp_tick()` returns expired
+slot indices for caller-managed retransmission.
 
-Multichannel session
-  rudp_session_init -> rudp_session_config_channel
-    -> rudp_session_send_reliable -> per-channel rudp_send
-    -> rudp_session_send_unreliable -> one packed 12-byte datagram
-    -> rudp_session_build_datagram -> caller UDP send
-    -> caller UDP receive -> rudp_session_process_datagram[_at]
-         -> validate the complete datagram before mutation
-         -> session_ack -> rudp_recv_ack_ex
-         -> retain reliable gaps / filter unreliable sequence
-         -> drain_channel -> caller records
-    -> rudp_session_poll -> drain records left by output backpressure
-```
+For sessions, initialize and configure channels before enqueueing reliable messages.
+The unreliable send API packs a single 12-byte datagram; the session builder bundles
+reliable records and ACKs. The caller sends the resulting bytes. Reception validates
+the complete datagram before ACK processing or state mutation, retains reliable
+gaps, filters unreliable sequences and drains contiguous records to caller output.
+`rudp_session_poll()` drains records retained by output backpressure.
 
 The session builder emits pending ACKs before data, sorts channels by priority,
 rotates equal priorities with `rr_cursor`, and clamps output to
@@ -188,6 +172,6 @@ can observe traffic. Use an authenticated wrapper such as Noise, DTLS or
 WireGuard on untrusted networks. See `SECURITY.md` and the concrete follow-up
 work in `TODO.md`.
 
-Optional multipart, stream, scalar and motion profiles live in
-`src/profiles.c`; their storage is caller-owned. See `docs/PHASE4.md` and
+Optional stream, scalar and motion profiles live in
+`src/stream.c`, `src/scalar.c` and `src/motion.c`; their storage is caller-owned. See `docs/PHASE4.md` and
 `docs/ADAPTIVE_RECOVERY.md`.

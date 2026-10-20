@@ -22,7 +22,6 @@ The library provides:
   session occupies 5,620 bytes on the tested ABI, including storage reserved for
   channels configured as unreliable.
 
-[Interactive web replay](docs/visual/index.html) ·
 [Transport benchmarks](#transport-benchmarks-vs-enet-enet-zpl-and-kcp) ·
 [Codec benchmarks](#codec-benchmarks) ·
 [Interactive CLI demo](#interactive-loss-and-latency-demo)
@@ -61,32 +60,35 @@ they can be delivered in order. Unreliable records bypass both windows.
 - **4-byte ACK; 12-byte single-update datagram; 132 bytes for 16 data records.**
   These are UDP payload sizes, excluding UDP/IP and link-layer overhead.
 - **No heap calls, background threads or socket API in the core.** Integrate
-  `src/rudp.c` and the two headers; call the protocol from your own loop.
+  only the modules you need; call the protocol from your own loop.
+  See [module targets, source lists and ownership](docs/MODULES.md).
 - **Optional profiles:** bounded multipart messages, compact4/rolling8 scalar
-  telemetry and adaptive duplication. Add `src/profiles.c` when needed. Session
+  telemetry and adaptive duplication. Link `zcrudp::stream`, `zcrudp::scalar` or
+  `zcrudp::motion` when needed. Session
   priorities and recovery state remain in the core and its fixed session size.
   [Wire formats and tradeoffs](docs/PHASE4.md).
+
+## Modular integration
+
+Use `zcrudp::codec`, `zcrudp::reliability`, `zcrudp::session`, `zcrudp::io`,
+`zcrudp::stream`, `zcrudp::scalar` and `zcrudp::motion` independently.
+`zcrudp::core` and `zcrudp::profiles` remain facade targets; the original public
+headers remain available. The default memory layout and wire format are preserved.
+
+An opt-in `ZCRUDP_EXTERNAL_RX_STORAGE=ON` build lets the caller attach reliable
+RX storage only to channels that need it. This changes the ABI and must be used
+consistently by the library and its consumers. See [module integration and the
+migration notes](docs/MODULES.md), including direct compilation and binary-library
+changes. Run `make test-modules test-external-rx` to validate module boundaries.
 
 ## Transport benchmarks vs ENet, ENet (zpl), and KCP
 
 The comparative runner executes zcrudp, ENet (lsalzman), ENet-zpl (zpl-c), and KCP (default and fast profiles):
 2,400 reliable ordered four-byte messages, nine scenarios, five seeds — **225 recorded runs**.
 
-![Delivered throughput comparison](docs/bench/comparison/throughput.svg)
-
-![Tail latency by scenario, focused on zcrudp and ENet variants](docs/bench/comparison/latency-p99-detail.svg)
-
-The focused p99 chart uses a separate linear scale in each scenario so large KCP
-delays do not compress the differences among zcrudp and the ENet variants.
-KCP-fast values are printed in each panel; the [full five-engine chart](docs/bench/comparison/latency-p99.svg)
-and [CSV](docs/bench/comparison/results.csv) preserve the complete comparison.
-
-![Datagram wire cost comparison](docs/bench/comparison/wire-cost.svg)
-
-The [240 Hz wire-cost chart](docs/bench/comparison/wire-cost-paced.svg) also
-shows the clean 250 ms ping case where zcrudp sends more UDP payload bytes than ENet.
-
-![Initial timeout sensitivity at 250 ms ping](docs/bench/comparison/rto-sensitivity.svg)
+The [raw results](docs/bench/comparison/results.csv) preserve all five engines.
+At 240 Hz on the clean 250 ms ping path, zcrudp sends more UDP payload bytes
+than ENet.
 
 This follow-up measures zcrudp with 100 ms and 300 ms initial retransmission
 timeouts on the same virtual 250 ms ping path. At 300 ms, clean traffic drops
@@ -117,8 +119,6 @@ It costs 352 B of session state and delivers significantly lower tail latency un
 These results depend on the workload and transport settings, including KCP's
 selected profile. See [recovery settings and tradeoffs](docs/ADAPTIVE_RECOVERY.md).
 
-[p50 latency](docs/bench/comparison/latency-p50.svg) ·
-[Host execution cost](docs/bench/comparison/host-cost.svg) ·
 [Raw CSV](docs/bench/comparison/results.csv) ·
 [Methodology and exact settings](docs/bench/comparison/README.md)
 
@@ -172,22 +172,21 @@ game engine. Packaging follows CMake's
 
 ## Project Structure
 
-```text
-.
-├── include/
-│   ├── protocol_rudp.h    # Core context, session and wire definitions
-│   ├── protocol_tfv.h     # 32-bit TFV packet structure
-│   └── protocol_profiles.h # Optional stream and scalar profiles
-├── src/
-│   ├── rudp.c             # Core transport logic
-│   └── profiles.c         # Optional profile logic
-├── examples/demo_loss.c  # Interactive POSIX UDP peers with simulated loss/delay
-├── bench/bench_rudp.c    # In-memory codec benchmarks and CSV/SVG reports
-├── docs/bench/           # Recorded benchmark results
-└── tests/
-    ├── test_rudp.c        # RUDP engine and extreme case tests
-    └── test_tfv.c         # TFV structure validation
-```
+| Path | Purpose |
+| --- | --- |
+| `include/protocol_rudp.h` | Compatible transport facade |
+| `include/rudp_*.h` | Module APIs, configuration and shared types |
+| `include/protocol_tfv.h` | 32-bit TFV packet structure |
+| `include/protocol_profiles.h` | Optional profile facade |
+| `src/codec.c` | Stateless wire codecs |
+| `src/reliability.c` | Standalone ARQ engine |
+| `src/session*.c`, `src/rx.c` | Session setup, scheduling, routing and ordered RX |
+| `src/io.c` | Portable scatter/gather helpers |
+| `src/stream.c`, `src/scalar.c`, `src/motion.c` | Optional profiles |
+| `examples/demo_loss.c` | Interactive POSIX UDP peers with simulated loss/delay |
+| `bench/` | Benchmark and trace tools |
+| `docs/bench/` | Recorded benchmark data and methodology |
+| `tests/` | Protocol, integration and module checks |
 
 ## Quick Start / Usage
 
@@ -199,10 +198,11 @@ game engine. Packaging follows CMake's
 rudp_context_s ctx;
 rudp_init(&ctx);
 
-tfv_packet_u packet;
-packet.type = 1;
-packet.flags = 0;
-packet.value = 123;
+tfv_packet_u packet = {
+    .type = 1,
+    .flags = 0,
+    .value = 123,
+};
 
 // Send a packet at current timestamp (1000ms)
 rudp_send(&ctx, packet, 1000);
@@ -256,7 +256,9 @@ make test_window
 If you don't have `make`, you can compile manually (ensure the `build/` directory exists):
 ```bash
 mkdir -p build
-gcc -Iinclude -Wall -Wextra -O2 src/rudp.c tests/test_rudp.c -o build/test_rudp
+gcc -Iinclude -std=c11 -Wall -Wextra -O2 src/codec.c src/reliability.c \
+  src/session.c src/session_tx.c src/session_rx.c src/rx.c src/io.c \
+  tests/test_rudp.c -o build/test_rudp
 ./build/test_rudp
 ```
 
@@ -328,7 +330,7 @@ Run `./build/demo_loss --help` for all options.
 ```bash
 make bench                              # Run seven batches per codec
 make bench BENCH_ITERATIONS=10000000    # Longer batches
-make bench-report                       # Regenerate docs/bench CSV, SVG and log
+make bench-report                       # Refresh docs/bench data/log; SVG goes to build/
 ```
 
 The executable also supports independent output paths:
@@ -350,8 +352,6 @@ for the single-frame/record cases this is Mpps of codec processing, not achievab
 UDP packet rate. The final row counts whole datagrams per operation; its CSV also
 reports the corresponding record throughput. Encoding and decoding are measured
 separately, with hot data, and not as an end-to-end transport workload.
-
-![Codec cost and throughput](docs/bench/codec.svg)
 
 The checked-in example was measured on an Intel Core Ultra 9 288V, x86-64 WSL2,
 with GCC 13.3.0, `-O2` and `-fno-lto`, using 1,000,000 operations per batch.

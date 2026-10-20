@@ -9,13 +9,13 @@ implementation from measurements and comparisons with other transports.
 
 | Property | Default zcrudp build | Where to check |
 | --- | --- | --- |
-| Core integration | `src/rudp.c` and two headers | [Source](../src/rudp.c), [definitions](../include/protocol_rudp.h) |
-| Optional multipart and scalar profiles | Separate `src/profiles.c` library | [Profile definitions](../include/protocol_profiles.h) |
-| Explicit heap allocations in the core | None | [Source](../src/rudp.c) |
-| Context storage on the checked ABI | 1,040 B | `sizeof` assertions in [the header](../include/protocol_rudp.h) |
+| Core integration | Independently linkable C11 modules | [Module integration](MODULES.md), [facade](../include/rudp_types.h) |
+| Optional multipart and scalar profiles | Independent stream, scalar and motion targets | [Profile definitions](../include/protocol_profiles.h) |
+| Explicit heap allocations in the core | None | [Source](../src/reliability.c) |
+| Context storage on the checked ABI | 1,040 B | `sizeof` assertions in [the header](../include/rudp_types.h) |
 | Four-channel session storage | 5,620 B | Same assertions; includes TX/RX and recovery arrays even for unreliable channels |
 | Reliable TX capacity | 63 outstanding messages per channel | 64-slot ring with one slot reserved to distinguish full from empty |
-| Single-context wire format | 4 B ACK or 8 B frame | [Serialization functions](../src/rudp.c) |
+| Single-context wire format | 4 B ACK or 8 B frame | [Serialization functions](../src/codec.c) |
 | Session wire format | 4 B datagram header + 8 B per record | Same serialization functions |
 | Unreliable submission | No reliable TX slot or retransmission | `rudp_session_send_unreliable` |
 
