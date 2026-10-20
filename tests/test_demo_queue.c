@@ -43,7 +43,7 @@ ssize_t capture_sendto(int fd, const void *buf, size_t len, int flags,
 #endif
 
 int main(void) {
-  struct sockaddr_in peer = {0};
+  struct sockaddr_in peer = {.sin_family = 0};
   /* Slot 0 has been reused: physical index must not override the deadline. */
   queue[0] = (delayed_s){.bytes={3}, .len=1, .due=2, .seq=3, .used=1};
   queue[1] = (delayed_s){.bytes={2}, .len=1, .due=1, .seq=2, .used=1};

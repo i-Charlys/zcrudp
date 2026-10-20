@@ -6,8 +6,7 @@
 // --- 1. Basic Happy Path Test ---
 void test_happy_path(void) {
     rudp_context_s ctx;
-    tfv_packet_u dummy_packet;
-    dummy_packet.raw = 0;                       // not good practice, but for testing it's ok
+    tfv_packet_u dummy_packet = {.raw = 0};                       // not good practice, but for testing it's ok
     uint16_t expired_slots[64];                 // Array to hold indices of expired slots
 
     assert(rudp_init(&ctx) == 0);               // check initialization
@@ -41,8 +40,7 @@ void test_happy_path(void) {
 // --- 2. Extreme Test: Domino Effect (Cumulative ACK) ---
 void test_cumulative_ack(void) {
     rudp_context_s ctx;
-    tfv_packet_u dummy;
-    dummy.raw = 0;
+    tfv_packet_u dummy = {.raw = 0};
 
     rudp_init(&ctx);
 
@@ -67,8 +65,7 @@ void test_cumulative_ack(void) {
 // --- 3. Extreme Test: The 65535 Crash (Rollover) ---
 void test_seq_num_rollover(void) {
     rudp_context_s ctx;
-    tfv_packet_u dummy;
-    dummy.raw = 0;
+    tfv_packet_u dummy = {.raw = 0};
 
     rudp_init(&ctx);
 
@@ -97,8 +94,7 @@ void test_seq_num_rollover(void) {
 // --- 4. Extreme Test: Buffer Full and Memory Wrap-Around ---
 void test_buffer_full_and_wrap(void) {
     rudp_context_s ctx;
-    tfv_packet_u dummy;
-    dummy.raw = 0;
+    tfv_packet_u dummy = {.raw = 0};
 
     rudp_init(&ctx);
 
@@ -132,12 +128,10 @@ void test_buffer_full_and_wrap(void) {
 
 // --- 5. Wire Serialization & Portability Test (Pack / Unpack) ---
 void test_wire_serialization(void) {
-    rudp_frame_s original_frame;
-    original_frame.header.seq_num = 0x1234;
-    original_frame.header.ack     = 0x5678;
-    original_frame.packet.type    = 42;
-    original_frame.packet.flags   = 0x0F;
-    original_frame.packet.value   = 0xABCD;
+    rudp_frame_s original_frame = {
+        .header = {.seq_num = 0x1234, .ack = 0x5678},
+        .packet = {.type = 42, .flags = 0x0F, .value = 0xABCD},
+    };
 
     uint8_t wire_buffer[RUDP_WIRE_FRAME_SIZE];
 
@@ -184,9 +178,7 @@ void test_wire_serialization(void) {
     // 7. Atomic payload tests (rudp_pack_payload, rudp_unpack_payload)
     uint8_t payload_wire[sizeof(tfv_packet_u)];
     tfv_packet_u orig_p;
-    orig_p.type = 99;
-    orig_p.flags = 0xAA;
-    orig_p.value = 0x1234;
+    orig_p = (tfv_packet_u){.type = 99, .flags = 0xAA, .value = 0x1234};
     assert(rudp_pack_payload(&orig_p, payload_wire, sizeof(payload_wire)) == (int)sizeof(tfv_packet_u));
     assert(payload_wire[0] == 99 && payload_wire[1] == 0xAA);
     assert(payload_wire[2] == 0x12 && payload_wire[3] == 0x34);
@@ -243,8 +235,7 @@ void test_wire_serialization(void) {
 // --- 6. Advanced Reliability Edge Cases Test ---
 void test_reliability_edge_cases(void) {
     rudp_context_s ctx;
-    tfv_packet_u dummy;
-    dummy.raw = 0;
+    tfv_packet_u dummy = {.raw = 0};
     uint16_t expired[64];
 
     rudp_init(&ctx);
@@ -316,13 +307,9 @@ void test_rx_and_full_duplex(void) {
     tfv_packet_u bob_msg;
     tfv_packet_u received_msg;
 
-    alice_msg.type = 1;
-    alice_msg.flags = 0xAA;
-    alice_msg.value = 1234;
+    alice_msg = (tfv_packet_u){.type = 1, .flags = 0xAA, .value = 1234};
 
-    bob_msg.type = 2;
-    bob_msg.flags = 0xBB;
-    bob_msg.value = 5678;
+    bob_msg = (tfv_packet_u){.type = 2, .flags = 0xBB, .value = 5678};
 
     assert(rudp_init(&alice_ctx) == 0);
     assert(rudp_init(&bob_ctx) == 0);
@@ -377,8 +364,7 @@ void test_rx_and_full_duplex(void) {
 // --- 8. Fast Retransmit (Tri-ACK) Test ---
 void test_fast_retransmit_tri_ack(void) {
     rudp_context_s ctx;
-    tfv_packet_u dummy;
-    dummy.raw = 0;
+    tfv_packet_u dummy = {.raw = 0};
     uint16_t expired[64];
 
     assert(rudp_init(&ctx) == RUDP_OK);
@@ -442,8 +428,7 @@ void test_fast_retransmit_tri_ack(void) {
 // --- 9. Dead Peer Detection & Retransmission Limit Test ---
 void test_dead_peer_detection(void) {
     rudp_context_s ctx;
-    tfv_packet_u dummy;
-    dummy.raw = 0;
+    tfv_packet_u dummy = {.raw = 0};
     uint16_t expired[64];
 
     assert(rudp_init(&ctx) == RUDP_OK);
@@ -649,12 +634,12 @@ void test_datagram_bundling_and_validation(void) {
 
     rudp_record_s recs_in[3];
     for (int i = 0; i < 3; i++) {
-        recs_in[i].channel_id = (uint8_t)i;
-        recs_in[i].flags = (i == 0) ? RUDP_RECORD_FLAG_RELIABLE : RUDP_RECORD_FLAG_UNRELIABLE;
-        recs_in[i].seq_num = (uint16_t)(100 + i);
-        recs_in[i].payload.type = (uint8_t)(10 + i);
-        recs_in[i].payload.flags = 0;
-        recs_in[i].payload.value = (uint16_t)(1000 + i);
+        recs_in[i] = (rudp_record_s){
+            .channel_id = (uint8_t)i,
+            .flags = (i == 0) ? RUDP_RECORD_FLAG_RELIABLE : RUDP_RECORD_FLAG_UNRELIABLE,
+            .seq_num = (uint16_t)(100 + i),
+            .payload = {.type = (uint8_t)(10 + i), .flags = 0, .value = (uint16_t)(1000 + i)},
+        };
         assert(rudp_pack_record(&recs_in[i], buf + 4 + i * 8, sizeof(buf) - (4 + i * 8)) == 8);
     }
     size_t total_datagram_len = 4 + 3 * 8; // 28 bytes
@@ -896,16 +881,10 @@ void test_multi_channel_record_ack_bundling(void) {
     rudp_pack_datagram_header(&fwd_hdr, fwd_datagram, sizeof(fwd_datagram));
 
     rudp_record_s fwd_recs[2];
-    fwd_recs[0].channel_id = 0;
-    fwd_recs[0].flags = RUDP_RECORD_FLAG_RELIABLE;
-    fwd_recs[0].seq_num = 0;
-    fwd_recs[0].payload = kv_chunk;
+    fwd_recs[0] = (rudp_record_s){.channel_id = 0, .flags = RUDP_RECORD_FLAG_RELIABLE, .seq_num = 0, .payload = kv_chunk};
     rudp_pack_record(&fwd_recs[0], fwd_datagram + 4, sizeof(fwd_datagram) - 4);
 
-    fwd_recs[1].channel_id = 2;
-    fwd_recs[1].flags = RUDP_RECORD_FLAG_RELIABLE;
-    fwd_recs[1].seq_num = 0;
-    fwd_recs[1].payload = barrier;
+    fwd_recs[1] = (rudp_record_s){.channel_id = 2, .flags = RUDP_RECORD_FLAG_RELIABLE, .seq_num = 0, .payload = barrier};
     rudp_pack_record(&fwd_recs[1], fwd_datagram + 12, sizeof(fwd_datagram) - 12);
 
     rudp_record_s delivered_to_decode[4];
@@ -1230,8 +1209,8 @@ static void test_gap_triggered_fast_retransmit(void) {
     uint8_t dgram[64];
     rudp_record_s rec_delivered[4];
     uint8_t out_p0[12];
-    rudp_datagram_header_s h0 = {0, 0, 1};
-    rudp_record_s r0 = {0, RUDP_RECORD_FLAG_RELIABLE, 0, {.value = 0}};
+    rudp_datagram_header_s h0 = {.ack = 0, .ack_channel = 0, .count = 1};
+    rudp_record_s r0 = {.channel_id = 0, .flags = RUDP_RECORD_FLAG_RELIABLE, .seq_num = 0, .payload = {.value = 0}};
     assert(rudp_pack_datagram_header(&h0, out_p0, sizeof(out_p0)) == 4);
     assert(rudp_pack_record(&r0, out_p0 + 4, sizeof(out_p0) - 4) == 8);
     assert(rudp_session_process_datagram(&receiver, out_p0, 12, rec_delivered, 4) == 1);
@@ -1248,8 +1227,8 @@ static void test_gap_triggered_fast_retransmit(void) {
     // Packets 2, 3, 4 arrive at receiver out-of-order (gap)
     for (uint16_t seq = 2; seq <= 4; seq++) {
         uint8_t gap_buf[12];
-        rudp_datagram_header_s gh = {0, 0, 1};
-        rudp_record_s gr = {0, RUDP_RECORD_FLAG_RELIABLE, seq, {.value = seq}};
+        rudp_datagram_header_s gh = {.ack = 0, .ack_channel = 0, .count = 1};
+        rudp_record_s gr = {.channel_id = 0, .flags = RUDP_RECORD_FLAG_RELIABLE, .seq_num = seq, .payload = {.value = seq}};
         assert(rudp_pack_datagram_header(&gh, gap_buf, sizeof(gap_buf)) == 4);
         assert(rudp_pack_record(&gr, gap_buf + 4, sizeof(gap_buf) - 4) == 8);
 
@@ -1313,35 +1292,35 @@ static void test_unreliable_jump_bound_critical_2(void) {
 
     rudp_record_s delivered[4];
     uint8_t buf[12];
-    rudp_datagram_header_s hdr = {0, 0, 1};
+    rudp_datagram_header_s hdr = {.ack = 0, .ack_channel = 0, .count = 1};
 
     // Packet 0 with seq = 100 arrives
-    rudp_record_s r1 = {1, RUDP_RECORD_FLAG_UNRELIABLE, 100, {.value = 100}};
+    rudp_record_s r1 = {.channel_id = 1, .flags = RUDP_RECORD_FLAG_UNRELIABLE, .seq_num = 100, .payload = {.value = 100}};
     assert(rudp_pack_datagram_header(&hdr, buf, sizeof(buf)) == 4);
     assert(rudp_pack_record(&r1, buf + 4, sizeof(buf) - 4) == 8);
     assert(rudp_session_process_datagram(&rx_session, buf, 12, delivered, 4) == 1);
     assert(rx_session.channels[1].last_unreliable_seq == 100);
 
     // Valid forward jump: seq = 600 (distance = 500 <= 512)
-    rudp_record_s r2 = {1, RUDP_RECORD_FLAG_UNRELIABLE, 600, {.value = 600}};
+    rudp_record_s r2 = {.channel_id = 1, .flags = RUDP_RECORD_FLAG_UNRELIABLE, .seq_num = 600, .payload = {.value = 600}};
     assert(rudp_pack_record(&r2, buf + 4, sizeof(buf) - 4) == 8);
     assert(rudp_session_process_datagram(&rx_session, buf, 12, delivered, 4) == 1);
     assert(rx_session.channels[1].last_unreliable_seq == 600);
 
     // Malicious forward jump: seq = 600 + 30000 (distance > 512)
-    rudp_record_s r_mal = {1, RUDP_RECORD_FLAG_UNRELIABLE, 30600, {.value = 999}};
+    rudp_record_s r_mal = {.channel_id = 1, .flags = RUDP_RECORD_FLAG_UNRELIABLE, .seq_num = 30600, .payload = {.value = 999}};
     assert(rudp_pack_record(&r_mal, buf + 4, sizeof(buf) - 4) == 8);
     assert(rudp_session_process_datagram(&rx_session, buf, 12, delivered, 4) == 0);
     assert(rx_session.channels[1].last_unreliable_seq == 600); // Unchanged!
 
     // Malicious 32767 jump:
-    rudp_record_s r_32k = {1, RUDP_RECORD_FLAG_UNRELIABLE, (uint16_t)(600 + 32767), {.value = 999}};
+    rudp_record_s r_32k = {.channel_id = 1, .flags = RUDP_RECORD_FLAG_UNRELIABLE, .seq_num = (uint16_t)(600 + 32767), .payload = {.value = 999}};
     assert(rudp_pack_record(&r_32k, buf + 4, sizeof(buf) - 4) == 8);
     assert(rudp_session_process_datagram(&rx_session, buf, 12, delivered, 4) == 0);
     assert(rx_session.channels[1].last_unreliable_seq == 600); // Unchanged!
 
     // Legitimate packet seq = 601 is delivered promptly (channel NOT muted!)
-    rudp_record_s r3 = {1, RUDP_RECORD_FLAG_UNRELIABLE, 601, {.value = 601}};
+    rudp_record_s r3 = {.channel_id = 1, .flags = RUDP_RECORD_FLAG_UNRELIABLE, .seq_num = 601, .payload = {.value = 601}};
     assert(rudp_pack_record(&r3, buf + 4, sizeof(buf) - 4) == 8);
     assert(rudp_session_process_datagram(&rx_session, buf, 12, delivered, 4) == 1);
     assert(rx_session.channels[1].last_unreliable_seq == 601);
@@ -1415,9 +1394,10 @@ static void test_legacy_recv_passive_ack(void) {
 
     // Incoming data frames with piggybacked ACK=0
     rudp_frame_s incoming_frame;
-    incoming_frame.header.seq_num = 0;
-    incoming_frame.header.ack = 0;
-    incoming_frame.packet.raw = 100;
+    incoming_frame = (rudp_frame_s){
+        .header = {.seq_num = 0, .ack = 0},
+        .packet = {.raw = 100},
+    };
 
     tfv_packet_u delivered;
     for (int i = 0; i < 5; i++) {

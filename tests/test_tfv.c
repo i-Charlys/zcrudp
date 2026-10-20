@@ -13,13 +13,7 @@
  * @brief Main function
  */
 int main(void) {
-    tfv_packet_u packet;
-
-    packet.raw = 0; // not good practice, but for testing it's ok
-
-    packet.type = 1;
-    packet.flags = 15;
-    packet.value = 4096;
+    tfv_packet_u packet = {.type = 1, .flags = 15, .value = 4096};
     printf("type: %u, flags: %u, value: %u\n", packet.type, packet.flags, packet.value);
     printf("memory length: %zu bytes\n", sizeof(tfv_packet_u));
     printf("raw: %x\n", packet.raw);
@@ -39,9 +33,7 @@ int main(void) {
     assert(offsetof(tfv_packet_u, flags) == 1);
     assert(offsetof(tfv_packet_u, value) == 2);
 
-    packet.type = UINT8_MAX;
-    packet.flags = UINT8_MAX;
-    packet.value = UINT16_MAX;
+    packet = (tfv_packet_u){.type = UINT8_MAX, .flags = UINT8_MAX, .value = UINT16_MAX};
     assert(packet.type == UINT8_MAX);
     assert(packet.flags == UINT8_MAX);
     assert(packet.value == UINT16_MAX);

@@ -6,7 +6,7 @@ import subprocess
 
 from run_comparison import FIELDS, ROOT, build
 
-OUTPUT = ROOT / "docs/bench/comparison"
+OUTPUT = ROOT / "build/bench/comparison"
 SCENARIOS = (("ping250-clean", 0, 0), ("ping250-loss", 2, 10))
 RTOS = (100, 300)
 SEEDS = range(1, 6)

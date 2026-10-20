@@ -20,7 +20,7 @@ static uint16_t latest;
 
 static void emit(int from, const uint8_t *bytes, int length, unsigned now) {
   assert(packet_count < PACKETS && (length == 4 || length == 12));
-  rudp_record_s record = {0};
+  rudp_record_s record = {.channel_id = 0};
   const char *kind = "ack";
   unsigned seq = ((unsigned)bytes[0] << 8) | bytes[1], retry = 0, delay = 15;
   int lost = 0;
@@ -44,8 +44,8 @@ static void emit(int from, const uint8_t *bytes, int length, unsigned now) {
          packet_count ? "," : "", packet_count, from, now, now + delay,
          kind, seq, retry, lost ? "true" : "false");
   queued_s *q = &queue[packet_count++];
+  *q = (queued_s){.len = length, .from = from, .due = now + delay, .active = !lost};
   memcpy(q->bytes, bytes, (size_t)length);
-  q->len = length; q->from = from; q->due = now + delay; q->active = !lost;
 }
 
 int main(void) {
@@ -96,14 +96,17 @@ int main(void) {
     snapshot_s *s = &snapshots[now];
     rudp_channel_s *rx = &peers[1].channels[0];
     rudp_context_s *tx = &peers[0].channels[0].ctx;
-    s->pending = (tx->head - tx->tail) & (RUDP_WINDOW_SIZE - 1);
+    *s = (snapshot_s){
+        .pending = (tx->head - tx->tail) & (RUDP_WINDOW_SIZE - 1),
+        .delivered = delivered, .fresh = fresh, .latest = latest,
+        .late = late, .retries = retries, .drops = drops,
+        .rto = peers[0].channels[0].rto_ms,
+    };
     for (unsigned offset = 0; offset < RUDP_WINDOW_SIZE; ++offset) {
       unsigned seq = (uint16_t)(rx->ctx.expected_seq_num + offset);
       unsigned slot = seq & (RUDP_WINDOW_SIZE - 1);
       if (rx->rx_present[slot / 8] & (1U << (slot & 7))) s->buffered[s->buffered_count++] = seq;
     }
-    s->delivered = delivered; s->fresh = fresh; s->latest = latest;
-    s->late = late; s->retries = retries; s->drops = drops; s->rto = peers[0].channels[0].rto_ms;
   }
   assert(delivered == 8 && fresh == 10 && latest == 11 && late == 1 && drops == 2);
   assert(snapshots[END_MS].pending == 0 && retries > 0);

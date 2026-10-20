@@ -6,6 +6,7 @@
  * @brief Single, 100% portable and OS-agnostic vectored I/O API (Zero-Copy).
  */
 
+#include "rudp_config.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -30,10 +31,10 @@ typedef struct {
  */
 typedef struct {
   rudp_iovec_s iovecs[RUDP_IOVEC_MAX]; /**< Memory slices */
-  uint32_t path_entropy;               /**< Path entropy identifier (implementation defined) */
-  uint16_t total_len;                  /**< Total aggregated datagram payload length */
-  uint8_t count;                       /**< Number of active slices (<= RUDP_IOVEC_MAX) */
-  uint8_t dscp;                        /**< DSCP value (0-63) */
+  uint32_t path_entropy; /**< Path entropy identifier (implementation defined) */
+  uint16_t total_len;    /**< Total aggregated datagram payload length */
+  uint8_t count;         /**< Number of active slices (<= RUDP_IOVEC_MAX) */
+  uint8_t dscp;          /**< DSCP value (0-63) */
 } rudp_iovec_collection_s;
 
 /**
@@ -49,11 +50,10 @@ typedef struct {
  * @param flow_hint Explicit path generation or failover counter (e.g., 0).
  * @return 32-bit flow entropy hash.
  */
-static inline uint32_t rudp_calc_entropy(uint16_t session_seed,
-                                           uint8_t channel_id,
-                                           uint16_t flow_hint) {
-  uint32_t h = (uint32_t)session_seed ^ ((uint32_t)channel_id << 8) ^
-               (uint32_t)flow_hint;
+static inline uint32_t rudp_calc_entropy(uint16_t session_seed, uint8_t channel_id,
+                                         uint16_t flow_hint) {
+  uint32_t h =
+      (uint32_t)session_seed ^ ((uint32_t)channel_id << 8) ^ (uint32_t)flow_hint;
 
   // lowbias32 32-bit Hash
   h ^= h >> 16;
@@ -85,9 +85,7 @@ int rudp_iovec_flatten(const rudp_iovec_collection_s *col, uint8_t *out_buf,
  * @return RUDP_OK on success, RUDP_ERR_BUFFER_FULL if the collection is full,
  *         or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_iovec_add(rudp_iovec_collection_s *col, const void *base,
-                   uint32_t len);
-
+int rudp_iovec_add(rudp_iovec_collection_s *col, const void *base, uint32_t len);
 
 #ifdef __cplusplus
 }

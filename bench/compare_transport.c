@@ -50,6 +50,7 @@ void link_send(int from, const void *bytes, unsigned len) {
   if (random_next() % 100 < loss_percent) { lost_packets++; return; }
   int to = 1 - from;
   assert(sizes[to] < CAP); /* Never silently add simulator congestion loss. */
+  /* Initialize only the used payload range; do not zero an MTU per datagram. */
   datagram_s p;
   p.due = now + delay_ms + random_next() % (jitter_ms + 1);
   p.order = serial++; p.len = len; memcpy(p.bytes, bytes, len);
@@ -91,7 +92,7 @@ int enet_socket_bind(ENetSocket fd, const ENetAddress *a) { (void)fd; (void)a; r
 int enet_socket_set_option(ENetSocket fd, ENetSocketOption opt, int value) { (void)fd; (void)opt; (void)value; return 0; }
 void enet_socket_destroy(ENetSocket fd) { (void)fd; }
 int enet_socket_get_address(ENetSocket fd, ENetAddress *a) {
-  a->host = htonl(0x7f000001u + (unsigned)fd); a->port = (enet_uint16)(10000 + fd); return 0;
+  *a = (ENetAddress){.host = htonl(0x7f000001u + (unsigned)fd), .port = (enet_uint16)(10000 + fd)}; return 0;
 }
 int enet_socket_wait(ENetSocket fd, enet_uint32 *condition, enet_uint32 timeout) {
   (void)fd; assert(timeout == 0); *condition = 0; return 0;

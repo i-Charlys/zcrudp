@@ -42,6 +42,9 @@ jobs:
     - name: Verify deterministic visual-demo trace
       run: python3 bench/render_visual.py --output build/visual-smoke
 
+    - name: Test independent modules and caller-owned RX storage
+      run: make test-modules test-external-rx
+
     - name: Test CMake shared libraries in Release mode
       run: |
         cmake -S . -B build/cmake-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DZCRUDP_WARNINGS_AS_ERRORS=ON

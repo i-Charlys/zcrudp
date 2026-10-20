@@ -3,14 +3,13 @@ CC ?= cc
 CFLAGS = -Iinclude -Wall -Wextra -std=c11 -pedantic -Werror -O2 -UNDEBUG
 ASAN_CFLAGS = -Iinclude -Wall -Wextra -std=c11 -pedantic -Werror -g -fsanitize=address,undefined -UNDEBUG
 BUILD_DIR = build
-SRC = src/rudp.c
-TESTS = tests/test_rudp.c tests/test_tfv.c tests/test_window.c
-BINS = $(BUILD_DIR)/test_rudp $(BUILD_DIR)/test_tfv $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max
+SRC = src/codec.c src/reliability.c src/session.c src/session_tx.c src/session_rx.c src/rx.c src/io.c
+PROFILES_SRC = src/stream.c src/scalar.c src/motion.c
 BINS = $(BUILD_DIR)/test_rudp $(BUILD_DIR)/test_tfv $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max $(BUILD_DIR)/test_phase4
 
 .PHONY: all clean test test_rudp test_tfv test_window asan demo bench bench-report test-tools
 
-HEADERS = include/protocol_rudp.h include/protocol_tfv.h include/rudp_io.h
+HEADERS = $(wildcard include/*.h src/*_internal.h)
 BENCH_ITERATIONS ?= 1000000
 COMPARE_PYTHON ?= python3
 VISUAL_PYTHON ?= python3
@@ -55,7 +54,7 @@ bench: $(BUILD_DIR)/bench_rudp
 
 bench-report: $(BUILD_DIR)/bench_rudp
 	mkdir -p docs/bench
-	./$(BUILD_DIR)/bench_rudp --iterations $(BENCH_ITERATIONS) --csv docs/bench/codec.csv --svg docs/bench/codec.svg > docs/bench/environment.txt
+	./$(BUILD_DIR)/bench_rudp --iterations $(BENCH_ITERATIONS) --csv docs/bench/codec.csv --svg $(BUILD_DIR)/codec.svg > docs/bench/environment.txt
 
 $(BUILD_DIR)/test_demo_queue: tests/test_demo_queue.c examples/demo_loss.c $(SRC) $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(SRC) tests/test_demo_queue.c -o $@
@@ -69,20 +68,20 @@ all: $(BUILD_DIR) $(BINS)
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/test_rudp: src/rudp.c tests/test_rudp.c $(HEADERS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) src/rudp.c tests/test_rudp.c -o $@
+$(BUILD_DIR)/test_rudp: $(SRC) tests/test_rudp.c $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(SRC) tests/test_rudp.c -o $@
 
-$(BUILD_DIR)/test_phase4: src/profiles.c tests/test_phase4.c include/protocol_profiles.h $(SRC) $(HEADERS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(SRC) src/profiles.c tests/test_phase4.c -o $@
+$(BUILD_DIR)/test_phase4: $(PROFILES_SRC) tests/test_phase4.c include/protocol_profiles.h $(SRC) $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase4.c -o $@
 
 $(BUILD_DIR)/test_tfv: tests/test_tfv.c $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) tests/test_tfv.c -o $@
 
-$(BUILD_DIR)/test_window_min: src/rudp.c tests/test_window.c $(HEADERS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -DRUDP_WINDOW_SIZE=2 src/rudp.c tests/test_window.c -o $@
+$(BUILD_DIR)/test_window_min: $(SRC) tests/test_window.c $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DRUDP_WINDOW_SIZE=2 $(SRC) tests/test_window.c -o $@
 
-$(BUILD_DIR)/test_window_max: src/rudp.c tests/test_window.c $(HEADERS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -DRUDP_WINDOW_SIZE=32768 src/rudp.c tests/test_window.c -o $@
+$(BUILD_DIR)/test_window_max: $(SRC) tests/test_window.c $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DRUDP_WINDOW_SIZE=32768 $(SRC) tests/test_window.c -o $@
 
 test_rudp: $(BUILD_DIR)/test_rudp
 	./$(BUILD_DIR)/test_rudp
@@ -102,12 +101,12 @@ test: all
 	./$(BUILD_DIR)/test_window_max
 
 asan: | $(BUILD_DIR)
-	$(CC) $(ASAN_CFLAGS) $(SRC) src/profiles.c tests/test_phase4.c -o $(BUILD_DIR)/test_phase4_asan
+	$(CC) $(ASAN_CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase4.c -o $(BUILD_DIR)/test_phase4_asan
 	./$(BUILD_DIR)/test_phase4_asan
-	$(CC) $(ASAN_CFLAGS) src/rudp.c tests/test_rudp.c -o $(BUILD_DIR)/test_rudp_asan
+	$(CC) $(ASAN_CFLAGS) $(SRC) tests/test_rudp.c -o $(BUILD_DIR)/test_rudp_asan
 	$(CC) $(ASAN_CFLAGS) tests/test_tfv.c -o $(BUILD_DIR)/test_tfv_asan
-	$(CC) $(ASAN_CFLAGS) -DRUDP_WINDOW_SIZE=2 src/rudp.c tests/test_window.c -o $(BUILD_DIR)/test_window_min_asan
-	$(CC) $(ASAN_CFLAGS) -DRUDP_WINDOW_SIZE=32768 src/rudp.c tests/test_window.c -o $(BUILD_DIR)/test_window_max_asan
+	$(CC) $(ASAN_CFLAGS) -DRUDP_WINDOW_SIZE=2 $(SRC) tests/test_window.c -o $(BUILD_DIR)/test_window_min_asan
+	$(CC) $(ASAN_CFLAGS) -DRUDP_WINDOW_SIZE=32768 $(SRC) tests/test_window.c -o $(BUILD_DIR)/test_window_max_asan
 	./$(BUILD_DIR)/test_rudp_asan
 	./$(BUILD_DIR)/test_tfv_asan
 	./$(BUILD_DIR)/test_window_min_asan
@@ -115,3 +114,11 @@ asan: | $(BUILD_DIR)
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+.PHONY: test-modules test-external-rx
+test-modules:
+	python3 tests/test_modules.py
+
+test-external-rx: | $(BUILD_DIR)
+	$(CC) $(ASAN_CFLAGS) -DRUDP_EXTERNAL_RX_STORAGE=1 $(SRC) tests/test_external_rx.c -o $(BUILD_DIR)/test_external_rx_asan
+	./$(BUILD_DIR)/test_external_rx_asan

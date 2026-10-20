@@ -37,9 +37,11 @@ static int mock_bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 static int mock_getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
   if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_in)) {
     struct sockaddr_in *sin = (struct sockaddr_in *)addr;
-    sin->sin_family = AF_INET;
-    sin->sin_port = htons((uint16_t)(10000 + sockfd));
-    sin->sin_addr.s_addr = htonl(0x7f000001u + (unsigned)sockfd);
+    *sin = (struct sockaddr_in){
+        .sin_family = AF_INET,
+        .sin_port = htons((uint16_t)(10000 + sockfd)),
+        .sin_addr = {.s_addr = htonl(0x7f000001u + (unsigned)sockfd)},
+    };
     *addrlen = sizeof(struct sockaddr_in);
   }
   return 0;
@@ -88,9 +90,11 @@ static ssize_t mock_recvmsg(int sockfd, struct msghdr *msg, int flags) {
   }
   if (msg->msg_name) {
     struct sockaddr_in *sin = (struct sockaddr_in *)msg->msg_name;
-    sin->sin_family = AF_INET;
-    sin->sin_port = htons((uint16_t)(10000 + (1 - sockfd)));
-    sin->sin_addr.s_addr = htonl(0x7f000001u + (unsigned)(1 - sockfd));
+    *sin = (struct sockaddr_in){
+        .sin_family = AF_INET,
+        .sin_port = htons((uint16_t)(10000 + (1 - sockfd))),
+        .sin_addr = {.s_addr = htonl(0x7f000001u + (unsigned)(1 - sockfd))},
+    };
     msg->msg_namelen = sizeof(struct sockaddr_in);
   }
   return (ssize_t)len;
@@ -99,8 +103,7 @@ static ssize_t mock_recvmsg(int sockfd, struct msghdr *msg, int flags) {
 static int mock_clock_gettime(clockid_t clk_id, struct timespec *tp) {
   (void)clk_id;
   uint32_t current_now = g_now ? *g_now : 1000;
-  tp->tv_sec = current_now / 1000;
-  tp->tv_nsec = (current_now % 1000) * 1000000;
+  *tp = (struct timespec){.tv_sec = current_now / 1000, .tv_nsec = (current_now % 1000) * 1000000};
   return 0;
 }
 
@@ -254,20 +257,22 @@ void zpl_enet_init_engine(uint32_t *now_ptr, uint32_t *loss_percent_ptr, int *fa
 
   assert(zpl_enet_initialize() == 0);
   for (int side = 0; side < 2; side++) {
-    ENetAddress a;
-    a.host.s_addr = htonl(0x7f000001u + (unsigned)side);
-    a.port = (enet_uint16)(10000 + side);
-    a.sin6_scope_id = 0;
+    ENetAddress a = {
+        .host = {.s_addr = htonl(0x7f000001u + (unsigned)side)},
+        .port = (enet_uint16)(10000 + side),
+        .sin6_scope_id = 0,
+    };
     hosts[side] = zpl_enet_host_create(&a, 1, 1, 0, 0);
     assert(hosts[side]);
     hosts[side]->mtu = MTU;
     hosts[side]->randomSeed = 42;
   }
 
-  ENetAddress target;
-  target.host.s_addr = htonl(0x7f000001u + 1);
-  target.port = 10001;
-  target.sin6_scope_id = 0;
+  ENetAddress target = {
+      .host = {.s_addr = htonl(0x7f000001u + 1)},
+      .port = 10001,
+      .sin6_scope_id = 0,
+  };
   remote = zpl_enet_host_connect(hosts[0], &target, 1, 0);
   assert(remote);
 

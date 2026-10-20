@@ -10,6 +10,8 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+CORE_SOURCES = ["src/codec.c", "src/reliability.c", "src/session.c",
+                "src/session_tx.c", "src/session_rx.c", "src/rx.c", "src/io.c"]
 
 
 def generate(output, capture):
@@ -17,7 +19,7 @@ def generate(output, capture):
     build.mkdir(exist_ok=True)
     compiler = os.environ.get("CC", "cc")
     command = [compiler, "-Iinclude", "-Wall", "-Wextra", "-std=c11", "-pedantic",
-               "-Werror", "-O2", "-UNDEBUG", "src/rudp.c", "bench/trace_rudp.c",
+               "-Werror", "-O2", "-UNDEBUG", *CORE_SOURCES, "bench/trace_rudp.c",
                "-o", str(build / "trace_rudp")]
     subprocess.run(command, cwd=ROOT, check=True)
     raw = subprocess.check_output([str(build / "trace_rudp")], cwd=ROOT, text=True)
@@ -27,7 +29,7 @@ def generate(output, capture):
     trace["provenance"] = {"scenario": "scripted loss and reorder; explanatory, not a benchmark",
         "build_command": command, "compiler": subprocess.check_output([compiler, "--version"], text=True).splitlines()[0],
         "sha256": {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in
-                   ("src/rudp.c", "include/protocol_rudp.h", "include/protocol_tfv.h",
+                   (*CORE_SOURCES, *[str(p.relative_to(ROOT)) for p in sorted((ROOT / "include").glob("*.h"))],
                     "bench/trace_rudp.c", "bench/visualizer.html", "bench/render_visual.py")}}
     assert trace["snapshots"][-1]["delivered"] == 8
     assert any(s["buffer"] for s in trace["snapshots"])
@@ -77,7 +79,7 @@ def generate(output, capture):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=ROOT / "docs/visual")
+    parser.add_argument("--output", type=Path, default=ROOT / "build/visual")
     parser.add_argument("--gif", action="store_true")
     args = parser.parse_args()
     generate(args.output, args.gif)

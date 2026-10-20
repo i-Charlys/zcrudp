@@ -6,10 +6,11 @@
 static int inject(rudp_session_s *rx, uint8_t channel, uint16_t seq,
                   uint16_t value, rudp_record_s *out, size_t capacity) {
   uint8_t bytes[12];
-  rudp_datagram_header_s header = {0, 0, 1};
-  rudp_record_s record = {0};
-  record.channel_id = channel; record.flags = RUDP_RECORD_FLAG_RELIABLE;
-  record.seq_num = seq; record.payload.value = value;
+  rudp_datagram_header_s header = {.ack = 0, .ack_channel = 0, .count = 1};
+  rudp_record_s record = {
+      .channel_id = channel, .flags = RUDP_RECORD_FLAG_RELIABLE,
+      .seq_num = seq, .payload = {.value = value},
+  };
   assert(rudp_pack_datagram_header(&header, bytes, sizeof bytes) == 4);
   assert(rudp_pack_record(&record, bytes + 4, 8) == 8);
   return rudp_session_process_datagram(rx, bytes, sizeof bytes, out, capacity);
@@ -50,7 +51,7 @@ static void priorities(void) {
   rudp_session_s tx;
   rudp_record_s record;
   uint8_t bytes[12];
-  tfv_packet_u payload = {0};
+  tfv_packet_u payload = {.raw = 0};
   assert(rudp_session_init(&tx) == 0);
   assert(rudp_session_set_qos(&tx, 0, 200, 0) == 0);
   assert(rudp_session_set_qos(&tx, 1, 0, 46) == 0);
@@ -66,14 +67,13 @@ static void priorities(void) {
 
 static void stream(size_t length, size_t capacity) {
   rudp_session_s sender, receiver;
-  rudp_stream_tx_s tx = {0};
+  rudp_stream_tx_s tx = {.data = NULL};
   static uint8_t source[65535], destination[65537];
   uint8_t bytes[1400], ack[4];
   rudp_record_s out[175];
   memset(destination, 165, sizeof destination);
   for (size_t i = 0; i < sizeof source; ++i) source[i] = (uint8_t)i;
-  rudp_stream_rx_s rx = {0};
-  rx.data = destination + 1; rx.capacity = capacity;
+  rudp_stream_rx_s rx = {.data = destination + 1, .capacity = capacity};
   assert(rudp_session_init(&sender) == 0 && rudp_session_init(&receiver) == 0);
   assert(rudp_stream_start(&tx, source, length) == 0);
   assert(rudp_stream_start(&tx, source, length) == RUDP_ERR_BUFFER_FULL);
@@ -112,9 +112,9 @@ static void stream(size_t length, size_t capacity) {
     assert(!complete && rejected == 2);
     for (size_t i = 0; i < sizeof destination; ++i) assert(destination[i] == 165);
   }
-  tfv_packet_u descriptor = {0};
+  tfv_packet_u descriptor = {.raw = 0};
   assert(rudp_stream_receive(&rx, descriptor) < 0);
-  descriptor.type = 255; descriptor.flags = 211;
+  descriptor = (tfv_packet_u){.type = 255, .flags = 211, .value = 0};
   assert(rudp_stream_receive(&rx, descriptor) == 1); /* Resync after discard. */
   assert(rudp_stream_start(&tx, NULL, 1) < 0);
   assert(rudp_stream_start(&tx, source, 65536) < 0);
@@ -124,8 +124,8 @@ static void stream(size_t length, size_t capacity) {
 }
 
 static void scalars(void) {
-  rudp_scalar_tx_s tx = {0};
-  rudp_scalar_rx_s rx = {0};
+  rudp_scalar_tx_s tx = {.next_seq = 0};
+  rudp_scalar_rx_s rx = {.last_seq = 0};
   rudp_scalar_sample_s out[2];
   uint8_t bytes[8], lost[8];
   assert(rudp_scalar_encode(&tx, 65535, true, bytes, 7) == RUDP_ERR_BUFFER_FULL);
@@ -150,7 +150,7 @@ static void scalars(void) {
   tx.next_seq = (uint16_t)(rx.last_seq + 32768U);
   assert(rudp_scalar_encode(&tx, 501, false, bytes, 4) == 4);
   assert(rudp_scalar_decode(&rx, bytes, 4, false, out, 2) == 0);
-  rudp_motion_tx_s motion = {0};
+  rudp_motion_tx_s motion = {.scalar = {.next_seq = 0}};
   uint8_t pair[16];
   assert(rudp_motion_encode(&motion, 0, 5, 5, pair, 15) < 0 && !motion.samples);
   assert(rudp_motion_encode(&motion, 0, 5, 5, pair, 16) == 1);
@@ -166,7 +166,7 @@ static void scalars(void) {
 }
 
 static int timed_ack(rudp_session_s *session, uint16_t seq, uint32_t now) {
-  rudp_datagram_header_s header = {seq, 0, 0};
+  rudp_datagram_header_s header = {.ack = seq, .ack_channel = 0, .count = 0};
   uint8_t bytes[4];
   assert(rudp_pack_datagram_header(&header, bytes, 4) == 4);
   return rudp_session_process_datagram_at(session, bytes, 4, NULL, 0, now);
@@ -175,7 +175,7 @@ static int timed_ack(rudp_session_s *session, uint16_t seq, uint32_t now) {
 static void recovery(void) {
   rudp_session_s session;
   uint8_t bytes[1400];
-  tfv_packet_u payload = {0};
+  tfv_packet_u payload = {.raw = 0};
   assert(rudp_session_init(&session) == 0);
   rudp_channel_s *chan = &session.channels[0];
   assert(rudp_session_config_recovery(&session, 0, 100, 0, 2000) < 0);

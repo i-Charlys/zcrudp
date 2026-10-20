@@ -407,7 +407,8 @@ def generate():
     print("Rendering terminal scenario frames...")
     frames, durations = build_scenario_frames()
     print(f"Generated {len(frames)} frames. Encoding GIF...")
-    output_path = ROOT / "docs/visual/recovery.gif"
+    output_path = ROOT / "build/visual/recovery.gif"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     make_gif(WIDTH, HEIGHT, PALETTE, frames, durations, str(output_path))
     print(f"SUCCESS: Saved {output_path} ({output_path.stat().st_size:,} bytes)")
 

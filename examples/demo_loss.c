@@ -73,6 +73,7 @@ static void enqueue(const uint8_t *bytes, size_t len) {
   }
   for (unsigned i = 0; i < QUEUE_SIZE; i++) {
     if (!queue[i].used) {
+      /* Update the reused slot's bytes and metadata without clearing its MTU buffer. */
       memcpy(queue[i].bytes, bytes, len);
       queue[i].len = len;
       queue[i].due = now_ms() + latency + random_next() % (jitter + 1);
@@ -117,14 +118,16 @@ static int flush(int fd, const struct sockaddr_in *peer) {
     unsigned batch = n - done < 64 ? n - done : 64;
     for (unsigned i = 0; i < batch; i++) {
       delayed_s *d = &queue[order[done + i]];
-      iov[i].iov_base = d->bytes;
-      iov[i].iov_len = d->len;
-      msgs[i].msg_hdr = (struct msghdr){0};
-      msgs[i].msg_hdr.msg_iov = &iov[i];
-      msgs[i].msg_hdr.msg_iovlen = 1;
-      msgs[i].msg_hdr.msg_name = (void *)peer;
-      msgs[i].msg_hdr.msg_namelen = sizeof *peer;
-      msgs[i].msg_len = 0;
+      iov[i] = (struct iovec){.iov_base = d->bytes, .iov_len = d->len};
+      msgs[i] = (struct mmsghdr){
+          .msg_hdr = {
+              .msg_iov = &iov[i],
+              .msg_iovlen = 1,
+              .msg_name = (void *)peer,
+              .msg_namelen = sizeof *peer,
+          },
+          .msg_len = 0,
+      };
     }
     int s = sendmmsg(fd, msgs, batch, 0);
     if (s < 0) {
@@ -156,8 +159,8 @@ static int flush(int fd, const struct sockaddr_in *peer) {
 static void emit_reliable(uint16_t slot) {
   const rudp_frame_s *f = rudp_get_slot_frame(&session.channels[0].ctx, slot);
   uint8_t bytes[12];
-  rudp_datagram_header_s h = {session.channels[0].ctx.expected_seq_num, 0, 1};
-  rudp_record_s r = {0, RUDP_RECORD_FLAG_RELIABLE, f->header.seq_num, f->packet};
+  rudp_datagram_header_s h = {.ack = session.channels[0].ctx.expected_seq_num, .ack_channel = 0, .count = 1};
+  rudp_record_s r = {.channel_id = 0, .flags = RUDP_RECORD_FLAG_RELIABLE, .seq_num = f->header.seq_num, .payload = f->packet};
   rudp_pack_datagram_header(&h, bytes, sizeof bytes);
   rudp_pack_record(&r, bytes + 4, sizeof bytes - 4);
   enqueue(bytes, sizeof bytes);
@@ -242,9 +245,8 @@ int main(int argc, char **argv) {
   }
   if (!port || !peer_port || !seed || !interval || !timeout) { fprintf(stderr, "Ports, seed, interval and timeout must be positive\n"); return 2; }
   rng = seed;
-  struct sockaddr_in local = {0}, peer = {0};
-  local.sin_family = peer.sin_family = AF_INET;
-  local.sin_port = htons((uint16_t)port); peer.sin_port = htons((uint16_t)peer_port);
+  struct sockaddr_in local = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port)};
+  struct sockaddr_in peer = {.sin_family = AF_INET, .sin_port = htons((uint16_t)peer_port)};
   if (inet_pton(AF_INET, bind_ip, &local.sin_addr) != 1 || inet_pton(AF_INET, peer_ip, &peer.sin_addr) != 1) {
     fprintf(stderr, "Expected numeric IPv4 addresses\n"); return 2;
   }
@@ -273,7 +275,10 @@ int main(int argc, char **argv) {
   uint64_t start = now_ms(), next_rel = start, next_unrel = start;
   unsigned gen_rel = 0, gen_unrel = 0;
   int status = 0;
-  struct pollfd fds[2] = {{fd, POLLIN, 0}, {STDIN_FILENO, POLLIN, 0}};
+  struct pollfd fds[2] = {
+      {.fd = fd, .events = POLLIN, .revents = 0},
+      {.fd = STDIN_FILENO, .events = POLLIN, .revents = 0},
+  };
   char line[128]; size_t used = 0; int too_long = 0;
   while (running && (!duration || now_ms() - start < duration)) {
     uint64_t cur_ms = now_ms();
@@ -333,7 +338,7 @@ int main(int argc, char **argv) {
         delivered++;
       }
       if (session.channels[0].ack_pending) {
-        rudp_datagram_header_s ack = {session.channels[0].ctx.expected_seq_num, 0, 0};
+        rudp_datagram_header_s ack = {.ack = session.channels[0].ctx.expected_seq_num, .ack_channel = 0, .count = 0};
         rudp_pack_datagram_header(&ack, bytes, sizeof bytes);
         enqueue(bytes, 4);
         session.channels[0].ack_pending = 0;

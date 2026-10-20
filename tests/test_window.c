@@ -8,8 +8,7 @@
  */
 void test_window_lifecycle(void) {
     rudp_context_s ctx;
-    tfv_packet_u dummy;
-    dummy.raw = 0;
+    tfv_packet_u dummy = {.raw = 0};
 
     assert(rudp_init(&ctx) == 0);
     printf("  Testing RUDP_WINDOW_SIZE = %u (Max In-Flight Capacity = %u slots)...\n", 

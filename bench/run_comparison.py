@@ -15,6 +15,8 @@ import subprocess
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
+CORE_SOURCES = ["src/codec.c", "src/reliability.c", "src/session.c",
+                "src/session_tx.c", "src/session_rx.c", "src/rx.c", "src/io.c"]
 DEPS = ROOT / "build/compare-deps"
 VERSIONS = {
     "enet": ("lsalzman", "enet", "5a9c537fd464b3c6d3c55e1d3bd47588faf71b42",
@@ -60,7 +62,7 @@ def build():
              "-I" + str(ROOT / "bench"),
              "-I" + str(kcp), "-I" + str(enet / "include"), "-I" + str(enet_zpl / "include")]
     sources = [ROOT / "bench/compare_transport.c", ROOT / "bench/compare_enet_zpl.c",
-               ROOT / "src/rudp.c", kcp / "ikcp.c"]
+               *[ROOT / name for name in CORE_SOURCES], kcp / "ikcp.c"]
     sources += [enet / f"{name}.c" for name in ("callbacks", "compress", "host", "list", "packet", "peer", "protocol")]
     command = [compiler, *flags, *map(str, sources), "-o", str(ROOT / "build/compare_transport")]
     subprocess.run(command, check=True)
@@ -187,7 +189,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--messages", type=int, default=2400)
     parser.add_argument("--seeds", type=int, default=5)
-    parser.add_argument("--output", type=Path, default=ROOT / "docs/bench/comparison")
+    parser.add_argument("--output", type=Path, default=ROOT / "build/bench/comparison")
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--plot-only", action="store_true")
     args = parser.parse_args()
@@ -224,7 +226,7 @@ def main():
     if Path("/proc/cpuinfo").exists():
         cpu = next((line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines() if line.startswith("model name")), cpu)
     environment = {"host": platform.platform(), "cpu": cpu, "compiler": compiler, "build_command": command,
-                   "sources": VERSIONS, "zcrudp_source_sha256": hashlib.sha256((ROOT / "src/rudp.c").read_bytes()).hexdigest(),
+                   "sources": VERSIONS, "zcrudp_source_sha256": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in CORE_SOURCES},
                    "zcrudp_header_sha256": hashlib.sha256((ROOT / "include/protocol_rudp.h").read_bytes()).hexdigest(),
                    "harness_sha256": hashlib.sha256((ROOT / "bench/compare_transport.c").read_bytes()).hexdigest(),
                    "enet_zpl_bridge_sha256": hashlib.sha256((ROOT / "bench/compare_enet_zpl.c").read_bytes()).hexdigest(),
