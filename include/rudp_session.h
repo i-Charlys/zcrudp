@@ -132,6 +132,19 @@ int rudp_session_send_reliable(rudp_session_s *session, uint8_t channel_id,
  * pending ACKs, and in-flight reliable records into a single network packet up
  * to max_len (Intra-Tick Bundler).
  *
+ * The 4-byte datagram header is always packed, even when no record is eligible,
+ * and the primary channel's ack_pending flag is always cleared. A header-only
+ * result (exactly 4 bytes, count = 0) is a pure ACK: send it only when
+ * ack_pending was set before the call. Snapshot the flag first:
+ *
+ *   int ack_pending = session->channels[primary_ack_channel].ack_pending;
+ *   int len = rudp_session_build_datagram(...);
+ *   if (len > 4 || ack_pending) send(out_buf, len);
+ *
+ * Sending the header unconditionally floods the peer with duplicate ACKs, which
+ * triggers spurious fast retransmits and starves RTT sampling. Returning 0 for
+ * "nothing to send" is tracked in TODO.md (P0).
+ *
  * @param session Pointer to the session.
  * @param primary_ack_channel Channel ID to acknowledge in the 4-byte datagram
  * header.
@@ -139,8 +152,9 @@ int rudp_session_send_reliable(rudp_session_s *session, uint8_t channel_id,
  * @param max_len Maximum writable buffer capacity.
  * @param now Current timestamp in milliseconds.
  * @param timeout Retransmission timeout threshold in milliseconds.
- * @return Total bytes written (at least 4), RUDP_ERR_BUFFER_FULL if even the
- * header does not fit, or RUDP_ERR_INVALID_ARG.
+ * @return Total bytes written (at least 4: the datagram header alone when no
+ * record is eligible), RUDP_ERR_BUFFER_FULL if even the header does not fit,
+ * or RUDP_ERR_INVALID_ARG.
  */
 int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_channel,
                                 uint8_t *out_buf, size_t max_len, uint32_t now,

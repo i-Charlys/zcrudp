@@ -97,7 +97,7 @@ an extra occupancy counter and keeps the empty/full test constant and local.
 `rx_buffer` is local reassembly memory. A session channel stores reliable
 records that arrived ahead of a missing sequence; these bytes are not a second
 UDP payload and are not used by unreliable delivery. `rx_present` marks the
-occupied positions. `drain_channel()` releases only the contiguous prefix and
+occupied positions. `rudp_rx_drain()` releases only the contiguous prefix and
 advances the cumulative ACK only when records are copied to caller-owned
 output. The single-context `rudp_recv()` has no such reassembly buffer and
 drops out-of-order frames.

@@ -23,6 +23,12 @@ Application profiles are consumers of the engine, not limits on its scope.
   time on embedded targets. Require no dynamic loader, hidden heap allocation,
   global lock or plugin discovery in the data path. Measure dispatch overhead;
   dynamic loading remains an optional host facility.
+- [ ] **Bound the dynamic extension surface**: only three subsystems need
+  replaceable callback interfaces (a light per-session vtable): transport I/O
+  sink/source (socket, simulation, lwIP), packet-protection envelope (AEAD /
+  Noise / DTLS / cleartext), and the external storage pool
+  (`RUDP_EXTERNAL_RX_STORAGE`). Codec, ARQ and scheduling stay direct C11 in the
+  core to preserve inlining, branch predictability and audit simplicity.
 - [ ] **Replace recovery without forking**: Demonstrate an external recovery
   provider using only installed public headers, while preserving the selected
   delivery contract. Publish its memory, traffic and latency costs and verify
@@ -76,27 +82,43 @@ keep one implementation of each contract.
 
 - [ ] **Transactional TX and a common time contract first**: Share duration
   validation, saturating backoff, RTT sampling and attempt-count semantics between
-  standalone and session paths. Distinguish preparation, backend acceptance/commit,
-  physical egress when observable, and asynchronous buffer release. ACK validation
-  must not acknowledge merely queued, never-committed data. Prove the contract with
+  standalone and session paths. The `prepare -> submit -> commit/cancel` egress
+  split is specified once under Cross-cutting priority ("Make egress transactional");
+  keep one implementation. Distinguish backend acceptance/commit, physical egress
+  when observable, and asynchronous buffer release. ACK validation must not
+  acknowledge merely queued, never-committed data. Prove the contract with
   a bounded simulated backend that refuses sends and delays completions.
 - [ ] **Separate session lifetime from protection and health**: Define a bounded
   active/candidate session manager, protection-provider lifecycle and independent
-  health state. A candidate failure or injected HELLO must not destroy the active
-  session; activate a replacement only after authentication, freshness and explicit
-  confirmation. Bind timers, events and I/O operations to a local generation.
-  Old completions cannot mutate the new session but must still release their loans.
+  health state. Model the lifecycle explicitly as CLOSED -> CANDIDATE -> CONFIRMED
+  -> ACTIVE -> DRAINING -> CLOSED, with at most one active and one candidate;
+  activation must be idempotent. A candidate failure or injected HELLO must not
+  destroy the active session; activate a replacement only after authentication,
+  freshness and explicit confirmation. Bind timers, events and I/O operations to a
+  local generation. Old completions cannot mutate the new session but must still
+  release their loans.
 - [ ] **Define delivery outcomes across reconnection**: Report an explicit result
   such as `DELIVERY_UNKNOWN` for unresolved messages when replacing an incarnation.
   Do not assume that a missing ACK means the application never received the data.
   Transparent replay requires a separate application identity/deduplication contract.
 - [ ] **Establish unreliable references explicitly**: Remove first-record baseline
-  selection in the established-session profile. Specify behavior after more than
+  selection in the established-session profile. Distinguish `UNRELIABLE_UNORDERED`
+  (delivery without retransmission, no sequence reference needed) from
+  `UNRELIABLE_SEQUENCED` (newer-only delivery with an authentically established
+  initial reference); the 512 bound becomes a plausibility policy, not an
+  anti-injection defense. Specify behavior after more than
   `RUDP_UNRELIABLE_MAX_AHEAD` missing emissions, including authenticated resync or
   incarnation replacement, instead of leaving the channel indefinitely wedged.
+  The near-term re-anchoring fix is tracked as a P0 defect below; the initial
+  references belong to the authenticated `SESSION_INIT` exchange described in the
+  Phase 5 wire redesign.
 - [ ] **Specify sequence reuse limits**: Authentication alone does not prove safe
   reuse of 16-bit sequences. Demonstrate bounded packet age and reuse conditions,
   add an authenticated reliability epoch, or define a wider-sequence wire profile.
+  Choose explicitly one profile: compact bounded 16-bit (with demonstrated
+  lifetime/reuse bounds), an authenticated external reliability epoch, or a
+  widened-sequence v2 wire format; for high-throughput servers, widening the
+  sequences is generally preferable to multiplying handshakes to preserve 16 bits.
   Test delayed authentic ACKs across reuse, exact half-range distances and wrap.
 - [ ] **Make liveness an explicit policy**: Provide `OFF`, `RX_IDLE` and `PROBED`
   modes with a documented default composition and validated configuration. Separate
@@ -115,29 +137,164 @@ keep one implementation of each contract.
   anti-replay, MTU overhead, handshake peak RAM and established latency. Noise and
   a proprietary PSK envelope remain alternatives requiring their own qualification
   and integration specification. No implicit downgrade and no security claim based
-  only on a mock provider or an encrypt/decrypt interface.
+  only on a mock provider or an encrypt/decrypt interface. Acceptance criteria for
+  any provider: a forged ACK causes no TX withdrawal or ACK progress; an authentic
+  ACK beyond the last emission is rejected semantically; a packet from an old
+  incarnation has no effect on the new one; an injected HELLO never alters the
+  active session; an unauthenticated RESET is ignored; a duplicated handshake is
+  idempotent; no nonce/key pair is reused (instrumented); resource use stays bounded
+  under saturation; entropy failure closes explicitly with no fallback.
 - [ ] **Benchmark proposed recovery policies before adoption**: Compare oldest-slot
   recovery against the existing policy under multiple losses and finite queues.
-  Keep a distinct TLP deferred until it can share or replace existing probe work.
+  Keep a distinct TLP deferred until it can share or replace the Phase 5 tail-loss
+  probe and early-tail-copy work (one TLP specification per wire-format generation).
   Preserve the fixed-point estimator unless a measured alternative is preferable;
   report example constants, wire-cost calculations and measured results separately.
 - [ ] **Complete the closure evidence**: Preserve injection/restart reproductions,
   kill the surviving M5 bounds-check mutation, automate mutation reports, and test
   stale generations, old authenticated packets, candidate failure, blocked backends,
-  time wrap, long pauses and resource exhaustion. Clean up `SECURITY.md` and API
-  hints; close the audit only with the implemented scope and integrated commit.
+  time wrap, long pauses and resource exhaustion. `SECURITY.md` was rewritten
+  2026-10-22 (merged-file corruption fixed, false 512-bound claim corrected); keep
+  API hints synchronized with the headers. Close the audit only with the
+  implemented scope and integrated commit.
 
 ## Remaining correctness fixes
 
-- [ ] **Validate scatter/gather collections**: Check `len` against remaining
+- [x] **Validate scatter/gather collections**: Check `len` against remaining
   capacity before addition in `rudp_iovec_add()`. In `rudp_iovec_flatten()`, validate
   count, pointers and the sum of segment lengths before copying; do not trust the
-  public `total_len` field. Add overflow and malformed-collection regressions.
+  public `total_len` field. Fixed 2026-10-22: overflow-safe addition
+  (`len > 65535 - total_len`), per-segment validation and `count` bound in
+  `rudp_iovec_flatten()`; regressions in `tests/test_phase4.c` (`iovec_bounds`).
 - [ ] **Unify retransmission arithmetic**: Use saturating backoff in standalone
   and session paths, test extreme timeout inputs, and specify how the session
-  builder reports retry-limit disconnection.
+  builder reports retry-limit disconnection. The standalone `rudp_tick()` still
+  computes `timeout << shift` without saturation (defined wraparound, but wrong
+  for `timeout >= 2^26` ms); the session path already saturates via
+  `backed_off_timeout()`. Also close the retry-limit gap between the two engines:
+  the session builder emits one retransmission too many (12 wire transmissions
+  against 11 for standalone), keeps packing records of a channel it has just
+  declared dead, and returns a positive length with no disconnect signal
+  (reproduced by `poc_retry_limit`).
 - [ ] **Validate record flags before mutation**: Reject unknown and conflicting
-  combinations rather than silently prioritizing ACK over RELIABLE.
+  combinations rather than silently prioritizing ACK over RELIABLE. Also enforce
+  channel capabilities at reception: a `RELIABLE` record addressed to a channel
+  configured `UNRELIABLE` must not be accepted into `rx_buffer` and acknowledged.
+
+## P0: confirmed defects (review 2026-10-22)
+
+Reproduced by the proof-of-concept suite (`zcrudp_poc`, ASan/UBSan) against
+commit `0c5d742`; measurements quoted inline. Checked entries landed with the
+2026-10-22 corrective patch.
+
+- [x] **Relocatable shared install**: `INSTALL_RPATH` set to `$ORIGIN` /
+  `@loader_path` on every module; `make test-modules` passes with
+  `BUILD_SHARED_LIBS=ON`.
+- [x] **C++-consumable headers**: `RUDP_STATIC_ASSERT` maps to `static_assert` in
+  C++; `make test-cxx` compiles every public header with g++ (C++11/17/20) and CI
+  runs g++ and clang++. Document that `-pedantic` C++ is unsupported while
+  `tfv_packet_u` keeps an anonymous struct.
+- [x] **Scatter/gather overflow**: see "Validate scatter/gather collections" above
+  (`poc_iovec`: 4 GiB read under ASan before the fix).
+- [x] **Fast-retransmit flag on an unsent slot**: the first transmission clears a
+  pending fast-retransmit request (`poc_fr_unsent` produced an immediate duplicate
+  with `retries = 1` before the fix).
+- [ ] **Unreliable re-anchoring after outages**: after K consecutive self-consistent
+  records rejected as too far ahead, adopt the newest as the reference. Regression:
+  a 600-packet outage at 240 Hz must recover within K packets (today: 64,936
+  rejected, ~270 s of blackout; `poc_unreliable_wedge`).
+- [ ] **Fresh/gap ACK signal**: count duplicate ACKs from an explicit gap
+  indication, not from `count == 0`. Today a piggybacked ACK on a data datagram
+  never counts, so Tri-ACK is neutralized whenever the receiver also sends data
+  (repair in 204 ms instead of 68 ms with fixed RTO 200 ms; `poc_bidir_triack`,
+  `poc_unrel_ack`). Interim, wire-compatible fix: emit an explicit ACK record for
+  the primary channel when an out-of-order or stale record set `ack_pending`.
+  With the wire redesign, reserve a "fresh/gap ACK" bit in the compact ACK prefix
+  (see Phase 5) so Tri-ACK counting no longer depends on `count == 0`.
+- [ ] **Builder reports "nothing to send"**: `rudp_session_build_datagram()`
+  always packs the 4-byte header, clears `ack_pending` and returns at least 4.
+  Callers must snapshot `ack_pending` before the call and send only when
+  `len > 4 || ack_pending`. Return 0 (or an out-flag) when no record and no ACK
+  is pending; keepalives get their own control kind that never counts as a
+  duplicate ACK. Regression: per-tick heartbeats currently cause 100% spurious
+  retransmissions and the adaptive estimator never samples (`srtt_scaled = 0`;
+  `poc_heartbeat`).
+- [ ] **Retry-limit parity and signal**: session and standalone both stop after
+  1 + `RUDP_MAX_RETRIES` transmissions; the build that declares a channel dead
+  packs none of its records and reports it (return code or dead-channel mask).
+  Unit-test the session disconnect path (`session_tx.c`, never executed by the
+  current suite).
+- [ ] **Reject `timeout == 0` in fixed mode** (or define it as "no timer
+  retransmission"): today every slot is eligible at every build and the channel
+  dies after 12 calls at the same timestamp, while `rudp_tick(timeout = 0)` expires
+  nothing (`poc_timeout0`).
+- [ ] **Restore the configured initial RTO on `reset_channel`**: reset currently
+  re-arms the RTO at its maximum, so the first loss after a reset waits up to
+  60 s (`poc_reset_rto`). Store `rto_initial_ms`.
+- [ ] **Count duplicate ACKs only for transmitted slots**: duplicate ACKs are
+  counted as soon as a slot is queued, not only once it is on the wire.
+- [ ] **Motion profile**: compute jerk only from the fourth sample; the third
+  sample compares against an acceleration initialized to 0 and emits a spurious
+  clone for x = t^2 (`poc_motion`).
+- [ ] **Entropy helper**: `rudp_calc_entropy` XORs inputs with overlapping bits
+  ((0x0100,0,0), (0,1,0) and (0,0,0x0100) hash identically; `poc_reset_rto`).
+  Mix inputs without overlapping bits, or remove the helper until used; wire
+  `session_seed` through the API or delete it together with the unused
+  `active_channels` and `last_ack_sent` bookkeeping.
+- [ ] **Byte-order macros**: `rudp_htons`/`rudp_ntohs` and friends are identity on
+  MSVC (no `__BYTE_ORDER__`). Remove them from the public API (production code
+  serializes explicitly) or detect Windows; test the actual byte layout, not a
+  round trip.
+- [ ] **Package metadata**: `project(VERSION)`, `VERSION`/`SOVERSION` on shared
+  modules, a ConfigVersion file, hidden visibility for internal symbols
+  (`rudp_rx_accept`, `rudp_rx_drain` are exported today), and installation of
+  only the enabled module headers.
+- [x] **SECURITY.md rewrite**: the file interleaved two versions (duplicated
+  titles, paragraphs cut mid-sentence) and claimed the 512 unreliable bound
+  "prevents malicious desynchronization from muting telemetry channels", which is
+  false (65 forged records mute 135 s at 240 Hz; `poc_unrel_mute`). Rewritten
+  2026-10-22 as a single version with the measured limits and the four attacker
+  levels.
+
+## P1: near-term features and API additions (review 2026-10-22)
+
+- [ ] **Unreliable intra-tick bundling**: `rudp_session_send_unreliable()` packs a
+  standalone 12-byte datagram per call, so N unreliable updates in one tick emit N
+  UDP packets instead of one bundled datagram. Add a lightweight intra-tick staging
+  queue (no retransmission) so `rudp_session_build_datagram()` can aggregate
+  multiple `UNRELIABLE` and `RELIABLE` records up to the MTU.
+- [ ] **Reliable unordered delivery**: `RUDP_CHANNEL_FLAG_ORDERED` is inert today
+  (every reliable channel is ordered). Implement `RELIABLE` without `ORDERED`:
+  deliver any in-window record immediately (tracked in the `rx_present` bitmap) and
+  advance `expected_seq` over the contiguous prefix only. For independent,
+  idempotent events (sound triggers, impacts, RPCs) this removes head-of-line
+  blocking within the channel and needs only the 8-byte bitmap, not the full
+  `rx_buffer[WINDOW_SIZE]`.
+- [ ] **`rudp_session_next_wakeup()`**: return the exact delay in milliseconds
+  before the next in-flight slot expires (0 when an `ack_pending`, a
+  `fast_retransmit` or a never-transmitted slot is waiting), so `poll`/`epoll`/
+  `kqueue` loops stop guessing between fixed 1 ms polling and 5 ms idle waits.
+  Complements the "expose the next wakeup" task in Sessions, protection and timing.
+- [ ] **Stream reset API**: add `rudp_stream_tx_reset()` / `rudp_stream_rx_reset()`
+  and handle a stream descriptor arriving mid-stream (currently swallowed as 4
+  data bytes) so an emitter reset does not desynchronize the receiver until the
+  application manually clears `rx->active`.
+
+## P2: test and CI gaps
+
+Review-specific gaps (2026-10-22); the broader tooling roadmap lives in Phase 6.
+
+- [ ] Unit tests for `io.c` beyond the two regressions in `test_phase4.c`, and
+  coverage of the session builder's retry-limit disconnect path (`session_tx.c`,
+  0% covered today).
+- [ ] CI matrix: macOS (clang), Windows MSVC, 32-bit and big-endian
+  cross-compiles (static asserts), C++ consumers (g++/clang++ added 2026-10-22),
+  shared-install consumers (`test-modules` fixed 2026-10-22), coverage gate, fuzz
+  job.
+- [ ] Benchmarks: bidirectional traffic, per-tick heartbeats, reset/reconnect,
+  outage above 512 packets; KCP profile with explicit `ikcp_flush()` per tick and
+  `ikcp_wndsize(kcp, 64, 128)` (default KCP window is 32 and `ikcp_nodelay`
+  imposes a >= 10 ms flush interval, biasing the comparison).
 
 ## Cross-cutting priority: modular architecture and explicit ownership
 
@@ -210,8 +367,9 @@ claims. Preserve the existing wire format during the initial refactoring.
   protocol-ACK and asynchronous-I/O completion lifetimes. Start with a flattening
   reference adapter; compare its bytes with scatter-gather output. Do not send
   raw C structs as wire bytes or remove complete validation before state mutation.
-- [ ] **Make egress transactional**: Implement the existing phase-7
-  `prepare -> submit -> commit/cancel` prerequisite before asynchronous backends.
+- [ ] **Make egress transactional** (canonical `prepare -> submit -> commit/cancel`
+  contract; referenced by the Sessions section above and by the Phase 7 page-loan
+  track): Implement the prerequisite before asynchronous backends.
   A failed or blocked submission must not consume ACK-pending state, advance
   retries, or start a send timer. Evaluate reserve/fill/commit payload publication
   only for large streams; define cancellation and outstanding-reservation limits.
@@ -304,6 +462,7 @@ related work.
   - Standardize include paths: Replace `#include "../include/..."` with `#include "protocol_rudp.h"`.
   - Prefix or clean up `IS_LITTLE_ENDIAN` macro to prevent public namespace pollution.
   - Clean up dead header scaffolding: remove unused `RUDP_PACKED`, `RUDP_WIRE_DYNAMIC_SIZE -1`, and unused endian helpers.
+  - Compile public headers as C++ in CI: `RUDP_STATIC_ASSERT` maps to `static_assert` in C++; `make test-cxx` builds every public header with g++ (C++11/17/20); CI runs g++ and clang++ (added 2026-10-22). `-pedantic` C++ remains unsupported while `tfv_packet_u` uses an anonymous struct.
 - [x] **6. API Ergonomics & Context Encapsulation**:
   - Add accessor `const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx, uint16_t slot_idx)` to allow reading expired frames without piercing context internals.
   - Symmetrize API return values (`rudp_pack_frame` vs `rudp_unpack_frame`).
@@ -314,7 +473,7 @@ related work.
   - Add GitHub Actions CI workflow (`.github/workflows/ci.yml`) running standard and ASan test suites.
 - [x] **8. Documentation, Style & Security Policy**:
   - Fix `README.md` Quick Start example to use $N+1$ convention (`ACK=1` acknowledges seq 0), `rudp_tick_result_s`, and `make asan`.
-  - Re-sync `ARCHITECTURE.md` with 1036-byte context layout, 16-byte slot diagram, modular serializers, and dead peer state machine.
+  - Re-sync `ARCHITECTURE.md` with 1040-byte context layout, 16-byte slot diagram, modular serializers, and dead peer state machine.
   - Add `.clang-format` configuration for consistent code styling across C and C++ integrations.
   - Add `SECURITY.md` stating cleartext transport notice and recommending DTLS for untrusted networks.
 
@@ -324,7 +483,7 @@ related work.
 *Depends on Phase 3 working bidirectional engine.*
 
 - [x] **RX Out-of-Order Reassembly Buffer**: Bounded payload slots + bitmap, wrap-safe ordered drain and explicit application backpressure via `rudp_session_poll()`. Selective storage with cumulative ACKs, not selective ACK signaling; see `docs/PHASE4.md`.
-- [x] **Reliable paced-loss completion regression**: All five seeds of both 2,400-message `240hz-loss1` and `240hz-loss5` scenarios complete with unchanged workload, timeout, backoff and retry limit. Regression in `tests/test_comparison.py`; baseline preserved in `docs/bench/before-phase4/`.
+- [x] **Reliable paced-loss completion regression**: All five seeds of both 2,400-message `240hz-loss1` and `240hz-loss5` scenarios complete with unchanged workload, timeout, backoff and retry limit. Regression in `tests/test_comparison.py`; baseline data preserved in `docs/bench/comparison/`.
 - [x] **3-Tier Multi-Resolution Packet Support**:
   - [x] **Tier 1 (4 bytes)**: Handle short header-only packets (`seq_num` + `ack`) for pure ACKs, heartbeats/pings, and connection signals (`rudp_pack_ack()`, `rudp_unpack_ack()`).
   - [x] **Tier 2 (8 bytes)**: Standard game frames (Header 4B + TFV 4B) with atomic modular encoders/decoders.
@@ -373,17 +532,17 @@ related work.
   Replace the current session-only timing policy with one bounded recovery engine used directly by `rudp_context_s` and wrapped by `rudp_session_s`. This is an intentional wire break: both endpoints must use the new format; do not add downgrade negotiation or preserve decoding of the previous format.
   - **Preserve the clean data format**: Keep full 16-bit `seq_num` and `ack` values and keep normal frames/records at 8 bytes. Do not steal sequence bits, payload bits, or TFV type values. Keep the existing 16-bit serial arithmetic and the `65535 -> 0` behavior. Encode control metadata with masks and shifts, never C bitfields.
   - **Compact homogeneous runs in session datagrams**: Avoid paying a four-byte record header for every four-byte payload when several consecutive records share a channel and kind. Keep the four-byte datagram header, then encode each run as `{base_seq16, channel_kind8, item_count8}` followed by `item_count` raw four-byte TFV payloads; sequence numbers after `base_seq` are implicit. A datagram therefore costs `4 + ack_prefix_bytes + sum(4 + 4*N_run)` instead of `4 + 8*N`. One isolated data record remains 12 bytes, two same-run records fall from 20 to 16 bytes, and ten fall from 84 to 48 bytes when no extra channel ACK is present. Permit multiple runs for mixed channels, precede them with the compact ACK prefix described below, and keep FEC source and repair runs in independent UDP loss domains. Require strict length validation, bounded run counts, wrap-safe implicit sequence expansion, and no cross-tick batching delay.
-  - **Dedicated 4-byte control exchange**: Reuse the otherwise-unused `seq_num` word of standalone 4-byte ACKs. Packet length already distinguishes a control header from an 8-byte data frame. Define its low byte as a packed control byte with channel in bits 0..1, kind in bits 2..4 (`ACK`, `RTT_PROBE`, `RTT_REPLY`, `RECOVERY_ACK`, `HELLO`, `HELLO_ACK`, `RESET`), and a three-bit control epoch in bits 5..7; keep the high byte reserved and zero. In the session header, carry the same control byte in `ack_channel` when `count == 0`. Require `RUDP_MAX_CHANNELS <= 4`; data datagrams keep kind/epoch zero. Normal ACK/probe request/reply controls continue to carry the full 16-bit cumulative ACK.
-  - **Compact ACK prefix for ACK-only and mixed datagrams**: Let the four-byte header acknowledge the primary channel, then place every additional pending channel ACK before the data runs as four bytes `{channel_id8, ack_flags8, ack16}` instead of the current eight-byte `rudp_record_s` with an unused TFV payload. Pack the last header byte as `ack_count` (2 bits, 0..3) plus `run_count` (6 bits, 0..63); make the builder split a datagram before the run count overflows and test the bound against worst-case channel/kind alternation. Validate exactly the ACK prefix first and then every declared run before mutating state. Four simultaneous channel ACKs cost 16 bytes (`4 + 3*4`) instead of 28 (`4 + 3*8`), while a mixed datagram pays the same compact prefix and no additional UDP/IP packet. Do not force an odd entry count or emit padding ACKs: UDP accepts arbitrary lengths, bytewise codecs do not benefit from total-length alignment, and only genuinely pending entries may count as deliberate duplicate ACKs for Tri-ACK. Reserve ACK space before scheduling data, as the current builder already does.
+  - **Dedicated 4-byte control exchange**: Reuse the otherwise-unused `seq_num` word of standalone 4-byte ACKs. Packet length already distinguishes a control header from an 8-byte data frame. Define its low byte as a packed control byte with the channel in bits 0..2 (up to 8 channels; if `RUDP_MAX_CHANNELS` must exceed 8, dedicate a full byte to the channel in control frames), kind in bits 3..5 (`ACK`, `RTT_PROBE`, `RTT_REPLY`, `RECOVERY_ACK`, `HELLO`, `HELLO_ACK`, `RESET`), and a two-bit control epoch in bits 6..7; keep the high byte reserved and zero. Do not hard-cap the wire format at 4 channels: inputs + state + stream + telemetry + audio/VoIP exceed 4 quickly. In the session header, carry the same control byte in `ack_channel` when `count == 0`; data datagrams keep kind/epoch zero. Normal ACK/probe request/reply controls continue to carry the full 16-bit cumulative ACK.
+  - **Compact ACK prefix for ACK-only and mixed datagrams**: Let the four-byte header acknowledge the primary channel, then place every additional pending channel ACK before the data runs as four bytes `{channel_id8, ack_flags8, ack16}` instead of the current eight-byte `rudp_record_s` with an unused TFV payload. Pack the last header byte as `ack_count` (2 bits, 0..3) plus `run_count` (6 bits, 0..63); make the builder split a datagram before the run count overflows and test the bound against worst-case channel/kind alternation. Validate exactly the ACK prefix first and then every declared run before mutating state. Four simultaneous channel ACKs cost 16 bytes (`4 + 3*4`) instead of 28 (`4 + 3*8`), while a mixed datagram pays the same compact prefix and no additional UDP/IP packet. Do not force an odd entry count or emit padding ACKs: UDP accepts arbitrary lengths, bytewise codecs do not benefit from total-length alignment, and only genuinely pending entries may count as deliberate duplicate ACKs for Tri-ACK. Reserve ACK space before scheduling data, as the current builder already does. Reserve a fresh/gap ACK indication for the primary ACK (control byte when `count == 0`, `ack_flags8` in the compact prefix for mixed datagrams) so duplicate-ACK (Tri-ACK) counting no longer depends on `count == 0`; see the P0 fresh/gap ACK defect.
   - **RTT samples come only from probes**: At the first reliable transmission, emit one standalone `RTT_PROBE`; the receiver immediately returns `RTT_REPLY` with the same epoch and its current cumulative ACK. Store the local probe-send time and accept a sample only for the matching outstanding epoch. Data ACKs advance reliability but never train SRTT, so retransmission ambiguity, cumulative jumps, RX buffering, and FEC reconstruction cannot contaminate the estimator. Later probes are sent only when the estimate is stale or recovery indicates a possible path change, with at most one outstanding probe and no probe retransmission loop.
   - **Audits #1/#2/#6: restart-safe establishment and first-unreliable anchoring without permanent header cost**: Add a bounded per-channel `HELLO`/`HELLO_ACK` state machine before accepting data. For these control kinds, reinterpret the 16-bit ACK word as a caller-seeded random initial sequence number; each direction installs the peer's fresh reliable and unreliable sequence anchor and resets old TX/RX/FEC/probe state atomically. Never let the first unreliable record establish an arbitrary receive baseline: it must fall within `RUDP_UNRELIABLE_MAX_AHEAD` of the sequence negotiated for that channel. Reject normal data and ACK controls until establishment completes, rate-limit `HELLO`/`RESET`, and test simultaneous open, one-sided restart, an arbitrary first unreliable sequence, blind ACK/data injection before establishment, lost handshake controls, delayed packets from the prior epoch, and sequence wrap. This fixes restart wedging and first-record baseline poisoning, and makes blind sequence guessing harder without enlarging normal frames. A 16-bit random anchor is only probabilistic hardening (at most 65,536 possibilities), not authentication: cleartext deployments remain vulnerable to an observer or accurate injector and still require the documented DTLS/WireGuard/AEAD wrapper on untrusted networks.
   - **Core-owned adaptive state**: Move `srtt_scaled`, `rttvar_scaled`, `rto_ms`, `rto_min_ms`, `rto_max_ms`, and `last_rtt_sample` from `rudp_channel_s` into `rudp_context_s`; make session recovery call the core implementation instead of maintaining a second timer path. The expected default standalone context cost is +24 bytes (1040 -> 1064), while the session should not duplicate those fields.
   - **Recover the timeout-counter RAM**: Store the retransmission count and timeout-backoff exponent in the low/high nibbles of the existing slot retry byte. Add masked accessors and compile-time bounds (`RUDP_MAX_RETRIES <= 15`, backoff exponent <= 15); remove `timeout_backoffs[RUDP_WINDOW_SIZE]`. With a 64-slot window and four channels, target approximately 1340 bytes/channel and 5364 bytes/session before any explicit FEC decoder state. Confirm every size with `_Static_assert` rather than relying on these estimates.
-  - **Exactly one early tail copy**: While the initial RTT probe is outstanding, continue sending new data and allow one copy of the oldest unacknowledged slot at a configurable 100--150 ms delay. This copy is loss exploration, not an RTT sample. Once the probe reply seeds SRTT/RTTVAR, use the adaptive timer; a separate conservative RTO remains the final recovery timer.
+  - **Exactly one early tail copy**: While the initial RTT probe is outstanding, continue sending new data and allow one copy of the oldest unacknowledged slot at a configurable 100--150 ms delay. This copy is loss exploration, not an RTT sample. Once the probe reply seeds SRTT/RTTVAR, use the adaptive timer; a separate conservative RTO remains the final recovery timer. The wire-compatible precursor for the current format is the Phase 5 tail-loss probe below.
   - **Audit #7: automatic liveness on every valid receive path**: Update `last_rx_time` only after complete wire validation for standalone controls, core frames, session headers, and every addressed channel in a multi-channel datagram. Reuse the rate-limited RTT probe as keepalive traffic when idle. Expose session-level health without requiring applications to remember a separate `rudp_touch()` call, and test idle, unreliable-only, one-way, malformed-input, and clock-wrap cases.
   - **Observable rejection counters**: Add bounded saturating counters (or an optional caller-owned statistics sink) for stale/future ACKs, implausible unreliable jumps, malformed datagrams, out-of-window reliable records, FEC failures, probe timeouts, and rate-limited controls. Rejected unreliable jumps must remain observable instead of being indistinguishable from an idle poll; preserve `RUDP_UNRELIABLE_MAX_AHEAD` as a configurable plausibility bound.
   - **Probe and repair budget**: Share one per-context pacing budget across original data, ACKs, RTT controls, tail copies, retransmissions, and parity. At most one RTT probe and one early tail copy may be outstanding; neither can recursively arm another. New application data continues during calibration, while parity and speculative repairs must yield when the finite-rate link is already saturated. Define epoch wrap, delayed replies, reset, clock wrap, ACK loss, reordering, application stalls, and retry-limit transitions before implementation.
-  - **Cross-tier conformance tests**: Feed identical traces through the standalone context and session wrapper and require identical sequence advancement, RTT samples, RTO updates, retransmission choices, and disconnect decisions. Fuzz the packed codec separately from the state machine, then run finite-bandwidth/queue benchmarks reporting completion, useful bytes, total wire bytes, p99 and worst-case latency, CPU, and exact static RAM.
+  - **Cross-tier conformance tests**: Feed identical traces through the standalone context and session wrapper and require identical sequence advancement, RTT samples, RTO updates, retransmission choices, and disconnect decisions. First case to write: the retry-limit gap (standalone stops after 1 + `RUDP_MAX_RETRIES` transmissions, the session builder after one more; see P0). Fuzz the packed codec separately from the state machine, then run finite-bandwidth/queue benchmarks reporting completion, useful bytes, total wire bytes, p99 and worst-case latency, CPU, and exact static RAM.
 - [ ] **Revisit recovery memory / traffic / latency tradeoffs (explicitly deferred)**: Preserve the measured adaptive-recovery baseline (5,620 B/session, +352 B versus phase 4; about +9% UDP-payload traffic at 5% loss, p99 median 57 ms versus 263 ms). Investigate packed timeout counters, optional recovery-state storage, shared RTT estimation only where path/queue semantics permit it, and selective ACK extensions that suppress redundant retransmissions. Target retaining the latency improvement while reducing added RAM and returning toward phase-4 traffic; these are experimental objectives, not guarantees. Validate with unchanged baseline workloads plus finite-rate links, bounded queues, reordering, correlated loss and application stalls before claiming a simultaneous improvement.
 - [ ] **Close residual audit and public-API drift**:
   - Decide and enforce `RUDP_CHANNEL_FLAG_ORDERED` semantics or remove the inert flag; keep rejecting reliable sends on channels without `RUDP_CHANNEL_FLAG_RELIABLE`. Rename `RUDP_CHANNEL_FLAG_ENCRYPTED` to an explicit integration hint or remove it so no caller can mistake metadata for active encryption.
@@ -393,11 +552,11 @@ related work.
 - [ ] **Estimable / Dead-Reckoning Classification**: Categorize continuous data for local client-side physics interpolation/extrapolation on packet drop.
 - [ ] **Transport recovery roadmap (same messages and delivery guarantees as ENet / KCP-fast)**:
   - [ ] **Selective ACKs**: Specify a versioned, bounded extension exposing retained RX messages so the sender suppresses unnecessary retransmissions. Preserve sequence wrap safety, RX retention and flow-control invariants; an absent bit is not proof of loss. Measure control-byte overhead against saved retransmissions.
-    - **Wire**: Extend the 4-byte unified datagram header (`ack`, `ack_channel`, `count`) with an optional, versioned 4- or 8-byte SACK bitmask anchored at `ack` (the cumulative ACK stays $N+1$ and authoritative). Gate it behind a capability/flag bit so the header stays 4 bytes when unused and peers that do not negotiate it ignore the trailing bytes; keep the bounded length check strict (`4 [+ mask] + count * 8`).
+    - **Wire**: Extend the 4-byte unified datagram header (`ack`, `ack_channel`, `count`) with an optional, versioned 4- or 8-byte SACK bitmask anchored at `ack` (the cumulative ACK stays $N+1$ and authoritative). Gate it behind a capability/flag bit so the header stays 4 bytes when unused and peers that do not negotiate it ignore the trailing bytes; keep the bounded length check strict (`4 [+ mask] + count * 8`). This is the interim form for the current wire format; if the breaking redesign above is adopted, carry the SACK presence in the redesigned control byte / compact ACK prefix instead of extending the legacy header, and implement only one SACK wire form per format generation.
     - **Sender behaviour**: On the first acknowledged gap, retransmit only the missing sequence(s) immediately with no timer wait, and do not invalidate or re-send segments the RX side already retains past the hole (no go-back-N). A micro-delay or queue swap that only reorders later packets must not arm a retransmission for them.
     - **Bounds**: Mask covers strictly the current in-flight window, is wrap-safe (RFC 1982 distance), and is advisory only — the cumulative `ack` still drives window advance and Tri-ACK. Cap probe/repair rate so a flapping gap cannot create a retransmission storm.
   - [ ] **Reordering-tolerant time-based loss detection**: Combine new delivery evidence and elapsed transmission time with a tested reordering allowance; distinguish retransmission attempts from timeout backoff. Test lost repairs, repeated/stale ACKs, clock wrap and spurious retransmissions. Do not retransmit unconditionally on the first observed gap.
-  - [ ] **Tail-loss probe**: Add a bounded, rate-limited probe mechanism for application-limited traffic with no later messages to reveal a lost tail. Specify rearming, ACK-loss handling, retry limits and interaction with normal RTO; ensure probes do not create ACK loops or transmission storms.
+  - [ ] **Tail-loss probe** (canonical TLP specification; the Phase 5 redesign's early tail copy and the Phase 7 RACK-TLP track generalize it): Add a bounded, rate-limited probe mechanism for application-limited traffic with no later messages to reveal a lost tail. Specify rearming, ACK-loss handling, retry limits and interaction with normal RTO; ensure probes do not create ACK loops or transmission storms.
     - **Problem**: When the last packet of a salvo is lost or delayed, Tri-ACK / Fast Retransmit cannot fire — no later packet arrives to generate duplicate ACKs — so recovery falls back to the full RTO expiry in `rudp_tick()`, a passive latency spike. This is the historical weak point of ENet and plain RUDP.
     - **Solution**: When the channel is application-limited (TX queue empty, window not fully acked, no later message pending), arm a single probe at $\approx 1.5 \times \text{SRTT}$ after the last transmission. If no ACK has returned, speculatively re-send the last active slot (or a zero-payload tail segment) before the full RTO fires.
     - **Guards**: Bound to a small retry count, rate-limit to at most one probe per RTT, rearm on new data or on any ACK, and treat a probe that does uncover loss as normal recovery input without double-counting timeout backoff. A probe must not itself trigger another probe or an ACK loop.
@@ -442,14 +601,14 @@ related work.
 
 ## Phase 7: Research tracks & next-gen architecture
 
-Exploratory tracks for zero-copy streaming, asymmetric channel window partitioning, delay-gradient micro-pacing, and resilient multi-interface transport.
+Exploratory tracks for zero-copy streaming, asymmetric channel window partitioning, delay-gradient micro-pacing, and resilient multi-interface transport. The low-latency video-slicing and Vulkan GPU-NIC pipeline tracks moved to [docs/RESEARCH_MEDIA_GPU.md](docs/RESEARCH_MEDIA_GPU.md) (companion `zcrudp-media` project).
 
 - [ ] **Copy-Avoiding Page Streaming & Portable Scatter-Gather (Tier 3 V2)**:
   Treat payload copy avoidance as a backend capability rather than promise strict physical zero-copy on every OS. Standard `sendmsg()` avoids user-space concatenation but may still copy into the kernel; Linux `MSG_ZEROCOPY`, overlapped Windows I/O, lwIP references and DMA all have different completion and lifetime rules.
   - **Prerequisite: explicit buffer-loan contract**: A submitted page is immutable and remains owned by the caller but borrowed by RUDP until it is ACKed, abandoned after retry failure, or released by reset. Return a caller cookie through a bounded completion event/callback. Distinguish network delivery completion from NIC/OS submission completion, and define cancellation before storing raw pointers in TX slots.
   - **Registered caller-owned page pool**: Register a fixed array of page entries once; each entry contains the base pointer, capacity, caller cookie, generation, protocol-reference count and asynchronous-I/O-reference count. Store only a generation-checked handle `{index16, generation16}` plus `offset32` and `length32` in each TX slot. Validate `offset + length <= capacity` without overflow. A page becomes reusable only when both reference counts reach zero; ACK, retry exhaustion and reset drop protocol references, while backend completion drops I/O references. Report releases through a bounded event queue processed by the same event loop, reject stale generations/double release, and keep `send_copy` as the safe fallback for callers that cannot honor the loan. Never drop a release when the queue is full: retain a `release_pending` bit in the registry and apply backpressure until the caller drains it. Optional debug mode may hash borrowed bytes to detect mutation before retransmission.
   - **Prerequisite: portable packet plan**: Define only neutral fixed-size spans such as `{const uint8_t *base, uint32_t length}` plus total length, packet token and bounded segment count. Keep `struct iovec`, `WSABUF`, `pbuf` and DMA descriptors out of the core. Copy the small mutable RUDP header into caller/adapter-owned scratch while borrowing the large immutable payload.
-  - **Prerequisite: transactional egress**: Split scheduling into `prepare -> submit -> commit/cancel`. Preparing a view must not update timestamps, retry counts or fairness cursors. Commit only after the backend accepts the complete UDP datagram; `WOULD_BLOCK` leaves it eligible without double-counting a transmission.
+  - **Prerequisite: transactional egress**: see the canonical `prepare -> submit -> commit/cancel` contract under Cross-cutting priority ("Make egress transactional"). Preparing a view must not update timestamps, retry counts or fairness cursors; commit only after the backend accepts the complete UDP datagram; `WOULD_BLOCK` leaves it eligible without double-counting a transmission.
   - **Reference flattening backend first**: Concatenate a packet plan into the existing byte buffer and require byte-for-byte equality with the current codec for normal sends, retransmissions, MTU boundaries, wrap and mixed channels. This remains the universal fallback when a backend lacks scatter-gather support or exceeds its segment/alignment limits.
   - **Backend adapters second**: Translate the same plan to POSIX `sendmsg(iovec)`, Windows `WSASendTo(WSABUF)`, lwIP `pbuf_chain(PBUF_REF)` and caller-provided DMA descriptors. Each adapter declares bounded capabilities (`max_segments`, alignment, synchronous/asynchronous completion and DMA-accessible memory); it may flatten without changing protocol behavior.
   - **Large-payload TX first**: Keep the existing inline/copy path for four-byte TFV records and measure the crossover before choosing a threshold. Add MTU-sized extents (roughly 512--1400 bytes) with 32-bit `offset + length` only for page streams. Defer receive-side zero-copy until the TX ownership and completion model is proven, because out-of-order RX must retain NIC buffers across gaps.
@@ -474,48 +633,18 @@ Exploratory tracks for zero-copy streaming, asymmetric channel window partitioni
   - Mitigate Wi-Fi and radio contention spikes with low-overhead delay tracking.
 
 - [ ] **Sliding-Window Convolutional FEC & In-Band SACK**:
-  - In-Band 64-bit SACK mask (8 bytes) packed into datagram headroom for fine-grained multi-packet loss recovery in a single RTT.
+  - In-Band 64-bit SACK mask (8 bytes) packed into datagram headroom for fine-grained multi-packet loss recovery in a single RTT. This is the long-term SACK form for the redesigned wire format; the Phase 5 Selective ACKs extension covers the current format — implement one SACK wire form per format generation.
   - Sliding-Window FEC (RFC 8681): Generate parity across a moving window of in-flight segments, eliminating block-formation delay so isolated drops are recovered at 0 RTT on lossy wireless channels.
   - Adaptive Parity Ratio: 0% parity under clean link conditions, scaling dynamically (e.g., 6% to 12%) under measured loss rates.
   - Unequal Error Protection (UEP): Apply high-priority protection to stream descriptors and state headers, with lighter protection on volatile samples.
 
-- [ ] **Intra-Refresh Low-Latency Video Slices & Edge Media Streaming (Codec-Agnostic & Universal)**:
-  - **Codec-Agnostic Payload Slices**: Treat video frames as opaque binary streams; avoid hardcoding to a single codec. Support dual interchangeable profiles:
-    - *Ultra-LAN / Dedicated Radio Profile*: PyroWave intra-only Vulkan compute codec (150--300 Mbit/s, < 0.1 ms encode/decode, 0 temporal GOP latency).
-    - *Bandwidth-Constrained WAN / Mobile Profile*: H.264 / HEVC / AV1 with rolling vertical Intra-Refresh (8--20 Mbit/s, low flat bitrate, no I-frame spikes).
-  - **Fixed 1024-byte MTU Chunking (Themaister / PyroFling approach)**: Divide any frame bitstream into deterministic, fixed-size chunks of 1024 bytes (fitting cleanly inside standard 1500-byte MTU after IP/UDP/RUDP headers of ~1056 bytes on wire), completely eliminating path MTU black holes and IP fragmentation.
-  - **Zero-Allocation Packet Slicing**: Packetize video frames without heap allocation via a deterministic descriptor header: `{uint32_t frame_id, uint16_t chunk_idx, uint16_t chunk_count, uint32_t payload_len}` mapped directly to caller GPU/staging buffers.
-  - **Erasure Channel Optimization & Sliding XOR FEC**: Exploit UDP checksum erasure (dropped corrupt packets leave distinct sequence holes). Pair macroblock slices with causal XOR FEC parity slices (`[1,2,4,8]`) for 0-RTT immediate loss recovery.
-  - **Independent Frame Recovery & Zero-Lag Drop**: Because intra-only frames or intra-refresh slices lack temporal GOP cascades, an incomplete frame is immediately abandoned when the next `frame_id` arrives, preventing queue backlog and display latency accumulation.
-
-- [ ] **Heterogeneous GPU-NIC Direct Pipeline (Universal Vulkan Acceleration & Zero-Host-Copy)**:
-  - **Strict Architectural Decoupling (Core vs Optional Acceleration)**:
-    - *Core Engine (`zcrudp-core`)*: Remains 100% pure standard C11, OS-agnostic, zero-allocation, zero-dependency. Compilable on bare-metal, RTOS, headless game servers, and all desktop/console platforms.
-    - *Hardware Acceleration (`zcrudp-vulkan`)*: Optional companion module for platforms with modern GPU/Vulkan support (Windows, Linux, Android, Switch).
-  - **Hybrid Data/Control Plane Split**:
-    - *GPU Data Plane (Vulkan Compute)*: Exploit ZCRUDP's deterministic layout to execute 1024B packet slicing and parallel SIMD Causal XOR FEC entirely in VRAM via universal SPIR-V compute shaders (< 5 microseconds execution).
-    - *CPU Control Plane (C Engine)*: Because GPUs cannot interface with OS network sockets and struggle with branchy millisecond timers, the host CPU retains sole responsibility for lightweight ACK routing, RTO/PTO state, and socket dispatch.
-  - **Asynchronous Pipelining & Non-Blocking Timeline Semaphores**:
-    - Prevent CPU stall: Avoid blocking CPU waits (`vkWaitForFences`). Chain compute shaders to graphics render queues via standard Vulkan Timeline Semaphores (`VK_KHR_timeline_semaphore`). The CPU non-blockingly polls semaphore completion (`vkGetSemaphoreCounterValue`) during its tick.
-    - If the GPU slips below the network tick deadline, the CPU skips the pending video frame and continues delivering 240 Hz input/telemetry packets without latency penalty.
-  - **Tiered Memory Hierarchy (ReBAR vs Legacy Non-ReBAR Systems)**:
-    - *Tier 1: Direct VRAM-to-NIC P2P DMA (Systems with ReBAR / SAM)*:
-      - Supported on modern GPUs (RTX 3000+, RX 6000+, Intel Arc) with compatible BIOS/motherboards.
-      - VRAM exported directly to NIC without touching host system RAM (Multi-OS: Windows `VK_KHR_external_memory_win32`/DirectStorage, Linux `VK_KHR_external_memory_fd`/`dma-buf`, Android `AHardwareBuffer`).
-    - *Tier 2: Universal Host-Visible Pinned Ring (Legacy Systems WITHOUT ReBAR)*:
-      - Essential for millions of gamers on older GPUs (GTX 1060/1070/1080, RTX 2060/2070/2080, GTX 1660, legacy chipsets, laptops).
-      - Allocate a fixed 2--4 MiB circular ring in pinned host RAM with `VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT`.
-      - The GPU compute shader streams packet slices directly into host RAM across PCIe via hardware Write-Combining (12--16 GB/s on PCIe 3.0/4.0).
-      - **Zero CPU `memcpy`**: The CPU still does NOT copy the payload; it simply hands the pinned host pointers to standard OS sockets (`WSASendMsg` / `sendmsg`), and the NIC standard DMA streams them onto the wire.
-    - *Tier 3: Pure C11 CPU Fallback*: Standard memory copy path for headless servers or environments without Vulkan compute shaders.
-  - **Universal Micro-Pacing & Anti-Bufferbloat**:
-    - Smooth bursty slice transmission across frame intervals (e.g. 1 packet every ~25 microseconds at 240 Hz) to eliminate switch/router queue congestion (bufferbloat).
-    - Platform-neutral rate pacing:
-      - *Hardware/Kernel pacing*: Linux `SO_TXTIME` / `fq` qdisc where available.
-      - *Host timer pacing*: Windows multimedia / high-resolution waitable timers (`CreateWaitableTimerExW` with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) and high-precision user-space leaky-bucket loops.
-      - *Congestion Feedback*: Core SCReAM delay-gradient tracking (OWD) scaling back bitrates dynamically before packet loss occurs.
+- [ ] **Intra-Refresh Low-Latency Video Slices & Edge Media Streaming** and
+  **Heterogeneous GPU-NIC Direct Pipeline (Vulkan Acceleration & Zero-Host-Copy)**:
+  moved to [docs/RESEARCH_MEDIA_GPU.md](docs/RESEARCH_MEDIA_GPU.md). These are
+  companion research tracks (`zcrudp-media`), not core C11 transport work; keep
+  `TODO.md` focused on the transport engine.
 
 - [ ] **Multipath Transport & Interface Diversity (Packet Spraying & RACK-TLP Recovery)**:
   - **Interface Diversity & Packet Spraying**: Multi-interface transmission (e.g. concurrent Wi-Fi + Cellular or dual radio links) with per-packet path selection for link redundancy and failover.
-  - **Time-Based Loss Detection (RACK-TLP)**: Replace rigid Tri-ACK heuristics with time-based loss detection ($t_{\text{loss}} \ge \text{RTT} + \text{jitter}$) to prevent spurious retransmissions caused by packet reordering across asymmetric paths or wireless jitter.
+  - **Time-Based Loss Detection (RACK-TLP)**: Replace rigid Tri-ACK heuristics with time-based loss detection ($t_{\text{loss}} \ge \text{RTT} + \text{jitter}$) to prevent spurious retransmissions caused by packet reordering across asymmetric paths or wireless jitter. RACK generalizes the Phase 5 tail-loss probe and reordering-tolerant loss detection; keep a single TLP specification per wire-format generation.
   - **Delay-Driven Anti-Bufferbloat Pacing**: Rate pacing driven by fine-grained RTT variations, preventing queue buildup on bottleneck links during concurrent telemetry and state streams.
