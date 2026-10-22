@@ -244,8 +244,42 @@ static void recovery(void) {
   puts("PASS: adaptive RTT, Karn, clock wrap, ACK validation, split backoff, fixed-mode compatibility");
 }
 
+static void iovec_bounds(void) {
+  static const uint8_t one[1] = {1};
+  uint8_t out[8];
+  rudp_iovec_collection_s c = {.count = 0};
+  assert(rudp_iovec_add(&c, one, 1) == RUDP_OK);
+  assert(rudp_iovec_add(&c, one, 0xFFFFFFFFu) == RUDP_ERR_BUFFER_FULL); /* uint32 wrap */
+  assert(rudp_iovec_add(&c, one, 65535u) == RUDP_ERR_BUFFER_FULL);
+  assert(c.count == 1 && c.total_len == 1);
+  assert(rudp_iovec_flatten(&c, out, sizeof out) == 1);
+  c.iovecs[0].len = 64; /* public fields edited behind the API */
+  assert(rudp_iovec_flatten(&c, out, sizeof out) == RUDP_ERR_BUFFER_FULL);
+  c.iovecs[0].len = 1; c.count = RUDP_IOVEC_MAX + 1;
+  assert(rudp_iovec_flatten(&c, out, sizeof out) == RUDP_ERR_INVALID_ARG);
+  puts("PASS: iovec overflow and malformed-collection rejection");
+}
+
+static void fast_retransmit_unsent(void) {
+  rudp_session_s s;
+  uint8_t ack[4], bytes[64];
+  rudp_datagram_header_s h = {.ack = 0, .ack_channel = 0, .count = 0};
+  assert(rudp_session_init(&s) == RUDP_OK);
+  assert(rudp_session_send_reliable(&s, 0, (tfv_packet_u){.type = 1}, 0) == RUDP_OK);
+  assert(rudp_pack_datagram_header(&h, ack, sizeof ack) == 4);
+  for (int i = 0; i < 4; ++i) /* reference ACK + three duplicates while still unsent */
+    assert(rudp_session_process_datagram(&s, ack, sizeof ack, NULL, 0) == 0);
+  assert(rudp_session_build_datagram(&s, 0, bytes, sizeof bytes, 10, 1000) == 12);
+  /* The initial transmission satisfies the request: no immediate duplicate. */
+  assert(rudp_session_build_datagram(&s, 0, bytes, sizeof bytes, 10, 1000) == 4);
+  assert(s.channels[0].ctx.tx_buffer[0].retries == 0);
+  puts("PASS: fast-retransmit request on an unsent slot is cleared by its first send");
+}
+
 int main(void) {
   recovery();
+  iovec_bounds();
+  fast_retransmit_unsent();
   reassembly(); priorities(); scalars();
   stream(0, 0); stream(1, 1025); stream(4, 1025); stream(1025, 1025); stream(1025, 4);
   stream(65535, 65535);

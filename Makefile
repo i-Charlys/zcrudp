@@ -37,6 +37,13 @@ test-compare: compare-smoke
 test-recovery-stress: compare-smoke
 	RECOVERY_SEEDS=100 $(COMPARE_PYTHON) tests/test_comparison.py
 
+.PHONY: test-cxx
+CXX ?= c++
+test-cxx:
+	for std in c++11 c++17 c++20; do \
+	  $(CXX) -std=$$std -Wall -Wextra -Werror -Iinclude -c tests/test_cxx_headers.cpp -o /dev/null || exit 1; \
+	done
+
 .PHONY: test-cmake
 test-cmake:
 	python3 tests/test_cmake.py

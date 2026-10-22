@@ -68,6 +68,13 @@ function(zcrudp_module name)
   add_library(zcrudp::${name} ALIAS zcrudp_${name})
   set_target_properties(zcrudp_${name} PROPERTIES EXPORT_NAME ${name}
     WINDOWS_EXPORT_ALL_SYMBOLS YES)
+  # Installed shared modules depend on each other (session -> reliability,
+  # motion -> scalar): resolve siblings relative to the library itself.
+  if(APPLE)
+    set_target_properties(zcrudp_${name} PROPERTIES INSTALL_RPATH "@loader_path")
+  elseif(UNIX)
+    set_target_properties(zcrudp_${name} PROPERTIES INSTALL_RPATH "$ORIGIN")
+  endif()
   zcrudp_compile_settings(zcrudp_${name})
   target_link_libraries(zcrudp_${name} PUBLIC zcrudp_config)
   set(zcrudp_install_targets ${zcrudp_install_targets} zcrudp_${name} PARENT_SCOPE)

@@ -36,6 +36,9 @@ jobs:
     - name: Compare engines and enforce paced-loss recovery regression
       run: make test-compare
 
+    - name: Compile public headers as C++ (g++ and clang++)
+      run: make test-cxx CXX=g++ && make test-cxx CXX='zig c++'
+
     - name: Test CMake package and embedded consumers
       run: make test-cmake
 

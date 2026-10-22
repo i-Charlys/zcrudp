@@ -1,5 +1,4 @@
 #include "rudp_codec.h"
-#include <string.h>
 
 int rudp_pack_datagram_header(const rudp_datagram_header_s *header, uint8_t *out_buf,
                               size_t max_len) {

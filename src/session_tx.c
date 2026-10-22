@@ -168,6 +168,7 @@ int rudp_session_build_datagram(rudp_session_s *session, uint8_t primary_ack_cha
             chan->timeout_backoffs[curr] = 0;
             slot->tx_count = 1;
             slot->timestamp = now;
+            slot->fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
           } else {
             if (slot->fast_retransmit != RUDP_FAST_RETRANSMIT_PENDING &&
                 chan->timeout_backoffs[curr] < 6)

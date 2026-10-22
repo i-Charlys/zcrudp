@@ -136,35 +136,40 @@ typedef struct {
 } rudp_session_s;
 
 /* Compile-time verification of ABI struct sizes (C11 Static Asserts) */
-_Static_assert(sizeof(rudp_header_s) == 4, "rudp_header_s size must be 4 bytes");
-_Static_assert(sizeof(rudp_frame_s) == 8, "rudp_frame_s size must be 8 bytes");
-_Static_assert(sizeof(rudp_slot_s) == 16, "rudp_slot_s size must be 16 bytes");
-_Static_assert(sizeof(rudp_datagram_header_s) == 4,
+#ifdef __cplusplus
+#define RUDP_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+#define RUDP_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+RUDP_STATIC_ASSERT(sizeof(rudp_header_s) == 4, "rudp_header_s size must be 4 bytes");
+RUDP_STATIC_ASSERT(sizeof(rudp_frame_s) == 8, "rudp_frame_s size must be 8 bytes");
+RUDP_STATIC_ASSERT(sizeof(rudp_slot_s) == 16, "rudp_slot_s size must be 16 bytes");
+RUDP_STATIC_ASSERT(sizeof(rudp_datagram_header_s) == 4,
                "rudp_datagram_header_s size must be 4 bytes");
-_Static_assert(sizeof(rudp_record_s) == 8, "rudp_record_s size must be 8 bytes");
+RUDP_STATIC_ASSERT(sizeof(rudp_record_s) == 8, "rudp_record_s size must be 8 bytes");
 #if !RUDP_EXTERNAL_RX_STORAGE && RUDP_WINDOW_SIZE == 64 && RUDP_MAX_CHANNELS == 4
-_Static_assert(sizeof(rudp_context_s) == 1040,
+RUDP_STATIC_ASSERT(sizeof(rudp_context_s) == 1040,
                "rudp_context_s size must be 1040 bytes");
-_Static_assert(sizeof(rudp_channel_s) == 1404,
+RUDP_STATIC_ASSERT(sizeof(rudp_channel_s) == 1404,
                "rudp_channel_s size must be 1404 bytes");
-_Static_assert(sizeof(rudp_session_s) == 5620,
+RUDP_STATIC_ASSERT(sizeof(rudp_session_s) == 5620,
                "rudp_session_s size must be 5620 bytes");
 #endif
-_Static_assert(sizeof(rudp_context_s) ==
+RUDP_STATIC_ASSERT(sizeof(rudp_context_s) ==
                    (sizeof(rudp_slot_s) * (RUDP_WINDOW_SIZE) + 16),
                "rudp_context_s size mismatch");
 #if !RUDP_EXTERNAL_RX_STORAGE
-_Static_assert(sizeof(rudp_channel_s) ==
+RUDP_STATIC_ASSERT(sizeof(rudp_channel_s) ==
                    ((sizeof(rudp_context_s) + 12 + 5 * RUDP_WINDOW_SIZE +
                      (RUDP_WINDOW_SIZE + 7) / 8 + 3) &
                     ~(size_t)3) +
                        24,
                "rudp_channel_s size mismatch");
-_Static_assert(sizeof(rudp_session_s) ==
+RUDP_STATIC_ASSERT(sizeof(rudp_session_s) ==
                    (sizeof(rudp_channel_s) * (RUDP_MAX_CHANNELS) + 4),
                "rudp_session_s size mismatch");
 #endif
-_Static_assert((RUDP_MAX_CHANNELS & (RUDP_MAX_CHANNELS - 1)) == 0,
+RUDP_STATIC_ASSERT((RUDP_MAX_CHANNELS & (RUDP_MAX_CHANNELS - 1)) == 0,
                "RUDP_MAX_CHANNELS must be a power of 2");
 
 #endif /* RUDP_TYPES_H */
