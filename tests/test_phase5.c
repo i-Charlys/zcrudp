@@ -482,6 +482,110 @@ static void test_scatter_gather_seed_and_abi(void) {
   puts("PASS: Scatter-gather build_iovec/prepare_iovec, DSCP=46 propagation, path_entropy, 5364B ABI");
 }
 
+/* 8. Full 63-slot extended SACK (offsets 33..63) + post-SRTT chan_backoff scoping */
+static void test_extended_sack_63slot_and_post_srtt_backoff(void) {
+  rudp_session_s tx, rx;
+  assert(rudp_session_init(&tx) == RUDP_OK);
+  assert(rudp_session_init(&rx) == RUDP_OK);
+  assert(rudp_session_config_recovery(&tx, 0, 100, 10, 2000) == RUDP_OK);
+  assert(rudp_session_config_recovery(&rx, 0, 100, 10, 2000) == RUDP_OK);
+
+  uint8_t dgrams[45][16];
+  for (uint16_t i = 0U; i < 45U; ++i) {
+    assert(rudp_session_send_reliable(
+               &tx, 0, (tfv_packet_u){.type = 1, .value = (uint16_t)(200U + i)},
+               100) == RUDP_OK);
+    assert(rudp_session_build_datagram(&tx, 0, dgrams[i], sizeof(dgrams[i]),
+                                       100, 1) == 12);
+  }
+
+  /* Drop seq 0 and seq 36; deliver seq 1..35 and 37..40 at t=120. */
+  rudp_record_s recs[8];
+  rudp_stats_s tx_stats = {0}, rx_stats = {0};
+  for (unsigned i = 1U; i <= 40U; ++i) {
+    if (i == 36U) {
+      continue;
+    }
+    assert(rudp_session_process_datagram_ex(&rx, dgrams[i], 12, recs, 8, true,
+                                            120, &rx_stats) == 0);
+  }
+
+  /* Expect 20-byte ACK: 4B header + 8B primary SACK (seq 0) + 8B extended SACK (seq 32). */
+  uint8_t ack_wire[32];
+  int alen = rudp_session_build_datagram(&rx, 0, ack_wire, sizeof(ack_wire), 120, 100);
+  assert(alen == 20);
+  assert(rudp_session_process_datagram_ex(&tx, ack_wire, (size_t)alen, recs, 8,
+                                          true, 140, &tx_stats) == 0);
+
+  for (unsigned i = 33U; i <= 40U; ++i) {
+    if (i == 36U) {
+      assert(tx.channels[0].ctx.tx_buffer[i].state == RUDP_SLOT_IN_FLIGHT);
+    } else {
+      assert(tx.channels[0].ctx.tx_buffer[i].state == RUDP_SLOT_SACKED);
+    }
+  }
+  assert(rudp_slot_fast_state(&tx.channels[0].ctx.tx_buffer[0]) ==
+         RUDP_FAST_RETRANSMIT_PENDING);
+  assert(rudp_slot_fast_state(&tx.channels[0].ctx.tx_buffer[36]) ==
+         RUDP_FAST_RETRANSMIT_PENDING);
+
+  uint8_t repair[64];
+  assert(rudp_session_build_datagram(&tx, 0, repair, sizeof(repair), 140, 100) == 20);
+
+  /* Post-SRTT chan_backoff scoping: once srtt_scaled > 0, fresh slots do not inherit
+   * backoff from an earlier slot timeout, and cumulative advance clears chan_backoff. */
+  rudp_session_s s2;
+  uint8_t out[32], ack_pkt[4];
+  assert(rudp_session_init(&s2) == RUDP_OK);
+  assert(rudp_session_config_recovery(&s2, 0, 100, 10, 2000) == RUDP_OK);
+  assert(rudp_session_send_reliable(&s2, 0, (tfv_packet_u){.type = 1, .value = 1}, 0) ==
+         RUDP_OK);
+  assert(rudp_session_build_datagram(&s2, 0, out, sizeof(out), 0, 100) == 12);
+
+  rudp_datagram_header_s h = {.ack = 1, .ack_channel = 0, .count = 0};
+  assert(rudp_pack_datagram_header(&h, ack_pkt, sizeof(ack_pkt)) == 4);
+  assert(rudp_session_process_datagram_at(&s2, ack_pkt, sizeof(ack_pkt), NULL, 0, 50) ==
+         0);
+  assert(s2.channels[0].srtt_scaled == (50U << 3));
+  assert(s2.channels[0].rto_ms == 150U);
+
+  assert(rudp_session_send_reliable(&s2, 0, (tfv_packet_u){.type = 1, .value = 2},
+                                    100) == RUDP_OK);
+  assert(rudp_session_build_datagram(&s2, 0, out, sizeof(out), 100, 100) == 12);
+  assert(rudp_session_send_reliable(&s2, 0, (tfv_packet_u){.type = 1, .value = 3},
+                                    150) == RUDP_OK);
+  assert(rudp_session_build_datagram(&s2, 0, out, sizeof(out), 150, 100) == 12);
+  /* Keep >=3 unacked packets above seq 2 so TLP stays inactive until t=301. */
+  for (uint16_t k = 0U; k < 3U; ++k) {
+    assert(rudp_session_send_reliable(
+               &s2, 0, (tfv_packet_u){.type = 1, .value = (uint16_t)(10U + k)},
+               230) == RUDP_OK);
+    assert(rudp_session_build_datagram(&s2, 0, out, sizeof(out), 230, 100) == 12);
+  }
+
+  /* seq 1 times out at t=251 (elapsed 151 > 150). */
+  assert(rudp_session_build_datagram(&s2, 0, out, sizeof(out), 251, 100) == 12);
+  assert((s2.channels[0].chan_backoff & 0x0FU) == 1U);
+
+  /* New seq 6 and un-retransmitted seq 2 keep backoff=0; seq 2 times out at t=301 (1x RTO). */
+  assert(rudp_session_send_reliable(&s2, 0, (tfv_packet_u){.type = 1, .value = 4},
+                                    260) == RUDP_OK);
+  assert(rudp_slot_backoff(&s2.channels[0].ctx.tx_buffer[6]) == 0U);
+  assert(rudp_session_build_datagram(&s2, 0, out, sizeof(out), 260, 100) == 12);
+  assert(rudp_slot_backoff(&s2.channels[0].ctx.tx_buffer[6]) == 0U);
+  assert(rudp_session_build_datagram(&s2, 0, out, sizeof(out), 300, 100) == 4);
+  assert(rudp_session_build_datagram(&s2, 0, out, sizeof(out), 301, 100) == 12);
+
+  /* Cumulative ACK advancing past retransmitted seq 1..2 clears chan_backoff post-SRTT. */
+  h.ack = 3;
+  assert(rudp_pack_datagram_header(&h, ack_pkt, sizeof(ack_pkt)) == 4);
+  assert(rudp_session_process_datagram_at(&s2, ack_pkt, sizeof(ack_pkt), NULL, 0, 320) ==
+         0);
+  assert((s2.channels[0].chan_backoff & 0x0FU) == 0U);
+
+  puts("PASS: Extended 63-slot SACK + FACK repair and post-SRTT chan_backoff isolation");
+}
+
 int main(void) {
   test_rfc8439_and_envelope();
   test_custom_aead_vtable();
@@ -491,5 +595,6 @@ int main(void) {
   test_fec_k2_zero_rtt_recovery();
   test_motion_dead_reckoning();
   test_scatter_gather_seed_and_abi();
+  test_extended_sack_63slot_and_post_srtt_backoff();
   return 0;
 }

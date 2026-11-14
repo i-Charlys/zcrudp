@@ -29,9 +29,11 @@ static inline uint32_t channel_slot_timeout_ms(const rudp_channel_s *chan,
       return max_ms;
     }
     unsigned shift = rudp_slot_backoff(&chan->ctx.tx_buffer[slot_idx]);
-    unsigned chan_b = (unsigned)(chan->chan_backoff & RUDP_CHAN_BACKOFF_MASK);
-    if (chan_b > shift) {
-      shift = chan_b;
+    if (chan->srtt_scaled == 0U) {
+      unsigned chan_b = (unsigned)(chan->chan_backoff & RUDP_CHAN_BACKOFF_MASK);
+      if (chan_b > shift) {
+        shift = chan_b;
+      }
     }
     if (shift == 0U) {
       return d;
@@ -284,7 +286,9 @@ int rudp_session_send_reliable(rudp_session_s *session, uint8_t channel_id,
   /* Queued for bundler emission; not transmitted on the wire until build_datagram(). */
   chan->ctx.tx_buffer[slot_idx].tx_count = 0U;
   uint8_t init_backoff =
-      chan->rto_min_ms ? (uint8_t)(chan->chan_backoff & RUDP_CHAN_BACKOFF_MASK) : 0U;
+      (chan->rto_min_ms > 0U && chan->srtt_scaled == 0U)
+          ? (uint8_t)(chan->chan_backoff & RUDP_CHAN_BACKOFF_MASK)
+          : 0U;
   rudp_slot_set_backoff(&chan->ctx.tx_buffer[slot_idx], init_backoff);
   return RUDP_OK;
 }
@@ -385,6 +389,38 @@ static void snapshot_slot_in_plan(rudp_tx_plan_s *plan, uint8_t c, uint16_t curr
   plan->prev_timestamp[idx] = slot->timestamp;
 }
 
+static int pack_sack_records(const rudp_channel_s *chan, uint8_t channel_id,
+                             uint32_t mask_lo, uint32_t mask_hi, uint8_t *out_buf,
+                             size_t effective_max, uint8_t *count,
+                             size_t record_cap) {
+  rudp_record_s rec = {.channel_id = channel_id,
+                       .flags = RUDP_RECORD_FLAG_ACK,
+                       .seq_num = chan->ctx.expected_seq_num,
+                       .payload = rudp_mask_to_payload(mask_lo)};
+  size_t offset =
+      RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)(*count) * RUDP_WIRE_RECORD_SIZE);
+  int ret = rudp_pack_record(&rec, out_buf + offset, effective_max - offset);
+  if (ret != RUDP_WIRE_RECORD_SIZE) {
+    return ret;
+  }
+  (*count)++;
+
+  if (mask_hi != 0U && (size_t)(*count) < record_cap) {
+    rudp_record_s ext_rec = {.channel_id = channel_id,
+                             .flags = RUDP_RECORD_FLAG_ACK,
+                             .seq_num = (uint16_t)(chan->ctx.expected_seq_num + 32U),
+                             .payload = rudp_mask_to_payload(mask_hi)};
+    offset =
+        RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)(*count) * RUDP_WIRE_RECORD_SIZE);
+    ret = rudp_pack_record(&ext_rec, out_buf + offset, effective_max - offset);
+    if (ret != RUDP_WIRE_RECORD_SIZE) {
+      return ret;
+    }
+    (*count)++;
+  }
+  return RUDP_OK;
+}
+
 static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_channel,
                                    uint8_t *out_buf, size_t max_len, uint32_t now,
                                    uint32_t timeout, rudp_tx_plan_s *plan,
@@ -427,10 +463,16 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
   uint32_t prim_sack_mask =
       (prim_chan->ack_pending && prim_chan->rto_min_ms > 0U && cap_records >= 1U &&
        prim_chan->ctx.state == RUDP_STATE_CONNECTED)
-          ? rudp_rx_sack_mask(prim_chan)
+          ? rudp_rx_sack_mask_offset(prim_chan, 0U)
+          : 0U;
+  uint32_t prim_sack_mask_hi =
+      (prim_chan->ack_pending && prim_chan->rto_min_ms > 0U && cap_records >= 1U &&
+       prim_chan->ctx.state == RUDP_STATE_CONNECTED)
+          ? rudp_rx_sack_mask_offset(prim_chan, 32U)
           : 0U;
 
-  if (!any_tx_window_nonempty && sec_ack_pending_count == 0U && prim_sack_mask == 0U) {
+  if (!any_tx_window_nonempty && sec_ack_pending_count == 0U &&
+      prim_sack_mask == 0U && prim_sack_mask_hi == 0U) {
     if (prim_chan->ctx.state != RUDP_STATE_CONNECTED) {
       if (plan) {
         plan->valid = 0U;
@@ -481,22 +523,18 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
   uint8_t lead_channel = primary_ack_channel;
   bool lead_set = false;
 
-  /* 1. Multi-channel explicit ACK + 32-bit SACK records */
+  /* 1. Multi-channel explicit ACK + SACK records (offsets 1..32 and optional 33..63) */
   if (sec_ack_pending_count > 0U) {
     for (uint8_t i = 0; i < RUDP_MAX_CHANNELS && count < ack_budget; i++) {
       uint8_t c = (uint8_t)((session->rr_cursor + i) % (uint8_t)RUDP_MAX_CHANNELS);
       rudp_channel_s *chan = &session->channels[c];
       if (c != primary_ack_channel && chan->ctx.state == RUDP_STATE_CONNECTED &&
           chan->ack_pending) {
-        rudp_record_s rec = {.channel_id = c,
-                             .flags = RUDP_RECORD_FLAG_ACK,
-                             .seq_num = chan->ctx.expected_seq_num,
-                             .payload = rudp_mask_to_payload(rudp_rx_sack_mask(chan))};
-
-        size_t offset =
-            RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)count * RUDP_WIRE_RECORD_SIZE);
-        int ret = rudp_pack_record(&rec, out_buf + offset, effective_max - offset);
-        if (ret != RUDP_WIRE_RECORD_SIZE) {
+        uint32_t mask_lo = rudp_rx_sack_mask_offset(chan, 0U);
+        uint32_t mask_hi = rudp_rx_sack_mask_offset(chan, 32U);
+        int ret = pack_sack_records(chan, c, mask_lo, mask_hi, out_buf,
+                                    effective_max, &count, ack_budget);
+        if (ret != RUDP_OK) {
           if (plan) {
             rudp_session_cancel_datagram(session, plan);
             plan->valid = 0U;
@@ -504,14 +542,13 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
           return ret;
         }
 
-        chan->last_ack_sent = rec.seq_num;
+        chan->last_ack_sent = chan->ctx.expected_seq_num;
         chan->ack_pending = 0U;
         chan->chan_backoff &= (uint8_t)~RUDP_CHAN_FLAG_GAP_ACK_PENDING;
         if (!lead_set) {
           lead_channel = c;
           lead_set = true;
         }
-        count++;
       }
     }
   }
@@ -547,8 +584,9 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
       bool has_unsent = sc.has_unsent;
       uint16_t rem_inflight = sc.total_in_flight;
       uint16_t rem_sacked = sc.total_sacked;
-      uint8_t next_chan_backoff =
+      uint8_t orig_chan_backoff =
           (uint8_t)(chan->chan_backoff & RUDP_CHAN_BACKOFF_MASK);
+      uint8_t next_chan_backoff = orig_chan_backoff;
       bool cleared_recovery = false;
 
       uint16_t curr = chan->ctx.tail;
@@ -646,7 +684,7 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
             }
 
             if (is_first_send) {
-              if (chan->rto_min_ms > 0U) {
+              if (chan->rto_min_ms > 0U && chan->srtt_scaled == 0U) {
                 uint8_t cb = next_chan_backoff;
                 if (cb > rudp_slot_backoff(slot)) {
                   rudp_slot_set_backoff(slot, cb);
@@ -676,6 +714,9 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
                   }
                 }
                 uint8_t b = rudp_slot_backoff(slot);
+                if (chan->srtt_scaled == 0U && orig_chan_backoff > b) {
+                  b = orig_chan_backoff;
+                }
                 if (b < 15U) {
                   b++;
                   rudp_slot_set_backoff(slot, b);
@@ -788,23 +829,23 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
     }
   }
 
-  /* Emit an explicit ACK + 32-bit SACK record on the primary channel when:
+  /* Emit an explicit ACK + SACK record on the primary channel (and an optional
+   * extended SACK record for offsets 33..63 when needed) when:
    * - data was bundled alongside a gap/duplicate ACK (preserving bidirectional Tri-ACK), OR
-   * - count == 0 in adaptive mode and out-of-order SACK blocks exist (`prim_sack_mask != 0`). */
+   * - count == 0 in adaptive mode and out-of-order SACK blocks exist. */
   if (count < cap_records && prim_chan->ctx.state == RUDP_STATE_CONNECTED &&
       prim_chan->ack_pending &&
       ((count > 0U && (prim_chan->chan_backoff & RUDP_CHAN_FLAG_GAP_ACK_PENDING)) ||
-       (count == 0U && prim_sack_mask != 0U))) {
-    uint32_t mask = (count == 0U) ? prim_sack_mask : rudp_rx_sack_mask(prim_chan);
-    rudp_record_s ack_rec = {.channel_id = primary_ack_channel,
-                             .flags = RUDP_RECORD_FLAG_ACK,
-                             .seq_num = prim_chan->ctx.expected_seq_num,
-                             .payload = rudp_mask_to_payload(mask)};
-    size_t offset =
-        RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)count * RUDP_WIRE_RECORD_SIZE);
-    int ret = rudp_pack_record(&ack_rec, out_buf + offset, effective_max - offset);
-    if (ret != RUDP_WIRE_RECORD_SIZE) {
+       (count == 0U && (prim_sack_mask != 0U || prim_sack_mask_hi != 0U)))) {
+    uint32_t mask_lo =
+        (count == 0U) ? prim_sack_mask : rudp_rx_sack_mask_offset(prim_chan, 0U);
+    uint32_t mask_hi =
+        (count == 0U) ? prim_sack_mask_hi : rudp_rx_sack_mask_offset(prim_chan, 32U);
+    int ret = pack_sack_records(prim_chan, primary_ack_channel, mask_lo, mask_hi,
+                                out_buf, effective_max, &count, cap_records);
+    if (ret != RUDP_OK) {
       if (plan) {
+        rudp_session_cancel_datagram(session, plan);
         plan->valid = 0U;
       }
       return ret;
@@ -814,7 +855,6 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
       lead_channel = primary_ack_channel;
       lead_set = true;
     }
-    count++;
   }
 
   if (count == 0U && prim_chan->ctx.state != RUDP_STATE_CONNECTED) {

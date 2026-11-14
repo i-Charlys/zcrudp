@@ -82,8 +82,8 @@ Published medians over five seeds, 2,400 four-byte reliable ordered messages,
 | Metric | Phase 4 fixed | Phase 5 adaptive (SACK+FACK+TLP/RACK) | ENet |
 | --- | ---: | ---: | ---: |
 | p99, 1% loss | 52 ms | 47 ms | 47 ms |
-| p99, 5% loss | 263 ms | 54 ms | 167 ms |
-| UDP payload bytes, 5% loss | 43,324 | 47,604 | 62,096 |
+| p99, 5% loss | 263 ms | 51 ms | 167 ms |
+| UDP payload bytes, 5% loss | 43,324 | 47,556 | 62,096 |
 
 At 5% loss this is about 78% lower p99 than phase 4 and 66% lower than ENet,
 but about 9% more traffic than phase 4. These are combined-policy results,

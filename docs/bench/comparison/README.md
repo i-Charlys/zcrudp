@@ -107,18 +107,18 @@ with its update profile.
 | 240 Hz scenario | zcrudp p50 / p99 | ENet p50 / p99 | ENet-zpl p50 / p99 | UDP payload bytes (zcrudp / ENet / ENet-zpl) |
 | --- | ---: | ---: | ---: | ---: |
 | 10 ms delay, clean | 10 / 10 ms | 10 / 10 ms | 10 / 10 ms | 38,400 / 57,970 / 57,942 |
-| 10 ms delay, 1% loss, 5 ms jitter | 13 / 47 ms | 13 / 47 ms | 13 / 48 ms | 40,484 / 58,692 / 58,672 |
-| 10 ms delay, 5% loss, 5 ms jitter | 14 / 54 ms | 15 / 167 ms | 14 / 378 ms | 47,604 / 62,096 / 62,596 |
-| 20 ms delay, 2% loss, 40 ms jitter | 52 / 136 ms | 58 / 338 ms | 57 / 203 ms | 60,800 / 59,296 / 59,290 |
-| Ping 250 ms (125 ms delay), clean | 125 / 125 ms | 125 / 125 ms | 125 / 125 ms | 38,816 / 57,886 / 57,834 |
-| Ping 250 ms (125 ms delay), 2% loss, 10 ms jitter | 496 / 889 ms | 410 / 803 ms | 338 / 673 ms | 23,752 / 49,664 / 49,718 |
+| 10 ms delay, 1% loss, 5 ms jitter | 13 / 47 ms | 13 / 47 ms | 13 / 48 ms | 40,772 / 58,692 / 58,672 |
+| 10 ms delay, 5% loss, 5 ms jitter | 14 / 51 ms | 15 / 167 ms | 14 / 378 ms | 47,556 / 62,096 / 62,596 |
+| 20 ms delay, 2% loss, 40 ms jitter | 52 / 139 ms | 58 / 338 ms | 57 / 203 ms | 61,104 / 59,296 / 59,290 |
+| Ping 250 ms (125 ms delay), clean | 125 / 125 ms | 125 / 125 ms | 125 / 125 ms | 38,432 / 57,886 / 57,834 |
+| Ping 250 ms (125 ms delay), 2% loss, 10 ms jitter | 308 / 403 ms | 410 / 803 ms | 338 / 673 ms | 22,712 / 49,664 / 49,718 |
 
 Values are medians over five seeds. The byte counts include both directions and
 retries. Key takeaways:
-- At 5% loss, zcrudp delivers a p99 of 54 ms compared with 167 ms for ENet, 378 ms for ENet-zpl, and 69 ms for KCP-fast, with 23% lower wire overhead than ENet.
-- Under heavy jitter (40 ms), zcrudp delivers p99 of 136 ms ahead of KCP-fast (159 ms), ENet-zpl (203 ms), and ENet (338 ms).
-- In clean 250 ms ping conditions, channel backoff inheritance limits cold-start retransmissions so zcrudp emits 38,816 B (-33% vs ENet's 57,886 B) at the physical 125 ms delay.
-- At 250 ms ping with 2% loss (starting cold without a prior RTT handshake, unlike ENet), zcrudp completes 5/5 seeds at 889 ms p99 (vs 10,422 ms for KCP-fast) while emitting 52% fewer UDP payload bytes than ENet (23,752 B vs 49,664 B).
+- At 5% loss, zcrudp delivers a p99 of 51 ms compared with 167 ms for ENet, 378 ms for ENet-zpl, and 69 ms for KCP-fast, with 23% lower wire overhead than ENet.
+- Under heavy jitter (40 ms), zcrudp delivers p99 of 139 ms ahead of KCP-fast (159 ms), ENet-zpl (203 ms), and ENet (338 ms).
+- In clean 250 ms ping conditions, channel backoff inheritance limits cold-start retransmissions so zcrudp emits 38,432 B (-34% vs ENet's 57,886 B) at the physical 125 ms delay.
+- At 250 ms ping with 2% loss (starting cold without a prior RTT handshake, unlike ENet), zcrudp completes 5/5 seeds at 403 ms p99 (ahead of 673 ms for ENet-zpl, 803 ms for ENet, and 10,422 ms for KCP-fast) while emitting 54% fewer UDP payload bytes than ENet (22,712 B vs 49,664 B).
 
 ## Initial-RTO sensitivity at 250 ms ping
 
@@ -128,10 +128,10 @@ RTO with 300 ms on the same two 250 ms ping scenarios. Five seeds and the same
 
 | Scenario | zcrudp initial RTO | Completed | Median p99 | Median UDP payload bytes / delivered message |
 | --- | ---: | ---: | ---: | ---: |
-| 0% loss | 100 ms | 5/5 | 125 ms | 16.2 B |
+| 0% loss | 100 ms | 5/5 | 125 ms | 16.0 B |
 | 0% loss | 300 ms | 5/5 | 125 ms | 16.0 B |
-| 2% loss, 0–10 ms jitter | 100 ms | 5/5 | 889 ms | 9.9 B |
-| 2% loss, 0–10 ms jitter | 300 ms | 5/5 | 1,412 ms | 9.3 B |
+| 2% loss, 0–10 ms jitter | 100 ms | 5/5 | 403 ms | 9.5 B |
+| 2% loss, 0–10 ms jitter | 300 ms | 5/5 | 878 ms | 9.3 B |
 
 At 300 ms, a clean ACK arrives before the first timeout, eliminating the
 unnecessary retransmission and allowing an RTT sample. With actual loss, the

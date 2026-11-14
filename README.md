@@ -106,13 +106,13 @@ The comparative runner executes zcrudp, ENet (lsalzman), ENet-zpl (zpl-c), and K
 
 The [raw results](docs/bench/comparison/results.csv) preserve all five engines.
 On the clean 250 ms ping path at 240 Hz, channel backoff inheritance suppresses
-repeated cold-start timeouts so zcrudp emits 16.2 UDP payload bytes per message
-(38,816 B total) versus 24.1 B/message for ENet (57,886 B).
+repeated cold-start timeouts so zcrudp emits 16.0 UDP payload bytes per message
+(38,432 B total) versus 24.1 B/message for ENet (57,886 B).
 
 A companion sensitivity sweep compares 100 ms and 300 ms initial retransmission
-timeouts on the virtual 250 ms ping path: clean traffic goes from 16.2 to 16.0
+timeouts on the virtual 250 ms ping path: clean traffic goes from 16.01 to 16.00
 UDP payload bytes per delivered message at unchanged 125 ms p99, while under 2%
-loss p99 moves from 889 ms to 1,412 ms. The 100 ms profile remains the published
+loss p99 moves from 403 ms to 878 ms. The 100 ms profile remains the published
 comparison; [the sensitivity data](docs/bench/comparison/rto-sensitivity.csv)
 shows the tradeoff rather than replacing it.
 
@@ -125,12 +125,12 @@ maximum throughput with its native/default window capacity.
 In high-density saturation bursts, zcrudp aggregates records tightly to emit fewer
 UDP-payload bytes (8.1 B vs 18.2 B per message).
 
-With adaptive recovery, 32-bit SACK, FACK, TLP and RACK enabled, the median of the five per-run p99 values shows:
+With adaptive recovery, 63-slot extended SACK, FACK, TLP and RACK enabled, the median of the five per-run p99 values shows:
 - **Saturated WAN with 2% loss (10 ms delay)**: 15 ms p99 for zcrudp, compared with 48 ms for ENet, 48 ms for ENet-zpl, and 107 ms for KCP-fast, at 56% lower UDP payload bytes than ENet.
-- **5% loss (10 ms delay, 5 ms jitter)**: 54 ms for zcrudp, compared with 167 ms for ENet, 378 ms for ENet-zpl, and 69 ms for KCP-fast, with 23% fewer UDP payload bytes than ENet.
-- **High jitter (20 ms delay, 2% loss, 40 ms jitter)**: 136 ms for zcrudp, ahead of KCP-fast (159 ms), ENet-zpl (203 ms), and ENet (338 ms).
-- **Clean 250 ms ping (125 ms one-way)**: 125 ms p99 for zcrudp, ENet, and ENet-zpl, with zcrudp emitting 38,816 B (-33% vs ENet's 57,886 B).
-- **High latency with loss (250 ms ping / 125 ms one-way, 2% loss, 10 ms jitter)**: 889 ms p99 for zcrudp (vs 10,422 ms for KCP-fast, 803 ms for ENet, and 673 ms for ENet-zpl) while emitting 52% fewer UDP payload bytes than ENet (23,752 B vs 49,664 B).
+- **5% loss (10 ms delay, 5 ms jitter)**: 51 ms for zcrudp, compared with 167 ms for ENet, 378 ms for ENet-zpl, and 69 ms for KCP-fast, with 23% fewer UDP payload bytes than ENet (47,556 B vs 62,096 B).
+- **High jitter (20 ms delay, 2% loss, 40 ms jitter)**: 139 ms for zcrudp, ahead of KCP-fast (159 ms), ENet-zpl (203 ms), and ENet (338 ms).
+- **Clean 250 ms ping (125 ms one-way)**: 125 ms p99 for zcrudp, ENet, and ENet-zpl, with zcrudp emitting 38,432 B (-34% vs ENet's 57,886 B).
+- **High latency with loss (250 ms ping / 125 ms one-way, 2% loss, 10 ms jitter)**: 403 ms p99 for zcrudp (ahead of 673 ms for ENet-zpl, 803 ms for ENet, and 10,422 ms for KCP-fast) while emitting 54% fewer UDP payload bytes than ENet (22,712 B vs 49,664 B).
 
 By packing per-slot timeout backoff into the upper nibble of `fast_retransmit`, Phase 5 reduces session RAM by 256 B relative to Phase 4 (5,364 B total) while improving tail latency and CPU efficiency.
 These results depend on the workload and transport settings, including KCP's

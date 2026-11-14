@@ -10,22 +10,30 @@ static void rx_hist_advance(rudp_channel_s *chan) {
   }
 }
 
-uint32_t rudp_rx_sack_mask(const rudp_channel_s *chan) {
+uint32_t rudp_rx_sack_mask_offset(const rudp_channel_s *chan, uint16_t base_offset) {
 #if RUDP_EXTERNAL_RX_STORAGE
   if (!chan->rx_present) {
     return 0U;
   }
 #endif
+  if (base_offset >= RUDP_WINDOW_SIZE - 1U) {
+    return 0U;
+  }
   uint32_t mask = 0U;
-  unsigned limit = (RUDP_WINDOW_SIZE - 1U < 32U) ? (RUDP_WINDOW_SIZE - 1U) : 32U;
+  unsigned rem = (unsigned)(RUDP_WINDOW_SIZE - 1U - base_offset);
+  unsigned limit = (rem < 32U) ? rem : 32U;
   for (unsigned b = 0U; b < limit; ++b) {
-    uint16_t seq = (uint16_t)(chan->ctx.expected_seq_num + 1U + b);
+    uint16_t seq = (uint16_t)(chan->ctx.expected_seq_num + base_offset + 1U + b);
     uint16_t slot = seq & (RUDP_WINDOW_SIZE - 1U);
     if (chan->rx_present[slot / 8U] & (uint8_t)(1U << (slot & 7U))) {
       mask |= (UINT32_C(1) << b);
     }
   }
   return mask;
+}
+
+uint32_t rudp_rx_sack_mask(const rudp_channel_s *chan) {
+  return rudp_rx_sack_mask_offset(chan, 0U);
 }
 
 int rudp_rx_drain(rudp_channel_s *chan, rudp_record_s *out, size_t capacity) {

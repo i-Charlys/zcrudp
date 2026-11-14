@@ -51,7 +51,8 @@ static uint16_t find_first_reliable_slot(const rudp_context_s *ctx) {
 
 static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sack_mask,
                                  bool duplicates, bool timed, uint32_t now,
-                                 bool allow_sack_rtt, rudp_stats_s *stats) {
+                                 bool allow_sack_rtt, bool is_ext_sack,
+                                 rudp_stats_s *stats) {
   rudp_context_s *ctx = &chan->ctx;
   if (ctx->state != RUDP_STATE_CONNECTED) {
     return;
@@ -60,7 +61,8 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
   uint16_t prev_tail = ctx->tail;
   uint16_t first_rel = find_first_reliable_slot(ctx);
   uint32_t sample = 0U;
-  bool eligible = timed && (chan->rto_min_ms > 0U) && (first_rel != ctx->head);
+  bool eligible =
+      !is_ext_sack && timed && (chan->rto_min_ms > 0U) && (first_rel != ctx->head);
   if (eligible) {
     uint16_t advance =
         (uint16_t)(ack - ctx->tx_buffer[first_rel].frame.header.seq_num);
@@ -95,16 +97,21 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
     }
   }
 
-  int result = rudp_recv_ack_ex(ctx, ack, duplicates);
-  if (result != RUDP_OK) {
-    if (stats) {
-      rudp_stat_inc(&stats->rx_ack_rejected);
+  if (!is_ext_sack) {
+    int result = rudp_recv_ack_ex(ctx, ack, duplicates);
+    if (result != RUDP_OK) {
+      if (stats) {
+        rudp_stat_inc(&stats->rx_ack_rejected);
+      }
+      return;
     }
-    return;
-  }
 
-  if (eligible) {
-    apply_rtt_sample(chan, sample, now);
+    if (chan->srtt_scaled > 0U && ctx->tail != prev_tail) {
+      chan->chan_backoff &= (uint8_t)~RUDP_CHAN_BACKOFF_MASK;
+    }
+    if (eligible) {
+      apply_rtt_sample(chan, sample, now);
+    }
   }
 
   first_rel = find_first_reliable_slot(ctx);
@@ -113,17 +120,18 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
   }
 
   uint16_t tail_seq = ctx->tx_buffer[first_rel].frame.header.seq_num;
-  if (ack != tail_seq) {
+  uint16_t base_offset = (uint16_t)(ack - tail_seq);
+  if ((!is_ext_sack && base_offset != 0U) || (is_ext_sack && base_offset != 32U)) {
     return;
   }
 
-  uint16_t rel_slots[33];
+  uint16_t rel_slots[65];
   uint16_t rel_count = 0U;
   uint16_t scan = first_rel;
   while (scan != ctx->head) {
     const rudp_slot_s *s = &ctx->tx_buffer[scan];
     if (s->state == RUDP_SLOT_IN_FLIGHT || s->state == RUDP_SLOT_SACKED) {
-      if (rel_count < 33U) {
+      if (rel_count < 65U) {
         rel_slots[rel_count] = scan;
       }
       rel_count++;
@@ -137,7 +145,7 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
   for (unsigned b = 0U; b < 32U; ++b) {
     if ((sack_mask >> b) & UINT32_C(1)) {
       highest_sack_bit = b;
-      uint16_t offset = (uint16_t)(1U + b);
+      uint16_t offset = (uint16_t)(base_offset + 1U + b);
       if (offset >= rel_count) {
         if (stats) {
           rudp_stat_inc(&stats->rx_ack_rejected);
@@ -156,7 +164,8 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
 
   bool any_sacked_above_mask = false;
   uint16_t above_scan =
-      (uint16_t)((rel_slots[1U + highest_sack_bit] + 1U) & (RUDP_WINDOW_SIZE - 1U));
+      (uint16_t)((rel_slots[base_offset + 1U + highest_sack_bit] + 1U) &
+                 (RUDP_WINDOW_SIZE - 1U));
   while (above_scan != ctx->head) {
     if (ctx->tx_buffer[above_scan].state == RUDP_SLOT_SACKED) {
       any_sacked_above_mask = true;
@@ -170,7 +179,7 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
   uint32_t sack_sample = 0U;
   for (unsigned b = 0U; b < 32U; ++b) {
     if ((sack_mask >> b) & UINT32_C(1)) {
-      uint16_t offset = (uint16_t)(1U + b);
+      uint16_t offset = (uint16_t)(base_offset + 1U + b);
       rudp_slot_s *s = &ctx->tx_buffer[rel_slots[offset]];
       if (s->state == RUDP_SLOT_IN_FLIGHT) {
         newly_sacked_count++;
@@ -324,7 +333,7 @@ int rudp_session_process_datagram_ex(rudp_session_s *session, const uint8_t *in_
     /* Passive piggyback on datagrams with records (count > 0) does NOT count duplicate
      * ACKs (RFC 5681); explicit RUDP_RECORD_FLAG_ACK records handle SACK & dup-ACKs. */
     session_ack_and_sack(ack_chan, header.ack, 0U, header.count == 0, timed, now,
-                         false, stats);
+                         false, false, stats);
     hdr_tail_advanced = (ack_chan->ctx.tail != before_tail);
   }
 
@@ -350,14 +359,15 @@ int rudp_session_process_datagram_ex(rudp_session_s *session, const uint8_t *in_
     }
 
     if (rec.flags == RUDP_RECORD_FLAG_ACK) {
-      /* Deduplicate explicit ACK records per channel per datagram so a single crafted
-       * datagram cannot amplify duplicate_ack_count into immediate Tri-ACK. */
-      if (!ack_record_seen[rec.channel_id]) {
-        ack_record_seen[rec.channel_id] = 1U;
+      /* Allow primary SACK (offsets 1..32) and one extended SACK (offsets 33..63)
+       * per channel per datagram; only the first counts duplicate ACKs. */
+      if (ack_record_seen[rec.channel_id] < 2U) {
+        uint8_t seen = ack_record_seen[rec.channel_id]++;
         bool allow_sack_rtt =
             !(rec.channel_id == header.ack_channel && hdr_tail_advanced);
-        session_ack_and_sack(chan, rec.seq_num, rudp_payload_to_mask(rec.payload), true,
-                             timed, now, allow_sack_rtt, stats);
+        session_ack_and_sack(chan, rec.seq_num, rudp_payload_to_mask(rec.payload),
+                             seen == 0U, timed, now, allow_sack_rtt, seen > 0U,
+                             stats);
       }
     } else if (rec.flags == RUDP_RECORD_FLAG_RELIABLE) {
       bool oow = false;
