@@ -117,6 +117,9 @@ static void test_shared_metadata_pool(void) {
   }
   assert(rudp_shared_pool_chan_used(&spool, 0U) == 8U);
 
+  /* Free 2 bulk slots on Ch1 (232 -> 230) so global pool has headroom above Ch0/2/3 floors */
+  assert(rudp_shared_pool_ack(&spool, 1U, 2U, 0U) == 2);
+
   /* Extent-backed slot drops proto_ref on SACK + cumulative ACK */
   rudp_page_extent_s ext0, ext1;
   assert(rudp_page_alloc(&ppool, 512U, &ext0) == RUDP_OK);

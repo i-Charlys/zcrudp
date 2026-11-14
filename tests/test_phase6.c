@@ -157,7 +157,10 @@ static void test_queued_unreliable_and_holes(void) {
 /* 2. Full branch coverage of src/io.c */
 static void test_io_coverage(void) {
   rudp_iovec_collection_s col = {.count = 0};
-  uint8_t dummy[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  uint8_t dummy[RUDP_IOVEC_MAX] = {0};
+  for (uint8_t i = 0U; i < RUDP_IOVEC_MAX; ++i) {
+    dummy[i] = (uint8_t)(i + 1U);
+  }
   uint8_t out[16] = {0};
 
   assert(rudp_iovec_reset(NULL) == RUDP_ERR_INVALID_ARG);
@@ -239,7 +242,8 @@ static void test_retry_disconnect_all_apis(void) {
         }
       }
       assert(ret == RUDP_WIRE_DATAGRAM_HEADER_SIZE + RUDP_WIRE_RECORD_SIZE);
-      now += 20U;
+      /* Advance past max exponential backoff (10 ms << 6 = 640 ms) each retry */
+      now += 1000U;
     }
 
     /* Next timeout crosses RUDP_MAX_RETRIES and disconnects channel 0 */
