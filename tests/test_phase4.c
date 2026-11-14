@@ -338,11 +338,13 @@ static void motion_cold_start_and_stream_reset(void) {
   /* Actual non-zero jerk (v=+50, a=+20, j=+10) triggers duplicate emission once >= 3 prior samples exist. */
   assert(rudp_motion_encode(&m, 210, 100000U, 1U, out, sizeof(out)) == 2);
 
-  rudp_stream_tx_s stx;
-  rudp_stream_rx_s srx;
+  rudp_stream_tx_s stx = {.data = NULL};
+  rudp_stream_rx_s srx = {.data = NULL};
   uint8_t src[8] = {1, 2, 3, 4, 5, 6, 7, 8};
   uint8_t dst[8] = {0};
   assert(rudp_stream_start(&stx, src, sizeof(src)) == 0);
+  stx.offset = 4;
+  stx.descriptor_sent = 1;
   srx.data = dst;
   srx.capacity = sizeof(dst);
   srx.offset = 5;
