@@ -51,6 +51,9 @@ jobs:
     - name: Run protocol and security mutation harness
       run: make test-mutations
 
+    - name: Cross-compile architectures (32-bit, Big-Endian, ARM64) and Netem smoke
+      run: make test-arch test-netem
+
     - name: Test CMake shared libraries in Release mode
       run: |
         cmake -S . -B build/cmake-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DZCRUDP_WARNINGS_AS_ERRORS=ON

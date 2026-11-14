@@ -263,6 +263,69 @@ static void test_retry_disconnect_all_apis(void) {
     assert(disc == RUDP_ERR_DISCONNECTED);
     assert(s.channels[0].ctx.state == RUDP_STATE_DISCONNECTED);
   }
+
+  /* Fixed-mode timeout == 0 at identical timestamp never retransmits or disconnects. */
+  {
+    rudp_session_s s;
+    assert(rudp_session_init(&s) == RUDP_OK);
+    assert(rudp_session_send_reliable(&s, 0U, (tfv_packet_u){.value = 42U}, 10U) ==
+           RUDP_OK);
+    uint8_t buf[1404U];
+    assert(rudp_session_build_datagram(&s, 0U, buf, sizeof(buf), 10U, 0U) ==
+           RUDP_WIRE_DATAGRAM_HEADER_SIZE + RUDP_WIRE_RECORD_SIZE);
+    for (int i = 0; i < 12; ++i) {
+      assert(!rudp_session_has_pending_work(&s, 10U, 0U));
+      int n = rudp_session_build_datagram(&s, 0U, buf, sizeof(buf), 10U, 0U);
+      assert(n == RUDP_WIRE_DATAGRAM_HEADER_SIZE);
+      assert(s.channels[0].ctx.state == RUDP_STATE_CONNECTED);
+    }
+  }
+
+  /* Bidirectional data + piggybacked gap-ACK preserves Tri-ACK fast retransmit. */
+  {
+    rudp_session_s a, b;
+    assert(rudp_session_init(&a) == RUDP_OK);
+    assert(rudp_session_init(&b) == RUDP_OK);
+    uint8_t wire[1404U];
+    rudp_record_s rx_out[16U];
+    uint8_t dgrams[4U][1404U];
+
+    for (uint16_t i = 0U; i < 4U; ++i) {
+      assert(rudp_session_send_reliable(
+                 &a, 0U, (tfv_packet_u){.value = (uint16_t)(10U + i)}, 10U) ==
+             RUDP_OK);
+      int n = rudp_session_build_datagram(&a, 0U, dgrams[i], sizeof(dgrams[i]),
+                                          10U, 200U);
+      assert(n == RUDP_WIRE_DATAGRAM_HEADER_SIZE + RUDP_WIRE_RECORD_SIZE);
+    }
+
+    /* Drop dgrams[0]; deliver dgrams[1..3] while B also sends reverse unreliable data. */
+    for (uint16_t i = 1U; i < 4U; ++i) {
+      assert(rudp_session_process_datagram(
+                 &b, dgrams[i],
+                 RUDP_WIRE_DATAGRAM_HEADER_SIZE + RUDP_WIRE_RECORD_SIZE, rx_out,
+                 16U) == 0);
+      assert(rudp_session_queue_unreliable(
+                 &b, 0U, (tfv_packet_u){.type = 2U, .value = i}) == RUDP_OK);
+      int blen =
+          rudp_session_build_datagram(&b, 0U, wire, sizeof(wire), 20U + i, 200U);
+      assert(blen ==
+             RUDP_WIRE_DATAGRAM_HEADER_SIZE + (2 * RUDP_WIRE_RECORD_SIZE));
+      int dlen =
+          rudp_session_process_datagram(&a, wire, (size_t)blen, rx_out, 16U);
+      assert(dlen == 1);
+      assert(rx_out[0].flags == RUDP_RECORD_FLAG_UNRELIABLE);
+    }
+
+    /* Before 200 ms RTO expires (at t=30), A fast-retransmits lost seq 0 immediately. */
+    assert(rudp_session_has_pending_work(&a, 30U, 200U));
+    int flen = rudp_session_build_datagram(&a, 0U, wire, sizeof(wire), 30U, 200U);
+    assert(flen == RUDP_WIRE_DATAGRAM_HEADER_SIZE + RUDP_WIRE_RECORD_SIZE);
+    int delivered =
+        rudp_session_process_datagram(&b, wire, (size_t)flen, rx_out, 16U);
+    assert(delivered == 4);
+    assert(rx_out[0].payload.value == 10U && rx_out[3].payload.value == 13U);
+  }
 }
 
 /* 4. Stream payload scalability (4B .. 1200B) under loss */

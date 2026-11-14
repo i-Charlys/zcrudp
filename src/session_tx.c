@@ -199,9 +199,6 @@ static bool channel_has_eligible_slot(const rudp_channel_s *chan, uint32_t now,
   if (sc.total_in_flight == 0U) {
     return false;
   }
-  if (fallback_timeout == 0U && !chan->rto_min_ms) {
-    return true;
-  }
   uint32_t min_limit = channel_min_rto_floor_ms(chan, fallback_timeout);
   if (chan->rto_min_ms > 0U && chan->srtt_scaled > 0U) {
     uint32_t pto = (chan->srtt_scaled * 3U) / 16U + 2U;
@@ -606,14 +603,10 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
           bool is_probe = false;
           bool eligible = is_first_send || is_fast;
           if (!eligible) {
-            if (timeout == 0U && !chan->rto_min_ms) {
-              eligible = true;
-            } else {
-              uint32_t limit =
-                  effective_slot_deadline_ms(chan, curr, timeout, has_unsent,
-                                             unacked_above, sacked_above, &is_probe);
-              eligible = ((uint32_t)(now - slot->timestamp) > limit);
-            }
+            uint32_t limit =
+                effective_slot_deadline_ms(chan, curr, timeout, has_unsent,
+                                           unacked_above, sacked_above, &is_probe);
+            eligible = ((uint32_t)(now - slot->timestamp) > limit);
           }
 
           if (eligible) {
@@ -1010,9 +1003,6 @@ uint32_t rudp_session_next_wakeup_ms(const rudp_session_s *session, uint32_t now
       } else if (slot->state == RUDP_SLOT_IN_FLIGHT) {
         uint16_t unacked_above = --rem_inflight;
         if (rudp_slot_fast_state(slot) == RUDP_FAST_RETRANSMIT_PENDING) {
-          return 0U;
-        }
-        if (fallback_timeout_ms == 0U && !chan->rto_min_ms) {
           return 0U;
         }
         uint32_t limit = effective_slot_deadline_ms(

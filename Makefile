@@ -149,12 +149,22 @@ asan: | $(BUILD_DIR)
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: test-modules test-external-rx test-mutations
+.PHONY: test-modules test-external-rx test-mutations test-arch test-netem
 test-modules:
 	python3 tests/test_modules.py
 
 test-mutations:
 	python3 tests/test_mutations.py
+
+test-arch: | $(BUILD_DIR)
+	for target in x86-linux-gnu s390x-linux-gnu aarch64-linux-gnu; do \
+	  for src in $(SRC) $(PROFILES_SRC); do \
+	    zig cc -target $$target $(CFLAGS) -c $$src -o $(BUILD_DIR)/arch_check.o || exit 1; \
+	  done; \
+	done
+
+test-netem: $(BUILD_DIR)/libzcrudp.so
+	ZCRUDP_LIB=./$(BUILD_DIR)/libzcrudp.so $(COMPARE_PYTHON) bench/netem_harness.py --smoke
 
 test-external-rx: | $(BUILD_DIR)
 	$(CC) $(ASAN_CFLAGS) -DRUDP_EXTERNAL_RX_STORAGE=1 $(SRC) tests/test_external_rx.c -o $(BUILD_DIR)/test_external_rx_asan

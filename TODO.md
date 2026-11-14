@@ -166,26 +166,23 @@ keep one implementation of each contract.
   public `total_len` field. Fixed 2026-10-22: overflow-safe addition
   (`len > 65535 - total_len`), per-segment validation and `count` bound in
   `rudp_iovec_flatten()`; regressions in `tests/test_phase4.c` (`iovec_bounds`).
-- [ ] **Unify retransmission arithmetic**: Use saturating backoff in standalone
-  and session paths, test extreme timeout inputs, and specify how the session
-  builder reports retry-limit disconnection. The standalone `rudp_tick()` still
-  computes `timeout << shift` without saturation (defined wraparound, but wrong
-  for `timeout >= 2^26` ms); the session path already saturates via
-  `backed_off_timeout()`. Also close the retry-limit gap between the two engines:
-  the session builder emits one retransmission too many (12 wire transmissions
-  against 11 for standalone), keeps packing records of a channel it has just
-  declared dead, and returns a positive length with no disconnect signal
-  (reproduced by `poc_retry_limit`).
-- [ ] **Validate record flags before mutation**: Reject unknown and conflicting
-  combinations rather than silently prioritizing ACK over RELIABLE. Also enforce
-  channel capabilities at reception: a `RELIABLE` record addressed to a channel
-  configured `UNRELIABLE` must not be accepted into `rx_buffer` and acknowledged.
+- [x] **Unify retransmission arithmetic**: Saturating backoff implemented in both
+  `rudp_tick()` (`src/reliability.c`) and `channel_slot_timeout_ms()`
+  (`src/session_tx.c`), and retry-limit parity + disconnect signaling
+  (`1 + RUDP_MAX_RETRIES`, `RUDP_ERR_DISCONNECTED` without packing dead channel
+  records) verified in `tests/test_rudp.c` (`test_retry_parity_and_no_zombie_disconnect`)
+  and `tests/test_phase6.c` (`test_retry_disconnect_all_apis`).
+- [x] **Validate record flags before mutation**: Pass-1 validation in
+  `src/session_rx.c` rejects unknown/conflicting flags and enforces channel
+  `RELIABLE` vs `UNRELIABLE` capabilities before mutating session state;
+  verified in `tests/test_rudp.c` (`test_strict_pass1_validation_and_ack_only_null_out`)
+  and `tests/test_mutations.py`.
 
 ## P0: confirmed defects (review 2026-10-22)
 
 Reproduced by the proof-of-concept suite (`zcrudp_poc`, ASan/UBSan) against
 commit `0c5d742`; measurements quoted inline. Checked entries landed with the
-2026-10-22 corrective patch.
+2026-10-22 corrective patch and subsequent Phase 4–6 fixes.
 
 - [x] **Relocatable shared install**: `INSTALL_RPATH` set to `$ORIGIN` /
   `@loader_path` on every module; `make test-modules` passes with
@@ -199,56 +196,41 @@ commit `0c5d742`; measurements quoted inline. Checked entries landed with the
 - [x] **Fast-retransmit flag on an unsent slot**: the first transmission clears a
   pending fast-retransmit request (`poc_fr_unsent` produced an immediate duplicate
   with `retries = 1` before the fix).
-- [ ] **Unreliable re-anchoring after outages**: after K consecutive self-consistent
-  records rejected as too far ahead, adopt the newest as the reference. Regression:
-  a 600-packet outage at 240 Hz must recover within K packets (today: 64,936
-  rejected, ~270 s of blackout; `poc_unreliable_wedge`).
-- [ ] **Fresh/gap ACK signal**: count duplicate ACKs from an explicit gap
-  indication, not from `count == 0`. Today a piggybacked ACK on a data datagram
-  never counts, so Tri-ACK is neutralized whenever the receiver also sends data
-  (repair in 204 ms instead of 68 ms with fixed RTO 200 ms; `poc_bidir_triack`,
-  `poc_unrel_ack`). Interim, wire-compatible fix: emit an explicit ACK record for
-  the primary channel when an out-of-order or stale record set `ack_pending`.
-  With the wire redesign, reserve a "fresh/gap ACK" bit in the compact ACK prefix
-  (see Phase 5) so Tri-ACK counting no longer depends on `count == 0`.
-- [ ] **Builder reports "nothing to send"**: `rudp_session_build_datagram()`
-  always packs the 4-byte header, clears `ack_pending` and returns at least 4.
-  Callers must snapshot `ack_pending` before the call and send only when
-  `len > 4 || ack_pending`. Return 0 (or an out-flag) when no record and no ACK
-  is pending; keepalives get their own control kind that never counts as a
-  duplicate ACK. Regression: per-tick heartbeats currently cause 100% spurious
-  retransmissions and the adaptive estimator never samples (`srtt_scaled = 0`;
-  `poc_heartbeat`).
-- [ ] **Retry-limit parity and signal**: session and standalone both stop after
-  1 + `RUDP_MAX_RETRIES` transmissions; the build that declares a channel dead
-  packs none of its records and reports it (return code or dead-channel mask).
-  Unit-test the session disconnect path (`session_tx.c`, never executed by the
-  current suite).
-- [ ] **Reject `timeout == 0` in fixed mode** (or define it as "no timer
-  retransmission"): today every slot is eligible at every build and the channel
-  dies after 12 calls at the same timestamp, while `rudp_tick(timeout = 0)` expires
-  nothing (`poc_timeout0`).
-- [ ] **Restore the configured initial RTO on `reset_channel`**: reset currently
-  re-arms the RTO at its maximum, so the first loss after a reset waits up to
-  60 s (`poc_reset_rto`). Store `rto_initial_ms`.
-- [ ] **Count duplicate ACKs only for transmitted slots**: duplicate ACKs are
-  counted as soon as a slot is queued, not only once it is on the wire.
-- [ ] **Motion profile**: compute jerk only from the fourth sample; the third
-  sample compares against an acceleration initialized to 0 and emits a spurious
-  clone for x = t^2 (`poc_motion`).
-- [ ] **Entropy helper**: `rudp_calc_entropy` XORs inputs with overlapping bits
-  ((0x0100,0,0), (0,1,0) and (0,0,0x0100) hash identically; `poc_reset_rto`).
-  Mix inputs without overlapping bits, or remove the helper until used; wire
-  `session_seed` through the API or delete it together with the unused
-  `active_channels` and `last_ack_sent` bookkeeping.
-- [ ] **Byte-order macros**: `rudp_htons`/`rudp_ntohs` and friends are identity on
-  MSVC (no `__BYTE_ORDER__`). Remove them from the public API (production code
-  serializes explicitly) or detect Windows; test the actual byte layout, not a
-  round trip.
-- [ ] **Package metadata**: `project(VERSION)`, `VERSION`/`SOVERSION` on shared
-  modules, a ConfigVersion file, hidden visibility for internal symbols
-  (`rudp_rx_accept`, `rudp_rx_drain` are exported today), and installation of
-  only the enabled module headers.
+- [x] **Unreliable re-anchoring after outages**: `RUDP_UNREL_RESYNC_STREAK` in
+  `src/session_rx.c` adopts the new baseline after K self-consistent ahead
+  records; verified by `test_unreliable_far_jump_resync` (`tests/test_rudp.c`).
+- [x] **Fresh/gap ACK signal**: explicit `RUDP_RECORD_FLAG_ACK` record emitted when
+  `RUDP_CHAN_FLAG_GAP_ACK_PENDING` is set on the primary channel (`src/session_tx.c`),
+  preserving Tri-ACK on bidirectional traffic; verified in `tests/test_phase6.c`.
+- [ ] **Builder reports "nothing to send"**: `rudp_session_has_pending_work()` and
+  `rudp_session_next_wakeup_ms()` report idle state before building; changing
+  `rudp_session_build_datagram()` to return `0` and adding a dedicated keepalive
+  control kind remain deferred to wire v2.
+- [x] **Retry-limit parity and signal**: standalone and session both stop after
+  `1 + RUDP_MAX_RETRIES` transmissions without packing dead channel records and
+  return `RUDP_ERR_DISCONNECTED`; tested across all 4 session TX APIs in
+  `tests/test_phase6.c` and `tests/test_rudp.c`.
+- [x] **Define `timeout == 0` in fixed mode as matching `rudp_tick(timeout = 0)`**:
+  removed immediate same-timestamp retransmit overrides in `src/session_tx.c`
+  so fixed mode uses `(uint32_t)(now - slot->timestamp) > limit` uniformly;
+  regression test added in `tests/test_phase6.c` (`12` same-timestamp builds).
+- [x] **Restore the configured initial RTO on `reset_channel`**: `rto_initial_ms`
+  stored per channel and restored on `rudp_session_reset_channel()` (`src/session.c`,
+  tested in `tests/test_phase4.c`).
+- [x] **Count duplicate ACKs only for transmitted slots**: duplicate ACKs only count
+  once `slot->tx_count > 0U` (`src/reliability.c`, tested in `tests/test_rudp.c`).
+- [x] **Motion profile**: jerk computed only from `tx->samples >= 3` (`src/motion.c`),
+  tested in `tests/test_phase4.c` (`motion_cold_start_and_stream_reset`).
+- [x] **Entropy helper**: `rudp_calc_entropy()` mixes `session_seed`, `channel_id`,
+  and `path_id` orthogonally (`include/rudp_io.h`), `rudp_session_set_seed()` is
+  wired through session + multipath selection, and `test_entropy_orthogonality`
+  (`tests/test_rudp.c`) verifies non-collision.
+- [x] **Byte-order macros**: explicit Windows/MSVC and endianness detection in
+  `include/protocol_tfv.h`, byte-layout verified in `tests/test_tfv.c` and
+  `s390x` Big-Endian cross-compile (`make test-arch`).
+- [ ] **Package metadata**: `project(VERSION)`, `C_VISIBILITY_PRESET hidden`, and
+  `zcrudpConfigVersion.cmake` are in place (`tests/test_cmake.py`); `VERSION`/`SOVERSION`
+  on shared module targets and per-module filtered header installation remain open.
 - [x] **SECURITY.md rewrite**: the file interleaved two versions (duplicated
   titles, paragraphs cut mid-sentence) and claimed the 512 unreliable bound
   "prevents malicious desynchronization from muting telemetry channels", which is
@@ -268,10 +250,11 @@ commit `0c5d742`; measurements quoted inline. Checked entries landed with the
 Review-specific gaps (2026-10-22); the broader tooling roadmap lives in Phase 6.
 
 - [x] Unit tests for `io.c` (100% API coverage including zero-copy iovec spans, cursor exhaustion, validation) and coverage of the session builder's retry-limit disconnect path across all 4 TX APIs (`tests/test_phase6.c`).
-- [ ] CI matrix: macOS (clang), Windows MSVC, 32-bit and big-endian
-  cross-compiles (static asserts), C++ consumers (g++/clang++ added 2026-10-22),
-  shared-install consumers (`test-modules` fixed 2026-10-22), coverage gate, fuzz
-  job.
+- [ ] CI matrix: 32-bit (`x86`), 64-bit Big-Endian (`s390x`), and ARM64 (`aarch64`)
+  cross-compiles with static asserts (`make test-arch`), C++ consumers
+  (`g++`/`zig c++`), shared-install consumers (`test-modules`), ASan/UBSan,
+  mutation tests (`test-mutations`), and fuzzing (`test_phase6`) run in CI;
+  native macOS (clang), Windows MSVC, and line-coverage gates remain open.
 - [ ] Benchmarks: bidirectional traffic, per-tick heartbeats, reset/reconnect,
   outage above 512 packets; KCP profile with explicit `ikcp_flush()` per tick and
   `ikcp_wndsize(kcp, 64, 128)` (default KCP window is 32 and `ikcp_nodelay`
@@ -521,11 +504,11 @@ related work.
   - **Probe and repair budget**: Share one per-context pacing budget across original data, ACKs, RTT controls, tail copies, retransmissions, and parity. At most one RTT probe and one early tail copy may be outstanding; neither can recursively arm another. New application data continues during calibration, while parity and speculative repairs must yield when the finite-rate link is already saturated. Define epoch wrap, delayed replies, reset, clock wrap, ACK loss, reordering, application stalls, and retry-limit transitions before implementation.
   - **Cross-tier conformance tests**: Feed identical traces through the standalone context and session wrapper and require identical sequence advancement, RTT samples, RTO updates, retransmission choices, and disconnect decisions. First case to write: the retry-limit gap (standalone stops after 1 + `RUDP_MAX_RETRIES` transmissions, the session builder after one more; see P0). Fuzz the packed codec separately from the state machine, then run finite-bandwidth/queue benchmarks reporting completion, useful bytes, total wire bytes, p99 and worst-case latency, CPU, and exact static RAM.
 - [ ] **Revisit recovery memory / traffic / latency tradeoffs (explicitly deferred)**: Preserve the measured adaptive-recovery baseline (5,620 B/session, +352 B versus phase 4; about +9% UDP-payload traffic at 5% loss, p99 median 57 ms versus 263 ms). Investigate packed timeout counters, optional recovery-state storage, shared RTT estimation only where path/queue semantics permit it, and selective ACK extensions that suppress redundant retransmissions. Target retaining the latency improvement while reducing added RAM and returning toward phase-4 traffic; these are experimental objectives, not guarantees. Validate with unchanged baseline workloads plus finite-rate links, bounded queues, reordering, correlated loss and application stalls before claiming a simultaneous improvement.
-- [ ] **Close residual audit and public-API drift**:
-  - Decide and enforce `RUDP_CHANNEL_FLAG_ORDERED` semantics or remove the inert flag; keep rejecting reliable sends on channels without `RUDP_CHANNEL_FLAG_RELIABLE`. Rename `RUDP_CHANNEL_FLAG_ENCRYPTED` to an explicit integration hint or remove it so no caller can mistake metadata for active encryption.
+- [x] **Close residual audit and public-API drift**:
+  - [x] `RUDP_CHANNEL_FLAG_ORDERED` enforced for zero-HoL unordered vs ordered delivery (`src/rx.c`, `tests/test_phase5.c`), `RUDP_CHANNEL_HINT_EXTERNAL_AEAD` added in `include/rudp_config.h`, and reliable sends on `UNRELIABLE` channels rejected.
   - [x] Remove the duplicated/stale Doxygen `@return` lines, document the actual public return values and current inert hints, and synchronize `ARCHITECTURE.md` with the checked structures and state machine.
-  - Move the public byte-order helper macros into internal/test scope if production code continues to serialize explicitly; retain the `RUDP_` namespace for every exported macro.
-  - Add a mutation-test job for parser bounds, stale/future ACK rejection, valid reset state clearing, capability enforcement, and exact datagram lengths so the six historically surviving validation mutations cannot regress silently.
+  - [x] Explicit Windows/MSVC and endianness detection added to byte-order helpers in `include/protocol_tfv.h` (retained under `RUDP_` public scope for TFV callers/tests).
+  - [x] Mutation-test job (`make test-mutations` / `tests/test_mutations.py`) running in CI to catch parser bounds, stale/future ACK, reset, capability, and length regressions.
 - [x] **Estimable / Dead-Reckoning Classification**: Kinematic client-side predictor (`rudp_motion_dr_s` in `zcrudp::motion`: `HOLD`, `LINEAR`, damped `MANEUVER` quadratic extrapolation with bounded horizon clamp and clone deduplication).
 - [x] **Transport recovery roadmap (same messages and delivery guarantees as ENet / KCP-fast)**:
   - [x] **Selective ACKs**: 32-bit wire-compatible SACK bitmap in explicit `RUDP_RECORD_FLAG_ACK` records, wrap-safe validation rejecting unsent/out-of-window bits, and RFC 6675 FACK 1-RTT multi-loss repair without Go-Back-N.
@@ -546,9 +529,9 @@ related work.
 - [x] **Benchmarking Suite (`bench/bench_rudp.c`)**: Codec throughput (Mops/s, Mpps for single frames/records) and amortized cost (ns/op), repeated samples and reproducible CSV reports and optional local SVG output (`make bench`, `make bench-report`).
 - [x] **Competitive transport benchmark (`bench/compare_transport.c`)**: Run the actual zcrudp, ENet and KCP engines (default and fast profiles) through the same virtual datagram link. Nine scenarios, five seeds, 2,400 ordered 4-byte messages per run; measured goodput, p50/p95/p99 delay, emitted bytes and host simulation cost. Pinned/checksummed dependencies, CSV, environment metadata and comparative graphs (`make compare`, `make test-compare`). Failed runs remain visible.
 - [x] **Transport-capacity fairness matrix**: Preserves the 63-message admission cap as the matched-capacity baseline (`ZCRUDP_ADMISSION_CAP` in `bench/compare_transport.c`) and adds deterministic admission-cap sweep (`ZCRUDP_ADMISSION_CAP=32`, etc.) and capacity checks in `tests/test_comparison.py`.
-- [ ] **Physical network comparison & Netem harness**:
-  - Add a shared real-socket test harness using Linux `netem` for adverse network emulation: Gilbert-Elliott burst loss models, Pareto delay/jitter distributions, and asymmetric packet reordering.
-  - Measure empirical Cumulative Distribution Functions (CDFs) of latency (p50, p95, p99), goodput, CPU time, and allocation accounting against ENet and TCP baselines under matching constraints.
+- [x] **Physical network comparison & Netem harness (`bench/netem_harness.py`, `make test-netem`)**:
+  - Real-socket UDP loopback (`zcrudp` via `bindings/python/zcrudp.py`) adverse link emulator implementing Gilbert-Elliott burst loss, Pareto delay/jitter, and asymmetric packet reordering, plus reproducible Linux `tc qdisc netem` commands (`--print-netem`).
+  - Measures empirical CDFs of latency (`p50`, `p95`, `p99`, `max`), goodput, process CPU time, and C heap allocation accounting (`0` for `zcrudp`) against a real-socket `TCP_NODELAY` loopback baseline (`make test-netem` smoke test in CI; live real-socket `ENet` comparison remains external to the virtual-link suite in `bench/compare_transport.c`).
 - [x] **Broader workloads & Payload Scalability**: Validated in `tests/test_phase6.c` across `4B`, `64B`, `256B`, `512B`, and `1200B` `rudp_stream` payloads, WAN BDP stress (`100 ms` RTT at `120 Hz`), and mixed reliable/unreliable channel bundling.
 - [x] **Fuzzing & Invariant Verification (`libFuzzer` / `AFL++`)**: `tests/fuzz_rudp.c` provides `LLVMFuzzerTestOneInput` / `rudp_fuzz_one_input` verifying Pass-1 RX atomicity, ring bounds, transactional `prepare`/`cancel` rollback, codec roundtrips, and ChaCha20-Poly1305 AEAD tamper rejection (with 5,000 deterministic iterations run in `tests/test_phase6.c` under ASan/UBSan).
 - [x] **CMake Integration (`CMakeLists.txt`)**: Static/shared core and optional profiles, CTest with active Release assertions, POSIX tool opt-in, ABI settings propagated to consumers, `add_subdirectory` targets and relocatable `find_package` installation. `make test-cmake` validates package/embedded consumers and custom configuration; Linux static/shared tested, individual game-engine integrations not certified.
