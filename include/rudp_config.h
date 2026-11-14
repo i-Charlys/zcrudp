@@ -16,9 +16,25 @@
 #define RUDP_WINDOW_SIZE 64
 #endif
 
-#if RUDP_WINDOW_SIZE < 2 || RUDP_WINDOW_SIZE > 32768 ||                                \
+#if RUDP_WINDOW_SIZE < 2 || RUDP_WINDOW_SIZE > 16384 ||                                \
     (RUDP_WINDOW_SIZE & (RUDP_WINDOW_SIZE - 1)) != 0
-#error "RUDP_WINDOW_SIZE must be a power of 2 between 2 and 32768"
+#error "RUDP_WINDOW_SIZE must be a power of 2 between 2 and 16384"
+#endif
+
+#ifndef RUDP_EXPORT
+#if defined(_WIN32) || defined(__CYGWIN__)
+#if defined(ZCRUDP_BUILDING_DLL)
+#define RUDP_EXPORT __declspec(dllexport)
+#elif defined(ZCRUDP_USE_DLL)
+#define RUDP_EXPORT __declspec(dllimport)
+#else
+#define RUDP_EXPORT
+#endif
+#elif defined(__GNUC__) || defined(__clang__)
+#define RUDP_EXPORT __attribute__((visibility("default")))
+#else
+#define RUDP_EXPORT
+#endif
 #endif
 
 #define RUDP_SLOT_FREE 0
@@ -26,8 +42,10 @@
 
 /** Normal timer-based transmission */
 #define RUDP_FAST_RETRANSMIT_OFF 0
-/** Fast retransmit flag raised by Tri-ACK */
+/** Fast retransmit flag raised by Tri-ACK or NewReno partial ACK */
 #define RUDP_FAST_RETRANSMIT_PENDING 1
+/** Slot was in flight when fast recovery began (RFC 6582 NewReno) */
+#define RUDP_FAST_RETRANSMIT_IN_RECOVERY 2
 
 /** Standalone header size (Tier 1: seq_num + ack) */
 #define RUDP_WIRE_HEADER_SIZE 4
@@ -37,6 +55,8 @@
 #define RUDP_WIRE_DATAGRAM_HEADER_SIZE 4
 /** Message record size on wire (channel_id + flags + seq_num + tfv) */
 #define RUDP_WIRE_RECORD_SIZE 8
+/** Maximum number of 8-byte records representable in an 8-bit datagram count */
+#define RUDP_MAX_RECORDS_PER_DATAGRAM 255U
 
 /** Unreliable fire-and-forget message */
 #define RUDP_RECORD_FLAG_UNRELIABLE (0U)
@@ -44,6 +64,8 @@
 #define RUDP_RECORD_FLAG_RELIABLE (1U << 0)
 /** Explicit multi-channel ACK record (seq_num carries ACK N+1) */
 #define RUDP_RECORD_FLAG_ACK (1U << 1)
+/** Mask of defined wire record flag bits */
+#define RUDP_RECORD_VALID_FLAGS_MASK (RUDP_RECORD_FLAG_RELIABLE | RUDP_RECORD_FLAG_ACK)
 
 /** Peer is disconnected or timed out */
 #define RUDP_STATE_DISCONNECTED 0
@@ -60,9 +82,8 @@
 #define RUDP_MAX_CHANNELS 4
 #endif
 
-#if RUDP_MAX_CHANNELS < 1 || RUDP_MAX_CHANNELS > 255 ||                                \
-    (RUDP_MAX_CHANNELS & (RUDP_MAX_CHANNELS - 1)) != 0
-#error "RUDP_MAX_CHANNELS must be a power of 2 between 1 and 255"
+#if RUDP_MAX_CHANNELS < 1 || RUDP_MAX_CHANNELS > 255
+#error "RUDP_MAX_CHANNELS must be between 1 and 255"
 #endif
 
 #ifndef RUDP_UNRELIABLE_MAX_AHEAD
@@ -77,8 +98,10 @@
 #define RUDP_CHANNEL_FLAG_RELIABLE (1U << 0)
 /** Declarative hint; reliable session delivery is always ordered */
 #define RUDP_CHANNEL_FLAG_ORDERED (1U << 1)
-/** Integration hint only; the library performs no encryption */
+/** Integration hint only (legacy name); zcrudp performs NO internal encryption */
 #define RUDP_CHANNEL_FLAG_ENCRYPTED (1U << 2)
+/** Clear alias indicating caller-managed external AEAD/DTLS/WireGuard protection */
+#define RUDP_CHANNEL_HINT_EXTERNAL_AEAD RUDP_CHANNEL_FLAG_ENCRYPTED
 
 #ifndef RUDP_DEFAULT_MTU
 /** Safe default UDP datagram payload limit preventing IP fragmentation */

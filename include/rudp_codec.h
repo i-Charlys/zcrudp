@@ -17,8 +17,8 @@ extern "C" {
  * @return Number of bytes written (4 on success), or RUDP_ERR_INVALID_ARG on
  * error.
  */
-int rudp_pack_datagram_header(const rudp_datagram_header_s *header, uint8_t *out_buf,
-                              size_t max_len);
+RUDP_EXPORT int rudp_pack_datagram_header(const rudp_datagram_header_s *header,
+                                          uint8_t *out_buf, size_t max_len);
 
 /**
  * @brief Deserializes a 4-byte datagram header from Big-Endian network format.
@@ -29,8 +29,8 @@ int rudp_pack_datagram_header(const rudp_datagram_header_s *header, uint8_t *out
  * @param out_header Pointer to destination datagram header.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_unpack_datagram_header(const uint8_t *in_buf, size_t in_len,
-                                rudp_datagram_header_s *out_header);
+RUDP_EXPORT int rudp_unpack_datagram_header(const uint8_t *in_buf, size_t in_len,
+                                            rudp_datagram_header_s *out_header);
 
 /**
  * @brief Serializes an 8-byte message record into Big-Endian network format.
@@ -42,7 +42,8 @@ int rudp_unpack_datagram_header(const uint8_t *in_buf, size_t in_len,
  * @return Number of bytes written (8 on success), or RUDP_ERR_INVALID_ARG on
  * error.
  */
-int rudp_pack_record(const rudp_record_s *record, uint8_t *out_buf, size_t max_len);
+RUDP_EXPORT int rudp_pack_record(const rudp_record_s *record, uint8_t *out_buf,
+                                 size_t max_len);
 
 /**
  * @brief Deserializes an 8-byte message record from Big-Endian network format.
@@ -52,7 +53,8 @@ int rudp_pack_record(const rudp_record_s *record, uint8_t *out_buf, size_t max_l
  * @param out_record Pointer to destination record.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_unpack_record(const uint8_t *in_buf, size_t in_len, rudp_record_s *out_record);
+RUDP_EXPORT int rudp_unpack_record(const uint8_t *in_buf, size_t in_len,
+                                   rudp_record_s *out_record);
 
 /**
  * @brief Deserializes and validates an entire bundled datagram (header + count
@@ -65,9 +67,9 @@ int rudp_unpack_record(const uint8_t *in_buf, size_t in_len, rudp_record_s *out_
  * @param max_records Capacity of out_records array.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_unpack_datagram(const uint8_t *in_buf, size_t in_len,
-                         rudp_datagram_header_s *out_header, rudp_record_s *out_records,
-                         size_t max_records);
+RUDP_EXPORT int rudp_unpack_datagram(const uint8_t *in_buf, size_t in_len,
+                                     rudp_datagram_header_s *out_header,
+                                     rudp_record_s *out_records, size_t max_records);
 
 /**
  * @brief Serializes a 4-byte RUDP header into Big-Endian network format.
@@ -79,7 +81,8 @@ int rudp_unpack_datagram(const uint8_t *in_buf, size_t in_len,
  * @return Number of bytes written (4 on success), or RUDP_ERR_INVALID_ARG on
  * error.
  */
-int rudp_pack_header(const rudp_header_s *header, uint8_t *out_buf, size_t max_len);
+RUDP_EXPORT int rudp_pack_header(const rudp_header_s *header, uint8_t *out_buf,
+                                 size_t max_len);
 
 /**
  * @brief Serializes a 4-byte TFV packet payload into Big-Endian network format.
@@ -91,7 +94,8 @@ int rudp_pack_header(const rudp_header_s *header, uint8_t *out_buf, size_t max_l
  * @return Number of bytes written (4 on success), or RUDP_ERR_INVALID_ARG on
  * error.
  */
-int rudp_pack_payload(const tfv_packet_u *packet, uint8_t *out_buf, size_t max_len);
+RUDP_EXPORT int rudp_pack_payload(const tfv_packet_u *packet, uint8_t *out_buf,
+                                  size_t max_len);
 
 /**
  * @brief Serializes a RUDP frame (Tier 2: 8 bytes) into a network-ready
@@ -104,7 +108,8 @@ int rudp_pack_payload(const tfv_packet_u *packet, uint8_t *out_buf, size_t max_l
  * @return Number of bytes written (8 on success), or RUDP_ERR_INVALID_ARG on
  * error.
  */
-int rudp_pack_frame(const rudp_frame_s *frame, uint8_t *out_buf, size_t max_len);
+RUDP_EXPORT int rudp_pack_frame(const rudp_frame_s *frame, uint8_t *out_buf,
+                                size_t max_len);
 
 /**
  * @brief Serializes a standalone cumulative ACK (Tier 1: 4 bytes) into network
@@ -117,7 +122,7 @@ int rudp_pack_frame(const rudp_frame_s *frame, uint8_t *out_buf, size_t max_len)
  * @return Number of bytes written (4 on success), or RUDP_ERR_INVALID_ARG on
  * error.
  */
-int rudp_pack_ack(uint16_t ack_num, uint8_t *out_buf, size_t max_len);
+RUDP_EXPORT int rudp_pack_ack(uint16_t ack_num, uint8_t *out_buf, size_t max_len);
 
 /**
  * @brief Decodes a 4-byte RUDP header from network Big-Endian format.
@@ -127,7 +132,8 @@ int rudp_pack_ack(uint16_t ack_num, uint8_t *out_buf, size_t max_len);
  * @param out_header Pointer to store the decoded header.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_unpack_header(const uint8_t *in_buf, size_t in_len, rudp_header_s *out_header);
+RUDP_EXPORT int rudp_unpack_header(const uint8_t *in_buf, size_t in_len,
+                                   rudp_header_s *out_header);
 
 /**
  * @brief Decodes a 4-byte TFV packet payload from Big-Endian network format.
@@ -137,7 +143,8 @@ int rudp_unpack_header(const uint8_t *in_buf, size_t in_len, rudp_header_s *out_
  * @param out_packet Pointer to store the extracted TFV packet.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_unpack_payload(const uint8_t *in_buf, size_t in_len, tfv_packet_u *out_packet);
+RUDP_EXPORT int rudp_unpack_payload(const uint8_t *in_buf, size_t in_len,
+                                    tfv_packet_u *out_packet);
 
 /**
  * @brief Decodes a standalone ACK (Tier 1: 4 bytes) from network format.
@@ -147,7 +154,7 @@ int rudp_unpack_payload(const uint8_t *in_buf, size_t in_len, tfv_packet_u *out_
  * @param out_ack Pointer to store the extracted ACK number.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_unpack_ack(const uint8_t *in_buf, size_t in_len, uint16_t *out_ack);
+RUDP_EXPORT int rudp_unpack_ack(const uint8_t *in_buf, size_t in_len, uint16_t *out_ack);
 
 /**
  * @brief Deserializes a network byte buffer into a full RUDP frame struct (Tier
@@ -158,7 +165,8 @@ int rudp_unpack_ack(const uint8_t *in_buf, size_t in_len, uint16_t *out_ack);
  * @param out_frame Destination frame pointer.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_unpack_frame(const uint8_t *in_buf, size_t in_len, rudp_frame_s *out_frame);
+RUDP_EXPORT int rudp_unpack_frame(const uint8_t *in_buf, size_t in_len,
+                                  rudp_frame_s *out_frame);
 
 #ifdef __cplusplus
 }

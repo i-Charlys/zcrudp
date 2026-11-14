@@ -26,10 +26,11 @@ typedef struct {
  * Encode returns bytes; decode returns sample count (0 stale), negative error.
  * Failed capacity checks never consume sequence numbers or receiver state.
  * Serial ordering assumes fewer than 32768 outstanding sample intervals. */
-int rudp_scalar_encode(rudp_scalar_tx_s *tx, uint16_t value, bool rolling, uint8_t *out,
-                       size_t capacity);
-int rudp_scalar_decode(rudp_scalar_rx_s *rx, const uint8_t *in, size_t length,
-                       bool rolling, rudp_scalar_sample_s *out, size_t capacity);
+RUDP_EXPORT int rudp_scalar_encode(rudp_scalar_tx_s *tx, uint16_t value, bool rolling,
+                                    uint8_t *out, size_t capacity);
+RUDP_EXPORT int rudp_scalar_decode(rudp_scalar_rx_s *rx, const uint8_t *in,
+                                    size_t length, bool rolling,
+                                    rudp_scalar_sample_s *out, size_t capacity);
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,5 @@
 #include "rudp_session.h"
+#include "rx_internal.h"
 #include "rudp_reliability.h"
 #include "rudp_codec.h"
 #include <string.h>
@@ -25,7 +26,20 @@ int rudp_session_config_channel(rudp_session_s *session, uint8_t channel_id,
     return RUDP_ERR_INVALID_ARG;
   }
 
-  session->channels[channel_id].flags = flags;
+  rudp_channel_s *chan = &session->channels[channel_id];
+  if (chan->ctx.head != chan->ctx.tail) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+#if RUDP_EXTERNAL_RX_STORAGE
+  if (chan->rx_present)
+#endif
+    for (size_t i = 0; i < RUDP_RX_BITMAP_SIZE; ++i) {
+      if (chan->rx_present[i]) {
+        return RUDP_ERR_INVALID_ARG;
+      }
+    }
+
+  chan->flags = flags;
   if (channel_id >= session->active_channels) {
     session->active_channels = (uint8_t)(channel_id + 1);
   }
@@ -57,10 +71,12 @@ int rudp_session_config_recovery(rudp_session_s *session, uint8_t channel,
     for (size_t i = 0; i < RUDP_RX_BITMAP_SIZE; ++i)
       if (chan->rx_present[i])
         return RUDP_ERR_BUFFER_FULL;
-  chan->rto_min_ms = min_ms;
-  chan->rto_max_ms = max_ms;
-  chan->rto_ms = initial_ms;
+  chan->rto_min_ms = (uint16_t)min_ms;
+  chan->rto_max_ms = (uint16_t)max_ms;
+  chan->rto_ms = (uint16_t)initial_ms;
+  chan->rto_initial_ms = (uint16_t)initial_ms;
   chan->srtt_scaled = chan->rttvar_scaled = chan->last_rtt_sample = 0;
+  chan->chan_backoff &= (uint8_t)~RUDP_CHAN_BACKOFF_MASK;
   memset(chan->timeout_backoffs, 0, sizeof(chan->timeout_backoffs));
   return RUDP_OK;
 }
@@ -76,13 +92,17 @@ int rudp_session_reset_channel(rudp_session_s *session, uint8_t channel_id) {
   chan->ack_pending = 0;
   chan->last_ack_sent = 0;
   chan->next_unreliable_seq = 0;
+  chan->unrel_candidate_seq = 0;
+  chan->unrel_ahead_streak &= (uint8_t)~RUDP_CHAN_STREAK_MASK;
+  chan->chan_backoff &=
+      (uint8_t)~(RUDP_CHAN_BACKOFF_MASK | RUDP_CHAN_FLAG_GAP_ACK_PENDING);
 #if RUDP_EXTERNAL_RX_STORAGE
   if (chan->rx_present)
 #endif
     memset(chan->rx_present, 0, RUDP_RX_BITMAP_SIZE);
   memset(chan->timeout_backoffs, 0, sizeof(chan->timeout_backoffs));
   chan->srtt_scaled = chan->rttvar_scaled = chan->last_rtt_sample = 0;
-  chan->rto_ms = chan->rto_max_ms;
+  chan->rto_ms = chan->rto_initial_ms;
 
   return rudp_reset(&chan->ctx);
 }
@@ -95,11 +115,33 @@ int rudp_session_reset(rudp_session_s *session) {
   for (uint8_t i = 0; i < RUDP_MAX_CHANNELS; i++) {
     rudp_session_reset_channel(session, i);
   }
+  session->channels[0].unrel_ahead_streak = 0;
+  session->channels[0].chan_backoff = 0;
   session->active_channels = 0;
   session->rr_cursor = 0;
   session->session_seed = 0;
 
   return RUDP_OK;
+}
+
+int rudp_session_set_mtu(rudp_session_s *session, size_t mtu_bytes) {
+  if (!session ||
+      mtu_bytes < (size_t)(RUDP_WIRE_DATAGRAM_HEADER_SIZE + RUDP_WIRE_RECORD_SIZE)) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  size_t recs = (mtu_bytes - RUDP_WIRE_DATAGRAM_HEADER_SIZE) / RUDP_WIRE_RECORD_SIZE;
+  if (recs > RUDP_MAX_RECORDS_PER_DATAGRAM) {
+    recs = RUDP_MAX_RECORDS_PER_DATAGRAM;
+  }
+  uint8_t r = (uint8_t)recs;
+  session->channels[0].unrel_ahead_streak =
+      (uint8_t)((session->channels[0].unrel_ahead_streak & RUDP_CHAN_STREAK_MASK) |
+                ((r & 0x1FU) << RUDP_CHAN_MTU_LO_SHIFT));
+  session->channels[0].chan_backoff =
+      (uint8_t)((session->channels[0].chan_backoff &
+                 (RUDP_CHAN_BACKOFF_MASK | RUDP_CHAN_FLAG_GAP_ACK_PENDING)) |
+                (r & RUDP_CHAN_MTU_HI_MASK));
+  return (int)recs;
 }
 
 #if RUDP_EXTERNAL_RX_STORAGE

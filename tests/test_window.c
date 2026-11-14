@@ -4,7 +4,7 @@
 
 /**
  * @brief Generic test verifying the lifecycle, boundary capacity, and modulo wrap-around
- *        for ANY valid compile-time RUDP_WINDOW_SIZE (from MIN=2 to MAX=32768).
+ *        for ANY valid compile-time RUDP_WINDOW_SIZE (from MIN=2 to MAX=16384).
  */
 void test_window_lifecycle(void) {
     rudp_context_s ctx;

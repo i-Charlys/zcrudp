@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(zcrudp LANGUAGES C)
+project(zcrudp VERSION 0.1.0 LANGUAGES C)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -8,15 +8,15 @@ option(ZCRUDP_BUILD_TESTS "Build CTest tests" ${PROJECT_IS_TOP_LEVEL})
 option(ZCRUDP_BUILD_TOOLS "Build POSIX demo and codec benchmark" OFF)
 option(ZCRUDP_BUILD_PROFILES "Build optional scalar and multipart profiles" ON)
 option(ZCRUDP_WARNINGS_AS_ERRORS "Treat project compiler warnings as errors" OFF)
-set(ZCRUDP_WINDOW_SIZE 64 CACHE STRING "Power-of-two window size, 2..32768")
+set(ZCRUDP_WINDOW_SIZE 64 CACHE STRING "Power-of-two window size, 2..16384")
 set(ZCRUDP_MAX_CHANNELS 4 CACHE STRING "Session channel count, 1..255")
 if(NOT ZCRUDP_WINDOW_SIZE MATCHES "^[0-9]+$" OR
    NOT ZCRUDP_MAX_CHANNELS MATCHES "^[0-9]+$")
   message(FATAL_ERROR "Window and channel counts must be integers")
 endif()
-if(ZCRUDP_WINDOW_SIZE LESS 2 OR ZCRUDP_WINDOW_SIZE GREATER 32768 OR
+if(ZCRUDP_WINDOW_SIZE LESS 2 OR ZCRUDP_WINDOW_SIZE GREATER 16384 OR
    ZCRUDP_MAX_CHANNELS LESS 1 OR ZCRUDP_MAX_CHANNELS GREATER 255)
-  message(FATAL_ERROR "Window must be 2..32768 and channels 1..255")
+  message(FATAL_ERROR "Window must be 2..16384 and channels 1..255")
 endif()
 math(EXPR window_remainder "${ZCRUDP_WINDOW_SIZE} & (${ZCRUDP_WINDOW_SIZE} - 1)")
 if(NOT window_remainder EQUAL 0)
@@ -67,7 +67,11 @@ function(zcrudp_module name)
   add_library(zcrudp_${name} ${ARGN})
   add_library(zcrudp::${name} ALIAS zcrudp_${name})
   set_target_properties(zcrudp_${name} PROPERTIES EXPORT_NAME ${name}
+    C_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
     WINDOWS_EXPORT_ALL_SYMBOLS YES)
+  target_compile_definitions(zcrudp_${name} PRIVATE
+    $<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,SHARED_LIBRARY>:ZCRUDP_BUILDING_DLL>)
   # Installed shared modules depend on each other (session -> reliability,
   # motion -> scalar): resolve siblings relative to the library itself.
   if(APPLE)
@@ -147,7 +151,7 @@ if(ZCRUDP_BUILD_TESTS AND ZCRUDP_BUILD_RELIABILITY)
   add_executable(test_tfv tests/test_tfv.c)
   target_link_libraries(test_tfv PRIVATE zcrudp)
   zcrudp_test(test_tfv)
-  foreach(window IN ITEMS 2 32768)
+  foreach(window IN ITEMS 2 16384)
     add_executable(test_window_${window} tests/test_window.c ${ZCRUDP_RELIABILITY_SOURCES})
     target_include_directories(test_window_${window} PRIVATE include)
     target_compile_definitions(test_window_${window} PRIVATE RUDP_WINDOW_SIZE=${window})
@@ -196,4 +200,11 @@ install(EXPORT zcrudpTargets NAMESPACE zcrudp:: DESTINATION ${CMAKE_INSTALL_LIBD
 configure_package_config_file(cmake/zcrudpConfig.cmake.in
   ${CMAKE_CURRENT_BINARY_DIR}/zcrudpConfig.cmake
   INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/zcrudp)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/zcrudpConfig.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/zcrudp)
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/zcrudpConfigVersion.cmake
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion)
+install(FILES
+  ${CMAKE_CURRENT_BINARY_DIR}/zcrudpConfig.cmake
+  ${CMAKE_CURRENT_BINARY_DIR}/zcrudpConfigVersion.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/zcrudp)

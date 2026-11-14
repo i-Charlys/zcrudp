@@ -14,7 +14,7 @@ extern "C" {
  * @param ctx Pointer to the RUDP context.
  * @param now Current timestamp in milliseconds.
  */
-void rudp_touch(rudp_context_s *ctx, uint32_t now);
+RUDP_EXPORT void rudp_touch(rudp_context_s *ctx, uint32_t now);
 
 /**
  * @brief Checks if a RUDP context connection is active and responsive within an
@@ -26,7 +26,8 @@ void rudp_touch(rudp_context_s *ctx, uint32_t now);
  * disables idle check).
  * @return true if connected and within idle timeout, false otherwise.
  */
-bool rudp_is_alive(const rudp_context_s *ctx, uint32_t now, uint32_t idle_timeout);
+RUDP_EXPORT bool rudp_is_alive(const rudp_context_s *ctx, uint32_t now,
+                               uint32_t idle_timeout);
 
 /**
  * @brief Initializes a RUDP context.
@@ -34,7 +35,7 @@ bool rudp_is_alive(const rudp_context_s *ctx, uint32_t now, uint32_t idle_timeou
  * @param ctx Pointer to the RUDP context to initialize.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG.
  */
-int rudp_init(rudp_context_s *ctx);
+RUDP_EXPORT int rudp_init(rudp_context_s *ctx);
 
 /**
  * @brief Resets a RUDP context to a healthy connected state, clearing in-flight
@@ -43,7 +44,7 @@ int rudp_init(rudp_context_s *ctx);
  * @param ctx Pointer to the RUDP context.
  * @return RUDP_OK on success, or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_reset(rudp_context_s *ctx);
+RUDP_EXPORT int rudp_reset(rudp_context_s *ctx);
 
 /**
  * @brief Queues a packet for transmission into the sliding window.
@@ -54,7 +55,7 @@ int rudp_reset(rudp_context_s *ctx);
  * @return RUDP_OK on success, RUDP_ERR_BUFFER_FULL if buffer is full,
  * RUDP_ERR_DISCONNECTED if disconnected, or RUDP_ERR_INVALID_ARG.
  */
-int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now);
+RUDP_EXPORT int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now);
 
 /**
  * @brief Processes an incoming RUDP frame, updates cumulative ACK, and extracts
@@ -66,7 +67,8 @@ int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now);
  * @return 1 on new packet delivered, 0 if duplicate/out-of-order, or negative
  * RUDP_ERR_* code on error.
  */
-int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_packet);
+RUDP_EXPORT int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame,
+                          tfv_packet_u *out_packet);
 
 /**
  * @brief Processes an incoming cumulative ACK under the N+1 convention with
@@ -81,7 +83,8 @@ int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame, tfv_packet_u *out_
  * @return RUDP_OK on success, RUDP_ERR_OUT_OF_WINDOW if stale/ahead, or
  * RUDP_ERR_INVALID_ARG.
  */
-int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate_ack);
+RUDP_EXPORT int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num,
+                                 bool count_duplicate_ack);
 
 /**
  * @brief Processes an incoming cumulative ACK under the N+1 convention.
@@ -91,7 +94,7 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
  * @return RUDP_OK on success, RUDP_ERR_OUT_OF_WINDOW if stale/ahead, or
  * RUDP_ERR_INVALID_ARG.
  */
-int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num);
+RUDP_EXPORT int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num);
 
 /**
  * @brief Accessor retrieving a read-only pointer to the frame stored at a
@@ -102,7 +105,8 @@ int rudp_recv_ack(rudp_context_s *ctx, uint16_t ack_num);
  * @return Const pointer to the frame on success, or NULL if arguments are
  * invalid.
  */
-const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx, uint16_t slot_idx);
+RUDP_EXPORT const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx,
+                                                    uint16_t slot_idx);
 
 /**
  * @brief Collects the indices of all slots currently in flight and
@@ -113,8 +117,8 @@ const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx, uint16_t slot
  * @param max_indices Maximum capacity of out_indices.
  * @return Number of indices written (>= 0), or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_get_unacked_slots(const rudp_context_s *ctx, uint16_t *out_indices,
-                           int max_indices);
+RUDP_EXPORT int rudp_get_unacked_slots(const rudp_context_s *ctx, uint16_t *out_indices,
+                                       int max_indices);
 
 /**
  * @brief Handles retransmissions for timed-out packets.
@@ -128,8 +132,9 @@ int rudp_get_unacked_slots(const rudp_context_s *ctx, uint16_t *out_indices,
  * @return A result whose count is the number of collected slot indices and
  * whose status is RUDP_OK, RUDP_ERR_INVALID_ARG, or RUDP_ERR_DISCONNECTED.
  */
-rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout,
-                             uint16_t *out_indices, int max_indices);
+RUDP_EXPORT rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now,
+                                         uint32_t timeout, uint16_t *out_indices,
+                                         int max_indices);
 
 #ifdef __cplusplus
 }

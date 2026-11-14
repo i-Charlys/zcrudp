@@ -32,6 +32,10 @@ int main(void) {
   /* Reliable input without backing memory must not even apply its header ACK. */
   tfv_packet_u payload = {.raw = 0};
   assert(rudp_session_send_reliable(&s, 0, payload, 0) == RUDP_OK);
+  {
+    uint8_t tx_dgram[32];
+    assert(rudp_session_build_datagram(&s, 0, tx_dgram, sizeof(tx_dgram), 0, 1000) == 12);
+  }
   memcpy(&before, &s, sizeof(s));
   assert(rudp_session_process_datagram(&s, bytes,
                                        data(bytes, 0, 0, RUDP_RECORD_FLAG_RELIABLE, 1),

@@ -32,15 +32,22 @@ int rudp_rx_accept(rudp_channel_s *channel, const rudp_record_s *record,
   if (distance < RUDP_WINDOW_SIZE) {
     uint16_t slot = record->seq_num & (RUDP_WINDOW_SIZE - 1);
     uint8_t mask = (uint8_t)(1U << (slot & 7));
-    if (!(channel->rx_present[slot / 8] & mask)) {
+    if (channel->rx_present[slot / 8] & mask) {
+      /* Duplicate ahead-of-order segment already buffered: trigger duplicate ACK. */
+      channel->ack_pending = 1;
+      channel->chan_backoff |= RUDP_CHAN_FLAG_GAP_ACK_PENDING;
+    } else {
       channel->rx_buffer[slot] = record->payload;
       channel->rx_present[slot / 8] |= mask;
     }
-    if (distance)
+    if (distance) {
       channel->ack_pending = 1;
+      channel->chan_backoff |= RUDP_CHAN_FLAG_GAP_ACK_PENDING;
+    }
     return rudp_rx_drain(channel, out, capacity);
   } else if (distance > 32768U) {
     channel->ack_pending = 1;
+    channel->chan_backoff |= RUDP_CHAN_FLAG_GAP_ACK_PENDING;
   }
   return 0;
 }

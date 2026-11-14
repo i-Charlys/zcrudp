@@ -122,7 +122,11 @@ typedef struct {
   uint8_t timeout_backoffs[RUDP_WINDOW_SIZE]; /**< Adaptive mode: timer
                                                  expirations only. */
   uint32_t srtt_scaled, rttvar_scaled;        /**< Fixed point: RTT x8, deviation x4. */
-  uint32_t rto_ms, rto_min_ms, rto_max_ms, last_rtt_sample;
+  uint32_t last_rtt_sample;
+  uint16_t rto_ms, rto_min_ms, rto_max_ms, rto_initial_ms;
+  uint16_t unrel_candidate_seq;
+  uint8_t unrel_ahead_streak; /**< Bits 0..2: streak; channels[0] bits 3..7: MTU lo */
+  uint8_t chan_backoff;       /**< Bits 0..3: backoff; bit 4: gap ACK; ch0 5..7: MTU hi */
 } rudp_channel_s;
 
 /**
@@ -169,7 +173,10 @@ RUDP_STATIC_ASSERT(sizeof(rudp_session_s) ==
                    (sizeof(rudp_channel_s) * (RUDP_MAX_CHANNELS) + 4),
                "rudp_session_s size mismatch");
 #endif
-RUDP_STATIC_ASSERT((RUDP_MAX_CHANNELS & (RUDP_MAX_CHANNELS - 1)) == 0,
-               "RUDP_MAX_CHANNELS must be a power of 2");
+RUDP_STATIC_ASSERT((RUDP_WINDOW_SIZE >= 2) && (RUDP_WINDOW_SIZE <= 16384) &&
+                       ((RUDP_WINDOW_SIZE & (RUDP_WINDOW_SIZE - 1)) == 0),
+                   "RUDP_WINDOW_SIZE must be a power of 2 in 2..16384");
+RUDP_STATIC_ASSERT((RUDP_MAX_CHANNELS >= 1) && (RUDP_MAX_CHANNELS <= 255),
+                   "RUDP_MAX_CHANNELS must be in 1..255");
 
 #endif /* RUDP_TYPES_H */

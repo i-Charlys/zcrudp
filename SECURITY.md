@@ -23,7 +23,7 @@ embedded cryptographic layer:
 
 - **No In-Band Encryption**: Packet headers and 4-byte TFV payloads are transmitted unencrypted on the wire.
 - **No Cryptographic Authentication**: Packets are routed solely based on the network 4-tuple (source IP, source port, destination IP, destination port).
-- **No Cryptographic Integrity**: Standard UDP checksums provide transmission error detection, but no protection against active on-path tampering or frame modification.
+- **No Cryptographic Integrity**: Standard UDP checksums only detect accidental corruption per RFC 8085 Section 3.4 and provide no protection against active on-path tampering or frame modification.
 
 ### Attacker levels
 
@@ -70,8 +70,8 @@ If deployed in untrusted network environments or for security-sensitive game tra
 
 ### D. Congestion Collapse & IP Fragmentation Defense
 
-- **Binary Exponential Backoff**: Retransmissions apply exponential backoff (capped at 64x) to avoid congestive collapse under severe packet loss.
-- **MTU Clamping**: The intra-tick bundler (`rudp_session_build_datagram`) clamps outgoing datagrams to `RUDP_DEFAULT_MTU` (1400 bytes), preventing IP fragmentation vulnerabilities and amplification.
+- **Binary Exponential Backoff (Not Congestion Control)**: Loss-triggered retransmissions apply Karn-compliant exponential backoff (capped by `rto_max_ms`) to limit retransmission storms during blackouts. Per RFC 8085 Section 3.1.2, backoff alone is not a full TCP-friendly congestion controller: applications driving sustained high bitrates over shared links must apply application-level pacing or rate control.
+- **MTU Clamping**: The intra-tick bundler (`rudp_session_build_datagram` / `rudp_session_prepare_datagram`) defaults to `RUDP_DEFAULT_MTU` (1400 bytes), keeping unencapsulated UDP/IPv4 datagrams below standard Ethernet limits to avoid IP fragmentation and amplification. Callers over constrained paths should lower this budget with `rudp_session_set_mtu()`.
 
 ## 4. Recommended Deployment Architecture
 
@@ -103,9 +103,11 @@ For public Internet deployments, embed `zcrudp` in a layered architecture:
 +-------------------------------------------------------------+
 ```
 
-A datagram with a failed authentication tag must be dropped, not used to destroy
-the session: terminating an association on a forged packet would itself be a
-denial-of-service vector.
+When layering `zcrudp` over DTLS, WireGuard, or IPv6 paths (1280-byte minimum MTU), configure a tighter session budget with `rudp_session_set_mtu()` (for example `1200` bytes, or discover safe bounds with DPLPMTUD per RFC 8899) so outer encapsulation overhead does not cause fragmentation.
+
+A datagram with a failed authentication tag must be dropped before reaching
+`rudp_session_process_datagram*()`, not used to destroy the session: terminating an
+association on a forged packet would itself be a denial-of-service vector.
 
 ## 5. Reporting a Vulnerability
 

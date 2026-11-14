@@ -27,13 +27,16 @@ typedef struct {
 /** One stream per dedicated reliable+ordered channel. Source stays valid until
  * pump returns 1 (all chunks copied to TX slots). No interleaved TFV messages.
  * start: 0 success; pump: 1 queued completely, 0 backpressure, negative error. */
-int rudp_stream_start(rudp_stream_tx_s *tx, const void *data, size_t length);
-int rudp_stream_pump(rudp_stream_tx_s *tx, rudp_session_s *session, uint8_t channel,
-                     uint32_t now);
+RUDP_EXPORT int rudp_stream_start(rudp_stream_tx_s *tx, const void *data,
+                                   size_t length);
+RUDP_EXPORT int rudp_stream_pump(rudp_stream_tx_s *tx, rudp_session_s *session,
+                                  uint8_t channel, uint32_t now);
 /** Feed only ordered delivered payloads. Returns 1 on completed message, 0 while
  * assembling, negative error. Oversized messages are drained without writing.
  * Read data/length on return 1 before feeding the next descriptor. */
-int rudp_stream_receive(rudp_stream_rx_s *rx, tfv_packet_u payload);
+RUDP_EXPORT int rudp_stream_receive(rudp_stream_rx_s *rx, tfv_packet_u payload);
+RUDP_EXPORT int rudp_stream_tx_reset(rudp_stream_tx_s *tx);
+RUDP_EXPORT int rudp_stream_rx_reset(rudp_stream_rx_s *rx);
 
 #ifdef __cplusplus
 }

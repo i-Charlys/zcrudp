@@ -93,3 +93,20 @@ int rudp_stream_receive(rudp_stream_rx_s *rx, tfv_packet_u payload) {
   rx->active = 0;
   return rx->discarding ? RUDP_ERR_BUFFER_FULL : 1;
 }
+
+int rudp_stream_tx_reset(rudp_stream_tx_s *tx) {
+  if (!tx)
+    return RUDP_ERR_INVALID_ARG;
+  *tx = (rudp_stream_tx_s){.data = NULL};
+  return RUDP_OK;
+}
+
+int rudp_stream_rx_reset(rudp_stream_rx_s *rx) {
+  if (!rx)
+    return RUDP_ERR_INVALID_ARG;
+  rx->offset = 0;
+  rx->length = 0;
+  rx->active = 0;
+  rx->discarding = 0;
+  return RUDP_OK;
+}

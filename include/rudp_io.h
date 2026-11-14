@@ -3,7 +3,12 @@
 
 /**
  * @file rudp_io.h
- * @brief Single, 100% portable and OS-agnostic vectored I/O API (Zero-Copy).
+ * @brief Portable, OS-agnostic vectored I/O scatter-gather API (zero-malloc).
+ *
+ * `rudp_iovec_s` describes caller-owned scatter-gather slices without dynamic
+ * allocation. `rudp_iovec_flatten()` performs a bounded linear copy into a
+ * caller-supplied contiguous buffer (OS sockets can alternatively pass iovecs
+ * directly to `sendmsg()` without flattening).
  */
 
 #include "rudp_config.h"
@@ -52,8 +57,8 @@ typedef struct {
  */
 static inline uint32_t rudp_calc_entropy(uint16_t session_seed, uint8_t channel_id,
                                          uint16_t flow_hint) {
-  uint32_t h =
-      (uint32_t)session_seed ^ ((uint32_t)channel_id << 8) ^ (uint32_t)flow_hint;
+  uint32_t h = ((uint32_t)session_seed << 16) | (uint32_t)flow_hint;
+  h ^= ((uint32_t)channel_id * 0x9e3779b1U);
 
   // lowbias32 32-bit Hash
   h ^= h >> 16;
@@ -73,8 +78,8 @@ static inline uint32_t rudp_calc_entropy(uint16_t session_seed, uint8_t channel_
  * @return Total bytes written on success, RUDP_ERR_BUFFER_FULL if max_len is too small,
  *         or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_iovec_flatten(const rudp_iovec_collection_s *col, uint8_t *out_buf,
-                       size_t max_len);
+RUDP_EXPORT int rudp_iovec_flatten(const rudp_iovec_collection_s *col, uint8_t *out_buf,
+                                   size_t max_len);
 
 /**
  * @brief Appends a memory slice to a scatter-gather collection.
@@ -85,7 +90,8 @@ int rudp_iovec_flatten(const rudp_iovec_collection_s *col, uint8_t *out_buf,
  * @return RUDP_OK on success, RUDP_ERR_BUFFER_FULL if the collection is full,
  *         or RUDP_ERR_INVALID_ARG on error.
  */
-int rudp_iovec_add(rudp_iovec_collection_s *col, const void *base, uint32_t len);
+RUDP_EXPORT int rudp_iovec_add(rudp_iovec_collection_s *col, const void *base,
+                               uint32_t len);
 
 #ifdef __cplusplus
 }

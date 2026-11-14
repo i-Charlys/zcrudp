@@ -212,7 +212,7 @@ static void recovery(void) {
   assert(chan->timeout_backoffs[2] == 2);
   assert(timed_ack(&session, 3, 1380) == 0 && chan->rto_ms == 50); /* Karn. */
   assert(rudp_session_reset_channel(&session, 0) == 0);
-  assert(!chan->srtt_scaled && chan->rto_ms == 2000 && !chan->timeout_backoffs[2]);
+  assert(!chan->srtt_scaled && chan->rto_ms == 100 && !chan->timeout_backoffs[2]);
 
   /* Unsigned clock wrap, one sample per RTT, and minimum clamp. */
   assert(rudp_session_config_recovery(&session, 0, 100, 10, 2000) == 0);
@@ -276,8 +276,92 @@ static void fast_retransmit_unsent(void) {
   puts("PASS: fast-retransmit request on an unsent slot is cleared by its first send");
 }
 
+static void channel_backoff_inheritance_and_cap(void) {
+  rudp_session_s s;
+  uint8_t out[64];
+  assert(rudp_session_init(&s) == RUDP_OK);
+  assert(rudp_session_config_recovery(&s, 0, 100, 10, 2000) == RUDP_OK);
+  assert(rudp_session_send_reliable(&s, 0, (tfv_packet_u){.type = 1, .value = 1}, 0) == RUDP_OK);
+  assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), 0, 100) == 12);
+  /* Four consecutive RTOs push chan_backoff to 4 (16x = 1600ms). */
+  assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), 101, 100) == 12);
+  assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), 302, 100) == 12);
+  assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), 703, 100) == 12);
+  assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), 1504, 100) == 12);
+  assert(s.channels[0].chan_backoff == 4U);
+
+  /* Newly queued packet 1 inherits chan_backoff to break Karn's deadlock. */
+  assert(rudp_session_send_reliable(&s, 0, (tfv_packet_u){.type = 1, .value = 2}, 1510) == RUDP_OK);
+  assert(s.channels[0].timeout_backoffs[1] == 4U);
+  assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), 1510, 100) == 12);
+  /* ACK=1 frees only retransmitted pkt 0 (Karn skips sample; chan_backoff remains 4). */
+  uint8_t ack[4];
+  rudp_datagram_header_s h = {.ack = 1, .ack_channel = 0, .count = 0};
+  assert(rudp_pack_datagram_header(&h, ack, sizeof(ack)) == 4);
+  assert(rudp_session_process_datagram_at(&s, ack, sizeof(ack), NULL, 0, 1520) == 0);
+  assert((s.channels[0].chan_backoff & 0x0FU) == 4U);
+  /* Subsequent ACK=2 frees clean non-retransmitted pkt 1: Karn updates RTT and resets chan_backoff. */
+  h.ack = 2;
+  assert(rudp_pack_datagram_header(&h, ack, sizeof(ack)) == 4);
+  assert(rudp_session_process_datagram_at(&s, ack, sizeof(ack), NULL, 0, 1540) == 0);
+  assert((s.channels[0].chan_backoff & 0x0FU) == 0U);
+
+  /* Adaptive backoff shift > 6 (exceeding 64x) bounded by rto_max_ms when rto_min_ms is small. */
+  assert(rudp_session_init(&s) == RUDP_OK);
+  assert(rudp_session_config_recovery(&s, 0, 10, 10, 2000) == RUDP_OK);
+  assert(rudp_session_send_reliable(&s, 0, (tfv_packet_u){.type = 1, .value = 9}, 0) == RUDP_OK);
+  assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), 0, 10) == 12);
+  uint32_t t = 0;
+  for (uint8_t step = 0; step < 9U; step++) {
+    uint32_t wait = 10U << step;
+    if (wait > 2000U) wait = 2000U;
+    /* Before RTO deadline (strict > comparison): nothing sent at exact boundary t + wait. */
+    assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), t + wait, 10) == 4);
+    t += wait + 1U;
+    /* At t + wait + 1 (including >64x at step 7 => 1280ms and capped at step 8 => 2000ms): retransmit fires. */
+    assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), t, 10) == 12);
+  }
+  assert(s.channels[0].timeout_backoffs[0] == 9U);
+  assert(s.channels[0].chan_backoff == 9U);
+  puts("PASS: channel backoff inheritance, Karn reset, and >64x backoff capped at rto_max_ms");
+}
+
+static void motion_cold_start_and_stream_reset(void) {
+  rudp_motion_tx_s m;
+  memset(&m, 0, sizeof(m));
+  uint8_t out[16];
+  /* Constant-acceleration ramp (100, 110, 130, 160 -> v=+10,+20,+30, a=+10, true jerk=0): zero false jerk on warmup. */
+  assert(rudp_motion_encode(&m, 100, 100000U, 1U, out, sizeof(out)) == 1);
+  assert(rudp_motion_encode(&m, 110, 100000U, 1U, out, sizeof(out)) == 1);
+  assert(rudp_motion_encode(&m, 130, 100000U, 1U, out, sizeof(out)) == 1);
+  assert(rudp_motion_encode(&m, 160, 100000U, 1U, out, sizeof(out)) == 1);
+  /* Actual non-zero jerk (v=+50, a=+20, j=+10) triggers duplicate emission once >= 3 prior samples exist. */
+  assert(rudp_motion_encode(&m, 210, 100000U, 1U, out, sizeof(out)) == 2);
+
+  rudp_stream_tx_s stx;
+  rudp_stream_rx_s srx;
+  uint8_t src[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  uint8_t dst[8] = {0};
+  assert(rudp_stream_start(&stx, src, sizeof(src)) == 0);
+  srx.data = dst;
+  srx.capacity = sizeof(dst);
+  srx.offset = 5;
+  srx.length = 8;
+  srx.active = 1;
+  srx.discarding = 1;
+  assert(rudp_stream_tx_reset(&stx) == RUDP_OK);
+  assert(stx.data == NULL && stx.length == 0 && stx.offset == 0 && !stx.active && !stx.descriptor_sent);
+  assert(rudp_stream_rx_reset(&srx) == RUDP_OK);
+  assert(srx.data == dst && srx.capacity == sizeof(dst) && srx.offset == 0 && srx.length == 0 && !srx.active && !srx.discarding);
+  assert(rudp_stream_tx_reset(NULL) == RUDP_ERR_INVALID_ARG);
+  assert(rudp_stream_rx_reset(NULL) == RUDP_ERR_INVALID_ARG);
+  puts("PASS: motion cold-start gating and stream tx/rx reset");
+}
+
 int main(void) {
   recovery();
+  channel_backoff_inheritance_and_cap();
+  motion_cold_start_and_stream_reset();
   iovec_bounds();
   fast_retransmit_unsent();
   reassembly(); priorities(); scalars();

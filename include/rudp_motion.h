@@ -18,9 +18,10 @@ typedef struct {
  * threshold. Returns datagram count 1 or 2, negative error. Output needs 16B.
  * The caller emits each 8B datagram; duplicates share a sequence and deduplicate.
  * This detects scalar changes, not physical units or cross-axis motion. */
-int rudp_motion_encode(rudp_motion_tx_s *tx, uint16_t value,
-                       uint32_t acceleration_threshold, uint32_t jerk_threshold,
-                       uint8_t *out, size_t capacity);
+RUDP_EXPORT int rudp_motion_encode(rudp_motion_tx_s *tx, uint16_t value,
+                                    uint32_t acceleration_threshold,
+                                    uint32_t jerk_threshold, uint8_t *out,
+                                    size_t capacity);
 
 #ifdef __cplusplus
 }

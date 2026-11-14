@@ -205,17 +205,21 @@ static void service(unsigned engine, int side) {
     if (engine == 0) {
       rudp_record_s records[175];
       int n = rudp_session_process_datagram_at(&z[side], bytes, len, records, 175, now); assert(n >= 0);
-      for (int i = 0; i < n; i++) {
-        assert(side == 1);
-        uint8_t p[4]; rudp_pack_payload(&records[i].payload, p, 4); delivery(p, 4);
-      }
+      do {
+        for (int i = 0; i < n; i++) {
+          assert(side == 1);
+          uint8_t p[4]; rudp_pack_payload(&records[i].payload, p, 4); delivery(p, 4);
+        }
+        n = rudp_session_poll(&z[side], records, 175); assert(n >= 0);
+      } while (n > 0);
     } else assert(ikcp_input(k[side], (const char *)bytes, (long)len) == 0);
   }
   if (engine == 0) {
     /* Do not emit empty ACKs unless an ACK was requested by RX. */
     int ack_pending = z[side].channels[0].ack_pending;
-    int n = rudp_session_build_datagram(&z[side], 0, bytes, sizeof bytes, now, 100); assert(n >= 4);
-    if (z[side].channels[0].ctx.state != RUDP_STATE_CONNECTED) { failed = 1; return; }
+    int n = rudp_session_build_datagram(&z[side], 0, bytes, sizeof bytes, now, 100);
+    if (n == RUDP_ERR_DISCONNECTED || z[side].channels[0].ctx.state != RUDP_STATE_CONNECTED) { failed = 1; return; }
+    assert(n >= 4);
     if (n > 4 || ack_pending) link_send(side, bytes, (unsigned)n);
   } else {
     int n;

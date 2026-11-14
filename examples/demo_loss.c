@@ -157,6 +157,8 @@ static int flush(int fd, const struct sockaddr_in *peer) {
 }
 
 static void emit_reliable(uint16_t slot) {
+  if (session.channels[0].ctx.tx_buffer[slot].tx_count == 0U)
+    session.channels[0].ctx.tx_buffer[slot].tx_count = 1U;
   const rudp_frame_s *f = rudp_get_slot_frame(&session.channels[0].ctx, slot);
   uint8_t bytes[12];
   rudp_datagram_header_s h = {.ack = session.channels[0].ctx.expected_seq_num, .ack_channel = 0, .count = 1};
@@ -332,10 +334,16 @@ int main(int argc, char **argv) {
       int got = rudp_session_process_datagram_at(&session, bytes, (size_t)n, records, 255, (uint32_t)now_ms());
       received++;
       if (got < 0) fprintf(stderr, "Rejected datagram: %d\n", got);
-      else for (int i = 0; i < got; i++) {
-        printf("RX %s seq=%u value=%u\n", records[i].channel_id == 0 ? "reliable" : "unreliable",
-               records[i].seq_num, records[i].payload.value);
-        delivered++;
+      else {
+        do {
+          for (int i = 0; i < got; i++) {
+            printf("RX %s seq=%u value=%u\n", records[i].channel_id == 0 ? "reliable" : "unreliable",
+                   records[i].seq_num, records[i].payload.value);
+            delivered++;
+          }
+          got = rudp_session_poll(&session, records, 255);
+        } while (got > 0);
+        if (got < 0) fprintf(stderr, "Poll error: %d\n", got);
       }
       if (session.channels[0].ack_pending) {
         rudp_datagram_header_s ack = {.ack = session.channels[0].ctx.expected_seq_num, .ack_channel = 0, .count = 0};

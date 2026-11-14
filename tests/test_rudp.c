@@ -969,10 +969,11 @@ void test_bug1_unreliable_stream_no_spurious_fast_retransmit(void) {
     assert(rudp_session_process_datagram(&bob, dgram, (size_t)len, delivered, 4) == 1);
     assert(bob.channels[0].ctx.expected_seq_num == 1);
 
-    // Alice sends packet 1 (seq = 1) on Channel 0 at t = 1010
+    // Alice sends packet 1 (seq = 1) on Channel 0 at t = 1010 (transmitted on wire and lost)
     tfv_packet_u p1 = { .type = 1, .flags = 0, .value = 101 };
     assert(rudp_session_send_reliable(&alice, 0, p1, 1010) == RUDP_OK);
     assert(alice.channels[0].ctx.tx_buffer[1].state == RUDP_SLOT_IN_FLIGHT);
+    assert(rudp_session_build_datagram(&alice, 0, dgram, sizeof(dgram), 1010, 100) == 12);
 
     // Bob acknowledges packet 0 by sending high-frequency unreliable telemetry on Channel 1 (100 packets)
     // Piggybacking ack = 1 for ack_channel = 0.
@@ -1203,6 +1204,10 @@ static void test_gap_triggered_fast_retransmit(void) {
     for (uint16_t i = 0; i < 5; i++) {
         tfv_packet_u p = { .type = 1, .flags = 0, .value = i };
         assert(rudp_session_send_reliable(&sender, 0, p, 1000) == RUDP_OK);
+    }
+    {
+        uint8_t init_dgram[128];
+        assert(rudp_session_build_datagram(&sender, 0, init_dgram, sizeof(init_dgram), 1000, 100) == 4 + 5 * 8);
     }
 
     // Packet 0 is delivered
@@ -1473,6 +1478,238 @@ static void test_negative_bounds_and_mutations(void) {
     printf("[OK] Negative Bounds & Mutations (M1-M6, Capability, Liveness): All boundary checks strictly validated\n");
 }
 
+static void test_unsent_slot_ack_and_dup_ack_rejected(void) {
+    rudp_session_s s;
+    uint8_t dgram[16];
+    assert(rudp_session_init(&s) == RUDP_OK);
+    assert(rudp_session_send_reliable(&s, 0, (tfv_packet_u){.type = 1, .value = 10}, 100) == RUDP_OK);
+    assert(rudp_session_send_reliable(&s, 0, (tfv_packet_u){.type = 1, .value = 11}, 100) == RUDP_OK);
+    /* Transmit only slot 0 (cap = 12 = 4B header + 1x 8B record); leave slot 1 with tx_count == 0. */
+    assert(rudp_session_build_datagram(&s, 0, dgram, 12, 100, 1000) == 12);
+    assert(s.channels[0].ctx.tx_buffer[0].tx_count == 1);
+    assert(s.channels[0].ctx.tx_buffer[1].tx_count == 0);
+
+    /* Advancing cumulative ACK past unsent slot 1 must be rejected. */
+    assert(rudp_recv_ack_ex(&s.channels[0].ctx, 2, false) == RUDP_ERR_OUT_OF_WINDOW);
+    /* Cumulative ACK for transmitted slot 0 succeeds; dup ACKs for unsent slot 1 must be ignored. */
+    assert(rudp_recv_ack_ex(&s.channels[0].ctx, 1, false) == RUDP_OK);
+    for (int i = 0; i < 4; i++) {
+        assert(rudp_recv_ack_ex(&s.channels[0].ctx, 1, false) == RUDP_OK);
+    }
+    assert(s.channels[0].ctx.duplicate_ack_count == 0);
+    assert(s.channels[0].ctx.tx_buffer[1].fast_retransmit == RUDP_FAST_RETRANSMIT_OFF);
+    printf("PASS: test_unsent_slot_ack_and_dup_ack_rejected\n");
+}
+
+static void test_newreno_partial_ack_recovery(void) {
+    rudp_context_s ctx;
+    assert(rudp_init(&ctx) == RUDP_OK);
+    for (uint16_t i = 0; i < 4; i++) {
+        assert(rudp_send(&ctx, (tfv_packet_u){.type = 1, .value = i}, 100) == RUDP_OK);
+    }
+    for (int i = 0; i < 4; i++) {
+        assert(rudp_recv_ack_ex(&ctx, 0, true) == RUDP_OK);
+    }
+    assert(ctx.tx_buffer[0].fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING);
+    assert(ctx.tx_buffer[2].fast_retransmit == RUDP_FAST_RETRANSMIT_IN_RECOVERY);
+
+    /* Partial ACK=2 jumps over 0 and 1, promoting in-recovery slot 2 to immediate retransmit. */
+    assert(rudp_recv_ack_ex(&ctx, 2, false) == RUDP_OK);
+    assert(ctx.tx_buffer[2].fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING);
+    assert(rudp_recv_ack_ex(&ctx, 4, false) == RUDP_OK);
+    assert(ctx.head == ctx.tail);
+    printf("PASS: test_newreno_partial_ack_recovery\n");
+}
+
+static void test_retry_parity_and_no_zombie_disconnect(void) {
+    rudp_context_s ctx;
+    uint16_t indices[4];
+    int tick_emits = 0;
+    assert(rudp_init(&ctx) == RUDP_OK);
+    assert(rudp_send(&ctx, (tfv_packet_u){.type = 1, .value = 7}, 0) == RUDP_OK); /* tx #1 */
+    uint32_t t = 0;
+    for (uint8_t r = 0; r < RUDP_MAX_RETRIES; r++) {
+        t += (10U << r) + 1U;
+        rudp_tick_result_s tr = rudp_tick(&ctx, t, 10, indices, 4);
+        assert(tr.status == RUDP_OK && tr.count == 1 && indices[0] == 0);
+        tick_emits++;
+    }
+    assert(tick_emits == RUDP_MAX_RETRIES);
+    assert(ctx.tx_buffer[0].retries == RUDP_MAX_RETRIES);
+    t += (10U << RUDP_MAX_RETRIES) + 1U;
+    rudp_tick_result_s disc = rudp_tick(&ctx, t, 10, indices, 4);
+    assert(disc.status == RUDP_ERR_DISCONNECTED && disc.count == 0); /* zero zombie emission */
+    assert(ctx.state == RUDP_STATE_DISCONNECTED);
+
+    rudp_session_s s;
+    uint8_t out[64];
+    assert(rudp_session_init(&s) == RUDP_OK);
+    assert(rudp_session_config_recovery(&s, 0, 10, 10, 60000U) == RUDP_OK);
+    assert(rudp_session_send_reliable(&s, 0, (tfv_packet_u){.type = 1, .value = 7}, 0) == RUDP_OK);
+    assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), 0, 10) == 12); /* tx #1 */
+    uint32_t st = 0;
+    int sends = 0;
+    for (uint8_t r = 0; r < RUDP_MAX_RETRIES; r++) {
+        st += (10U << r) + 1U;
+        assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), st, 10) == 12);
+        sends++;
+    }
+    assert(sends == RUDP_MAX_RETRIES);
+    assert(s.channels[0].ctx.tx_buffer[0].retries == RUDP_MAX_RETRIES);
+    st += (10U << RUDP_MAX_RETRIES) + 1U;
+    assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), st, 10) == RUDP_ERR_DISCONNECTED);
+    assert(s.channels[0].ctx.state == RUDP_STATE_DISCONNECTED);
+    printf("PASS: test_retry_parity_and_no_zombie_disconnect\n");
+}
+
+static void test_strict_pass1_validation_and_ack_only_null_out(void) {
+    rudp_session_s s, before;
+    uint8_t dgram[32];
+    rudp_datagram_header_s hdr = {.ack = 0, .ack_channel = 0, .count = 1};
+    rudp_record_s rec = {.channel_id = 0, .flags = RUDP_RECORD_FLAG_ACK, .seq_num = 0, .payload = {.raw = 0}};
+    assert(rudp_session_init(&s) == RUDP_OK);
+    assert(rudp_pack_datagram_header(&hdr, dgram, sizeof(dgram)) == 4);
+    assert(rudp_pack_record(&rec, dgram + 4, sizeof(dgram) - 4) == 8);
+    assert(rudp_session_process_datagram(&s, dgram, 12, NULL, 0) == 0);
+
+    rudp_record_s out[2];
+    /* Combined RELIABLE | ACK flags must fail Pass 1 atomically. */
+    rec.flags = (uint8_t)(RUDP_RECORD_FLAG_RELIABLE | RUDP_RECORD_FLAG_ACK);
+    assert(rudp_pack_record(&rec, dgram + 4, sizeof(dgram) - 4) == 8);
+    memcpy(&before, &s, sizeof(s));
+    assert(rudp_session_process_datagram(&s, dgram, 12, out, 2) == RUDP_ERR_INVALID_ARG);
+    assert(memcmp(&before, &s, sizeof(s)) == 0);
+
+    /* Unknown flag bit must fail Pass 1 atomically. */
+    rec.flags = 0x04U;
+    assert(rudp_pack_record(&rec, dgram + 4, sizeof(dgram) - 4) == 8);
+    assert(rudp_session_process_datagram(&s, dgram, 12, out, 2) == RUDP_ERR_INVALID_ARG);
+    assert(memcmp(&before, &s, sizeof(s)) == 0);
+
+    /* Reliable record targeting an unreliable-only channel must fail Pass 1 atomically. */
+    assert(rudp_session_config_channel(&s, 1, RUDP_CHANNEL_FLAG_UNRELIABLE) == RUDP_OK);
+    rec.channel_id = 1;
+    rec.flags = RUDP_RECORD_FLAG_RELIABLE;
+    assert(rudp_pack_record(&rec, dgram + 4, sizeof(dgram) - 4) == 8);
+    memcpy(&before, &s, sizeof(s));
+    assert(rudp_session_process_datagram(&s, dgram, 12, out, 2) == RUDP_ERR_INVALID_ARG);
+    assert(memcmp(&before, &s, sizeof(s)) == 0);
+    printf("PASS: test_strict_pass1_validation_and_ack_only_null_out\n");
+}
+
+static void test_duplicate_ack_record_dedup_per_datagram(void) {
+    rudp_session_s s;
+    uint8_t tx[32], rx[4 + 4 * 8];
+    assert(rudp_session_init(&s) == RUDP_OK);
+    assert(rudp_session_send_reliable(&s, 1, (tfv_packet_u){.type = 1, .value = 5}, 10) == RUDP_OK);
+    assert(rudp_session_build_datagram(&s, 0, tx, sizeof(tx), 10, 1000) == 12);
+
+    rudp_datagram_header_s hdr = {.ack = 0, .ack_channel = 0, .count = 4};
+    assert(rudp_pack_datagram_header(&hdr, rx, sizeof(rx)) == 4);
+    rudp_record_s ack_rec = {.channel_id = 1, .flags = RUDP_RECORD_FLAG_ACK, .seq_num = 0, .payload = {.raw = 0}};
+    for (int i = 0; i < 4; i++) {
+        assert(rudp_pack_record(&ack_rec, rx + 4 + (size_t)i * 8U, 8) == 8);
+    }
+    assert(rudp_session_process_datagram_at(&s, rx, sizeof(rx), NULL, 0, 20) == 0);
+    assert(s.channels[1].ctx.duplicate_ack_count == 0);
+    assert(s.channels[1].ctx.tx_buffer[0].fast_retransmit == RUDP_FAST_RETRANSMIT_OFF);
+    printf("PASS: test_duplicate_ack_record_dedup_per_datagram\n");
+}
+
+static void test_unreliable_far_jump_resync(void) {
+    rudp_session_s rx;
+    uint8_t dgram[16];
+    rudp_record_s out[2];
+    rudp_datagram_header_s hdr = {.ack = 0, .ack_channel = 0, .count = 1};
+    rudp_record_s rec = {.channel_id = 0, .flags = RUDP_RECORD_FLAG_UNRELIABLE, .seq_num = 10, .payload = {.type = 1, .value = 10}};
+    assert(rudp_session_init(&rx) == RUDP_OK);
+    assert(rudp_pack_datagram_header(&hdr, dgram, sizeof(dgram)) == 4);
+    assert(rudp_pack_record(&rec, dgram + 4, 8) == 8);
+    assert(rudp_session_process_datagram(&rx, dgram, 12, out, 2) == 1);
+
+    /* Single spoofed huge jump must be dropped without resyncing. */
+    rec.seq_num = 40000U;
+    assert(rudp_pack_record(&rec, dgram + 4, 8) == 8);
+    assert(rudp_session_process_datagram(&rx, dgram, 12, out, 2) == 0);
+
+    /* Four consecutive forward-consistent packets (>32767 away) resynchronize and deliver on packet 4. */
+    for (uint16_t i = 0; i < 3; i++) {
+        rec.seq_num = (uint16_t)(45000U + i);
+        rec.payload.value = rec.seq_num;
+        assert(rudp_pack_record(&rec, dgram + 4, 8) == 8);
+        assert(rudp_session_process_datagram(&rx, dgram, 12, out, 2) == 0);
+    }
+    rec.seq_num = 45003U;
+    rec.payload.value = 45003U;
+    assert(rudp_pack_record(&rec, dgram + 4, 8) == 8);
+    assert(rudp_session_process_datagram(&rx, dgram, 12, out, 2) == 1);
+    assert(out[0].seq_num == 45003U);
+
+    rec.seq_num = 45004U;
+    assert(rudp_pack_record(&rec, dgram + 4, 8) == 8);
+    assert(rudp_session_process_datagram(&rx, dgram, 12, out, 2) == 1);
+    printf("PASS: test_unreliable_far_jump_resync\n");
+}
+
+static void test_is_alive_sentinel_and_auto_touch(void) {
+    rudp_context_s ctx;
+    assert(rudp_init(&ctx) == RUDP_OK);
+    assert(ctx.last_rx_time == UINT32_MAX);
+    assert(rudp_is_alive(&ctx, 500000U, 1000U));
+    assert(rudp_send(&ctx, (tfv_packet_u){.raw = 1}, 1000U) == RUDP_OK);
+    assert(ctx.last_rx_time == 1000U);
+    rudp_touch(&ctx, UINT32_MAX);
+    assert(ctx.last_rx_time == UINT32_MAX - 1U);
+
+    rudp_session_s s;
+    uint8_t hdr_bytes[4];
+    rudp_datagram_header_s hdr = {.ack = 0, .ack_channel = 0, .count = 0};
+    assert(rudp_session_init(&s) == RUDP_OK);
+    assert(rudp_pack_datagram_header(&hdr, hdr_bytes, sizeof(hdr_bytes)) == 4);
+    assert(rudp_session_process_datagram_at(&s, hdr_bytes, 4, NULL, 0, 42000U) == 0);
+    assert(s.channels[0].ctx.last_rx_time == 42000U);
+    printf("PASS: test_is_alive_sentinel_and_auto_touch\n");
+}
+
+static void test_entropy_orthogonality(void) {
+    uint32_t e0 = rudp_calc_entropy(0x1234U, 0, 0x0001U);
+    uint32_t e1 = rudp_calc_entropy(0x1234U, 1, 0x0001U);
+    uint32_t e2 = rudp_calc_entropy(0x1234U, 2, 0x0001U);
+    uint32_t e_swap = rudp_calc_entropy(0x0001U, 0, 0x1234U);
+    assert(e0 != e1 && e1 != e2 && e0 != e2 && e0 != e_swap);
+    printf("PASS: test_entropy_orthogonality\n");
+}
+
+static void test_tx_transaction_wakeup_and_mtu(void) {
+    rudp_session_s s;
+    rudp_tx_plan_s plan;
+    uint8_t buf[512];
+    assert(rudp_session_init(&s) == RUDP_OK);
+    assert(rudp_session_next_wakeup_ms(&s, 100, 500) == UINT32_MAX);
+    assert(rudp_session_send_reliable(&s, 0, (tfv_packet_u){.type = 2, .value = 7}, 100) == RUDP_OK);
+    assert(rudp_session_next_wakeup_ms(&s, 100, 500) == 0U);
+
+    assert(rudp_session_prepare_datagram(&s, 100, 500, buf, sizeof(buf), &plan) == 12);
+    assert(rudp_session_cancel_datagram(&s, &plan) == RUDP_OK);
+    assert(s.channels[0].ctx.tx_buffer[0].tx_count == 0);
+    assert(rudp_session_next_wakeup_ms(&s, 100, 500) == 0U);
+
+    assert(rudp_session_prepare_datagram(&s, 100, 500, buf, sizeof(buf), &plan) == 12);
+    assert(rudp_session_commit_datagram(&s, &plan) == RUDP_OK);
+    assert(s.channels[0].ctx.tx_buffer[0].tx_count == 1);
+    uint32_t wakeup = rudp_session_next_wakeup_ms(&s, 150, 500);
+    assert(wakeup == 451U);
+    assert(rudp_session_next_wakeup_ms(&s, 150U + wakeup, 500) == 0U);
+
+    assert(rudp_session_set_mtu(&s, 11) == RUDP_ERR_INVALID_ARG);
+    assert(rudp_session_set_mtu(&s, 20) == 2);
+    for (uint16_t i = 0; i < 4; i++) {
+        assert(rudp_session_send_reliable(&s, 0, (tfv_packet_u){.type = 2, .value = 10U + i}, 200) == RUDP_OK);
+    }
+    assert(rudp_session_build_datagram(&s, 0, buf, sizeof(buf), 200, 500) == 20);
+    printf("PASS: test_tx_transaction_wakeup_and_mtu\n");
+}
+
 int main(void) {
     printf("--- MEMORY SIZE TESTS ---\n");
     printf("Header Size  : %zu bytes\n", sizeof(rudp_header_s));
@@ -1510,6 +1747,15 @@ int main(void) {
     test_bundler_retransmission_gating_and_fairness();
     test_legacy_recv_passive_ack();
     test_negative_bounds_and_mutations();
+    test_unsent_slot_ack_and_dup_ack_rejected();
+    test_newreno_partial_ack_recovery();
+    test_retry_parity_and_no_zombie_disconnect();
+    test_strict_pass1_validation_and_ack_only_null_out();
+    test_duplicate_ack_record_dedup_per_datagram();
+    test_unreliable_far_jump_resync();
+    test_is_alive_sentinel_and_auto_touch();
+    test_entropy_orthogonality();
+    test_tx_transaction_wakeup_and_mtu();
 
     printf("\n>>> ALL TESTS PASSED SUCCESSFULLY! <<<\n");
 

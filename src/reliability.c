@@ -9,6 +9,7 @@ int rudp_init(rudp_context_s *ctx) {
   *ctx = (rudp_context_s){
       .last_ack_received = UINT16_MAX, /* No ACK received yet. */
       .state = RUDP_STATE_CONNECTED,
+      .last_rx_time = UINT32_MAX, /* Sentinel: no timestamp recorded yet. */
   };
 
   return RUDP_OK;
@@ -41,8 +42,12 @@ int rudp_send(rudp_context_s *ctx, tfv_packet_u packet, uint32_t now) {
       .state = RUDP_SLOT_IN_FLIGHT,
       .retries = 0,
       .fast_retransmit = RUDP_FAST_RETRANSMIT_OFF,
-      .tx_count = 0,
+      .tx_count = 1, /* Standalone rudp_send produces an emitted wire frame. */
   };
+
+  if (ctx->last_rx_time == UINT32_MAX) {
+    ctx->last_rx_time = (now == UINT32_MAX) ? (UINT32_MAX - 1U) : now;
+  }
 
   ctx->current_seq_num = (ctx->current_seq_num + 1);
   ctx->head = (ctx->head + 1) & (RUDP_WINDOW_SIZE - 1);
@@ -54,6 +59,9 @@ int rudp_recv(rudp_context_s *ctx, const rudp_frame_s *frame,
               tfv_packet_u *out_packet) {
   if (!ctx || !frame || !out_packet) {
     return RUDP_ERR_INVALID_ARG;
+  }
+  if (ctx->state != RUDP_STATE_CONNECTED) {
+    return RUDP_ERR_DISCONNECTED;
   }
 
   /* Passive ACK processing: incoming data frames do not count toward Fast Retransmit
@@ -75,6 +83,9 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
   if (!ctx) {
     return RUDP_ERR_INVALID_ARG;
   }
+  if (ctx->state != RUDP_STATE_CONNECTED) {
+    return RUDP_ERR_DISCONNECTED;
+  }
 
   /* Out-of-window check: Reject ACKs referencing sequences strictly ahead of what was
    * sent */
@@ -82,11 +93,28 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
     return RUDP_ERR_OUT_OF_WINDOW;
   }
 
-  if (ctx->tail != ctx->head) {
-    uint16_t tail_seq = ctx->tx_buffer[ctx->tail].frame.header.seq_num;
-    if ((int16_t)(ack_num - tail_seq) < 0) {
-      // ACK is for a sequence number older than the oldest in-flight packet
-      return RUDP_ERR_OUT_OF_WINDOW;
+  if (ctx->tail == ctx->head) {
+    return (ack_num == ctx->current_seq_num) ? RUDP_OK : RUDP_ERR_OUT_OF_WINDOW;
+  }
+
+  uint16_t tail_seq = ctx->tx_buffer[ctx->tail].frame.header.seq_num;
+  if ((int16_t)(ack_num - tail_seq) < 0) {
+    /* ACK is for a sequence number older than the oldest in-flight packet */
+    return RUDP_ERR_OUT_OF_WINDOW;
+  }
+
+  /* Pre-validate any newly acknowledged range BEFORE mutating state:
+   * Reject ACKs targeting slots that were queued but never sent on the wire
+   * (tx_count == 0). */
+  if ((int16_t)(ack_num - tail_seq) > 0) {
+    uint16_t check = ctx->tail;
+    while (check != ctx->head &&
+           (int16_t)(ack_num - ctx->tx_buffer[check].frame.header.seq_num) > 0) {
+      if (ctx->tx_buffer[check].state != RUDP_SLOT_IN_FLIGHT ||
+          ctx->tx_buffer[check].tx_count == 0) {
+        return RUDP_ERR_OUT_OF_WINDOW;
+      }
+      check = (uint16_t)((check + 1U) & (RUDP_WINDOW_SIZE - 1U));
     }
   }
 
@@ -100,29 +128,49 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
   while (ctx->tail != ctx->head &&
          (int16_t)(ack_num - ctx->tx_buffer[ctx->tail].frame.header.seq_num) > 0) {
     ctx->tx_buffer[ctx->tail].state = RUDP_SLOT_FREE;
+    ctx->tx_buffer[ctx->tail].fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
     ctx->tail = (ctx->tail + 1) & (RUDP_WINDOW_SIZE - 1);
   }
 
-  /* Fast Retransmit (Tri-ACK) State Machine */
+  /* Fast Retransmit & NewReno Partial ACK State Machine (RFC 5681 / RFC 6582) */
   if (ctx->tail != old_tail) {
-    // Window moved: this is a new ACK acknowledging fresh packets
+    /* Window moved: this is a new ACK acknowledging fresh packets */
     ctx->last_ack_received = ack_num;
     ctx->duplicate_ack_count = 0;
-  } else if (count_duplicate_ack && ctx->tail != ctx->head) {
-    // Only deliberate ACKs (Standalone ACK or explicit ACK record) count toward Fast
-    // Retransmit!
+
+    /* Partial ACK during loss recovery immediately triggers repair of the next
+     * lost packet that was already in flight when recovery began. */
+    if (ctx->tail != ctx->head) {
+      rudp_slot_s *next_hole = &ctx->tx_buffer[ctx->tail];
+      if (next_hole->state == RUDP_SLOT_IN_FLIGHT && next_hole->tx_count > 0 &&
+          next_hole->fast_retransmit == RUDP_FAST_RETRANSMIT_IN_RECOVERY) {
+        next_hole->fast_retransmit = RUDP_FAST_RETRANSMIT_PENDING;
+      }
+    }
+  } else if (count_duplicate_ack &&
+             ctx->tx_buffer[ctx->tail].state == RUDP_SLOT_IN_FLIGHT &&
+             ctx->tx_buffer[ctx->tail].tx_count > 0) {
+    /* Only deliberate ACKs for an actually transmitted slot count toward Tri-ACK. */
     if (ack_num == ctx->last_ack_received) {
       if (ctx->duplicate_ack_count < 255) {
         ctx->duplicate_ack_count++;
       }
 
-      // Fast Retransmit Trigger: Exactly 3 duplicate ACKs signify packet loss
+      /* Fast Retransmit Trigger: Exactly 3 duplicate ACKs signify packet loss */
       if (ctx->duplicate_ack_count == 3) {
-        // Set explicit fast retransmit flag for immediate resend
         ctx->tx_buffer[ctx->tail].fast_retransmit = RUDP_FAST_RETRANSMIT_PENDING;
+        uint16_t curr = (uint16_t)((ctx->tail + 1U) & (RUDP_WINDOW_SIZE - 1U));
+        while (curr != ctx->head) {
+          rudp_slot_s *s = &ctx->tx_buffer[curr];
+          if (s->state == RUDP_SLOT_IN_FLIGHT && s->tx_count > 0 &&
+              s->fast_retransmit == RUDP_FAST_RETRANSMIT_OFF) {
+            s->fast_retransmit = RUDP_FAST_RETRANSMIT_IN_RECOVERY;
+          }
+          curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+        }
       }
     } else {
-      // First observation of this stalled ACK reference
+      /* First observation of this stalled ACK reference */
       ctx->last_ack_received = ack_num;
       ctx->duplicate_ack_count = 0;
     }
@@ -159,27 +207,44 @@ rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout
   while (current != ctx->head && count < max_indices) {
     rudp_slot_s *slot = &ctx->tx_buffer[current];
 
-    // Calculate timeout with binary exponential backoff (capped at 64x)
+    // Calculate timeout with binary exponential backoff (capped at 64x, saturating)
     uint32_t shift = (slot->retries > 6) ? 6 : slot->retries;
-    uint32_t current_timeout = timeout << shift;
+    uint32_t current_timeout = timeout;
+    for (uint32_t s = 0; s < shift; s++) {
+      current_timeout =
+          (current_timeout > UINT32_MAX / 2U) ? UINT32_MAX : (current_timeout << 1);
+    }
 
     // Check if slot has expired or has fast_retransmit flagged
-    if (slot->state == RUDP_SLOT_IN_FLIGHT &&
-        (slot->fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING ||
-         ((uint32_t)(now - slot->timestamp) > current_timeout))) {
+    bool is_fast = (slot->fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING);
+    bool timed_out = ((uint32_t)(now - slot->timestamp) > current_timeout);
+    if (slot->state == RUDP_SLOT_IN_FLIGHT && (is_fast || timed_out)) {
+      if (slot->retries >= RUDP_MAX_RETRIES) {
+        // Mark the connection as disconnected without emitting an extra retry
+        ctx->state = RUDP_STATE_DISCONNECTED;
+        rudp_tick_result_s result = {.count = count, .status = RUDP_ERR_DISCONNECTED};
+        return result;
+      }
+
       slot->fast_retransmit = RUDP_FAST_RETRANSMIT_OFF; // Clear fast retransmit flag
+      if (!is_fast) {
+        /* Timer expiration exits NewReno fast recovery across the window. */
+        uint16_t clear = ctx->tail;
+        while (clear != ctx->head) {
+          if (ctx->tx_buffer[clear].fast_retransmit ==
+              RUDP_FAST_RETRANSMIT_IN_RECOVERY) {
+            ctx->tx_buffer[clear].fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
+          }
+          clear = (uint16_t)((clear + 1U) & (RUDP_WINDOW_SIZE - 1U));
+        }
+      }
 
       // Dynamically refresh piggybacked cumulative ACK with current expected_seq_num
       slot->frame.header.ack = ctx->expected_seq_num;
 
       slot->retries++; // Increment the retry counter for this slot
-      slot->tx_count++;
-
-      if (slot->retries > RUDP_MAX_RETRIES) {
-        // Mark the connection as disconnected if retries exceed the limit
-        ctx->state = RUDP_STATE_DISCONNECTED;
-        rudp_tick_result_s result = {.count = count, .status = RUDP_ERR_DISCONNECTED};
-        return result; // Indicate a fatal error due to dead peer
+      if (slot->tx_count < UINT8_MAX) {
+        slot->tx_count++;
       }
 
       // Reset the timer for this packet to prevent spamming
@@ -227,7 +292,7 @@ const rudp_frame_s *rudp_get_slot_frame(const rudp_context_s *ctx, uint16_t slot
 
 void rudp_touch(rudp_context_s *ctx, uint32_t now) {
   if (ctx) {
-    ctx->last_rx_time = now;
+    ctx->last_rx_time = (now == UINT32_MAX) ? (UINT32_MAX - 1U) : now;
   }
 }
 
@@ -235,7 +300,7 @@ bool rudp_is_alive(const rudp_context_s *ctx, uint32_t now, uint32_t idle_timeou
   if (!ctx || ctx->state != RUDP_STATE_CONNECTED) {
     return false;
   }
-  if (idle_timeout == 0) {
+  if (idle_timeout == 0 || ctx->last_rx_time == UINT32_MAX) {
     return true;
   }
   return ((uint32_t)(now - ctx->last_rx_time) <= idle_timeout);

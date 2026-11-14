@@ -88,7 +88,7 @@ $(BUILD_DIR)/test_window_min: $(SRC) tests/test_window.c $(HEADERS) | $(BUILD_DI
 	$(CC) $(CFLAGS) -DRUDP_WINDOW_SIZE=2 $(SRC) tests/test_window.c -o $@
 
 $(BUILD_DIR)/test_window_max: $(SRC) tests/test_window.c $(HEADERS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -DRUDP_WINDOW_SIZE=32768 $(SRC) tests/test_window.c -o $@
+	$(CC) $(CFLAGS) -DRUDP_WINDOW_SIZE=16384 $(SRC) tests/test_window.c -o $@
 
 test_rudp: $(BUILD_DIR)/test_rudp
 	./$(BUILD_DIR)/test_rudp
@@ -113,7 +113,7 @@ asan: | $(BUILD_DIR)
 	$(CC) $(ASAN_CFLAGS) $(SRC) tests/test_rudp.c -o $(BUILD_DIR)/test_rudp_asan
 	$(CC) $(ASAN_CFLAGS) tests/test_tfv.c -o $(BUILD_DIR)/test_tfv_asan
 	$(CC) $(ASAN_CFLAGS) -DRUDP_WINDOW_SIZE=2 $(SRC) tests/test_window.c -o $(BUILD_DIR)/test_window_min_asan
-	$(CC) $(ASAN_CFLAGS) -DRUDP_WINDOW_SIZE=32768 $(SRC) tests/test_window.c -o $(BUILD_DIR)/test_window_max_asan
+	$(CC) $(ASAN_CFLAGS) -DRUDP_WINDOW_SIZE=16384 $(SRC) tests/test_window.c -o $(BUILD_DIR)/test_window_max_asan
 	./$(BUILD_DIR)/test_rudp_asan
 	./$(BUILD_DIR)/test_tfv_asan
 	./$(BUILD_DIR)/test_window_min_asan
