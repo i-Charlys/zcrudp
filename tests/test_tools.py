@@ -16,19 +16,27 @@ BENCH = str(ROOT / os.environ.get("BENCH_BIN", "build/bench_rudp"))
 def ready(process):
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
-        assert selector.select(5), "peer startup timed out"
-        line = process.stdout.readline()
-        assert line.startswith("READY"), line
+        # TextIOWrapper.readline() may prefetch subsequent TX logs; communicate()
+        # reads the descriptor directly and would then lose those buffered logs.
+        line = bytearray()
+        while not line.endswith(b"\n"):
+            assert selector.select(5), "peer startup timed out"
+            byte = os.read(process.stdout.fileno(), 1)
+            assert byte, "peer exited before READY"
+            line.extend(byte)
+            assert len(line) < 1024, "invalid startup line"
+        assert line.startswith(b"READY"), line
 
 
-def pair(loss, latency, jitter, count, duration, interactive=False):
+def pair(loss, latency, jitter, count, duration, interactive=False, interval=30, adaptive=False, crypto=False):
     # Reserve two distinct ephemeral UDP ports, then release just before launch.
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as a, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as b:
         a.bind(("127.0.0.1", 0))
         b.bind(("127.0.0.1", 0))
         port_a, port_b = a.getsockname()[1], b.getsockname()[1]
     common = ["--loss", str(loss), "--latency", str(latency), "--jitter", str(jitter),
-              "--timeout", "150", "--interval", "30"]
+              "--timeout", "150", "--interval", str(interval), "--dscp", "46",
+              "--adaptive", str(int(adaptive)), "--crypto", str(int(crypto))]
     processes = []
     try:
         server = subprocess.Popen([DEMO, "server", "--port", str(port_a), "--peer-port", str(port_b),
@@ -52,6 +60,10 @@ def pair(loss, latency, jitter, count, duration, interactive=False):
         if loss == 100:
             assert not reliable and not unreliable
             assert "DROP simulated" in client_out
+            if count > 63:
+                assert client_out.count("TX unreliable value=") == count, client_out
+                assert client_out.count("TX reliable value=") == 63, client_out
+                assert "Reliable send rejected: -3" in client_err, client_err
         else:
             assert reliable == ([1234] if interactive else list(range(count))), (server_out, client_out)
             assert unreliable == sorted(set(unreliable)), server_out
@@ -71,12 +83,15 @@ def pair(loss, latency, jitter, count, duration, interactive=False):
 def main():
     for args in (["--help"],):
         subprocess.run([DEMO, *args], check=True, capture_output=True)
-    for args in (["client", "--loss", "101"], ["client", "--seed", "0"], ["client", "--port"], ["client", "--peer", "bad"]):
+    for args in (["client", "--loss", "101"], ["client", "--dscp", "64"], ["client", "--seed", "0"], ["client", "--port"], ["client", "--peer", "bad"], ["client", "--crypto", "2"]):
         assert subprocess.run([DEMO, *args], capture_output=True).returncode == 2
     pair(0, 0, 0, 6, 800)
     pair(0, 60, 0, 0, 800, interactive=True)
     pair(30, 15, 20, 10, 3000)
+    pair(30, 15, 20, 10, 3000, adaptive=True)
+    pair(25, 10, 15, 10, 2800, adaptive=True, crypto=True)
     pair(100, 0, 0, 2, 400)
+    pair(100, 0, 0, 80, 900, interval=1)
     with tempfile.TemporaryDirectory(prefix="zcrudp-bench-") as directory:
         report = Path(directory)
         subprocess.run([BENCH, "--iterations", "10000", "--csv", str(report / "out.csv"),

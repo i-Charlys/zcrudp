@@ -28,9 +28,9 @@ static uint64_t clock_ns(void) {
  * boundaries; results include loop/checksum overhead (no baseline subtraction). */
 static double measure(unsigned kind, uint64_t iterations) {
   uint8_t bytes[132] = {0};
-  rudp_frame_s frame = {{123, 456}, {.type=1, .flags=2, .value=789}};
-  rudp_record_s record = {1, 0, 123, {.type=1, .flags=2, .value=789}};
-  rudp_datagram_header_s header = {456, 0, 16};
+  rudp_frame_s frame = {.header = {.seq_num = 123, .ack = 456}, .packet = {.type=1, .flags=2, .value=789}};
+  rudp_record_s record = {.channel_id = 1, .flags = 0, .seq_num = 123, .payload = {.type=1, .flags=2, .value=789}};
+  rudp_datagram_header_s header = {.ack = 456, .ack_channel = 0, .count = 16};
   rudp_record_s records[16];
   if (kind < 2) rudp_pack_frame(&frame, bytes, sizeof bytes);
   else if (kind < 4) rudp_pack_record(&record, bytes, sizeof bytes);
@@ -163,7 +163,7 @@ int main(int argc, char **argv) {
     (void)measure(k, 10000);
     for (unsigned s = 0; s < SAMPLES; s++) samples[s] = measure(k, iterations);
     qsort(samples, SAMPLES, sizeof samples[0], compare);
-    results[k] = (result_s){samples[0], samples[SAMPLES/2], samples[SAMPLES-1]};
+    results[k] = (result_s){.low = samples[0], .median = samples[SAMPLES/2], .high = samples[SAMPLES-1]};
     if (results[k].median <= 0) { fprintf(stderr, "Insufficient timer resolution\n"); return 1; }
     printf("%-28s %9.3f ns/op [%.3f, %.3f] %9.3f Mops/s\n", names[k], results[k].median,
            results[k].low, results[k].high, 1000/results[k].median);

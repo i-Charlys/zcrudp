@@ -16,11 +16,43 @@ jobs:
     - name: Set up GCC & Build Tools
       run: sudo apt-get update && sudo apt-get install -y gcc make
 
-    - name: Compile and Run Standard Tests
-      run: make clean && make test
+    - name: Set up Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
+
+    - name: Compile and Run Tests with Zig
+      run: zig version && make clean && make CC='zig cc' test
+
+    - name: Compile and Run Tests with GCC
+      run: make clean && make CC=gcc test
 
     - name: Run Memory Sanitizers (ASan & UBSan)
-      run: make clean && make asan
+      run: make clean && make CC=gcc asan
 
     - name: Test POSIX demo and benchmark reports
       run: make test-tools
+
+    - name: Compare engines and enforce paced-loss recovery regression
+      run: make test-compare
+
+    - name: Compile public headers as C++ (g++ and clang++)
+      run: make test-cxx CXX=g++ && make test-cxx CXX='zig c++'
+
+    - name: Test CMake package and embedded consumers
+      run: make test-cmake
+
+    - name: Verify deterministic visual-demo trace
+      run: python3 bench/render_visual.py --output build/visual-smoke
+
+    - name: Test independent modules and caller-owned RX storage
+      run: make test-modules test-external-rx
+
+    - name: Run protocol and security mutation harness
+      run: make test-mutations
+
+    - name: Test CMake shared libraries in Release mode
+      run: |
+        cmake -S . -B build/cmake-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DZCRUDP_WARNINGS_AS_ERRORS=ON
+        cmake --build build/cmake-shared --parallel 2
+        ctest --test-dir build/cmake-shared --output-on-failure

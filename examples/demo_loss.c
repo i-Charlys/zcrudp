@@ -1,3 +1,6 @@
+#if defined(__linux__)
+#define _GNU_SOURCE /* sendmmsg()/struct mmsghdr for the batched egress path */
+#endif
 #define _POSIX_C_SOURCE 200809L
 #include "protocol_rudp.h"
 #include <arpa/inet.h>
@@ -10,21 +13,26 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
 /* POSIX host example; protocol state and simulated network queue are bounded.
  * Both peers have explicit addresses: no discovery or authentication is implied. */
 #define QUEUE_SIZE 512
-#define MAX_DGRAM_LEN 64
+#define MAX_DGRAM_LEN 128
 typedef struct {
   uint8_t bytes[MAX_DGRAM_LEN];
   size_t len;
   uint64_t due;
+  uint64_t seq;
   int used;
 } delayed_s;
 static delayed_s queue[QUEUE_SIZE];
+static uint64_t enqueue_seq = 0;
 static rudp_session_s session;
+static rudp_crypto_ctx_s crypto_ctx;
+static unsigned crypto_enabled = 0;
 static uint32_t rng;
 static unsigned loss, latency, jitter;
 static unsigned dropped, sent, received, delivered, retried, overflow;
@@ -55,6 +63,17 @@ static int number(const char *s, unsigned max, unsigned *out) {
 /* Injection applies once to every outgoing datagram, including ACKs/retries.
  * Jitter is additive [0,jitter] ms and can cause reordering. */
 static void enqueue(const uint8_t *bytes, size_t len) {
+  uint8_t sealed[MAX_DGRAM_LEN];
+  if (crypto_enabled) {
+    int slen = rudp_crypto_seal(&crypto_ctx, NULL, 0, bytes, len, sealed, sizeof sealed);
+    if (slen < 0) {
+      overflow++;
+      fprintf(stderr, "DROP crypto seal failed (%d)\n", slen);
+      return;
+    }
+    bytes = sealed;
+    len = (size_t)slen;
+  }
   if (len > sizeof(queue[0].bytes)) {
     overflow++;
     fprintf(stderr, "DROP datagram exceeds queue slot capacity (%zu > %zu)\n", len, sizeof(queue[0].bytes));
@@ -67,9 +86,11 @@ static void enqueue(const uint8_t *bytes, size_t len) {
   }
   for (unsigned i = 0; i < QUEUE_SIZE; i++) {
     if (!queue[i].used) {
+      /* Update the reused slot's bytes and metadata without clearing its MTU buffer. */
       memcpy(queue[i].bytes, bytes, len);
       queue[i].len = len;
       queue[i].due = now_ms() + latency + random_next() % (jitter + 1);
+      queue[i].seq = enqueue_seq++;
       queue[i].used = 1;
       return;
     }
@@ -78,25 +99,83 @@ static void enqueue(const uint8_t *bytes, size_t len) {
   fprintf(stderr, "DROP simulation queue full\n");
 }
 
+/* Transmit every datagram whose deadline has passed, in (due, seq) order.
+ * On Linux one sendmmsg() call vectors the whole intra-tick burst into the
+ * kernel; elsewhere it is one sendto() per datagram. A blocked socket or a
+ * short send stops the drain and leaves the remainder queued for the next
+ * tick, so ordering across ticks is preserved. */
 static int flush(int fd, const struct sockaddr_in *peer) {
   uint64_t now = now_ms();
+  uint16_t order[QUEUE_SIZE];
+  unsigned n = 0;
   for (unsigned i = 0; i < QUEUE_SIZE; i++) {
-    if (!queue[i].used || queue[i].due > now) continue;
-    ssize_t n = sendto(fd, queue[i].bytes, queue[i].len, 0,
-                       (const struct sockaddr *)peer, sizeof(*peer));
-    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) continue;
-    if (n != (ssize_t)queue[i].len) { perror("sendto"); return -1; }
-    sent++;
-    queue[i].used = 0;
+    if (queue[i].used && queue[i].due <= now) order[n++] = (uint16_t)i;
   }
+  for (unsigned i = 1; i < n; i++) { /* insertion sort: bounded queue, near-sorted input */
+    uint16_t v = order[i];
+    unsigned j = i;
+    while (j > 0 && (queue[order[j - 1]].due > queue[v].due ||
+                     (queue[order[j - 1]].due == queue[v].due && queue[order[j - 1]].seq > queue[v].seq))) {
+      order[j] = order[j - 1];
+      j--;
+    }
+    order[j] = v;
+  }
+  if (n == 0) return 0;
+
+  unsigned done = 0;
+#if defined(__linux__)
+  struct mmsghdr msgs[64];
+  struct iovec iov[64];
+  while (done < n) {
+    unsigned batch = n - done < 64 ? n - done : 64;
+    for (unsigned i = 0; i < batch; i++) {
+      delayed_s *d = &queue[order[done + i]];
+      iov[i] = (struct iovec){.iov_base = d->bytes, .iov_len = d->len};
+      msgs[i] = (struct mmsghdr){
+          .msg_hdr = {
+              .msg_iov = &iov[i],
+              .msg_iovlen = 1,
+              .msg_name = (void *)peer,
+              .msg_namelen = sizeof *peer,
+          },
+          .msg_len = 0,
+      };
+    }
+    int s = sendmmsg(fd, msgs, batch, 0);
+    if (s < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) break;
+      perror("sendmmsg");
+      return -1;
+    }
+    if (s == 0) break;
+    for (int k = 0; k < s; k++, done++) {
+      if (msgs[k].msg_len != queue[order[done]].len) { fprintf(stderr, "sendmmsg short write\n"); return -1; }
+      queue[order[done]].used = 0;
+      sent++;
+    }
+    if ((unsigned)s < batch) break; /* socket buffer full: resume the drain next tick */
+  }
+#else
+  for (; done < n; done++) {
+    ssize_t w = sendto(fd, queue[order[done]].bytes, queue[order[done]].len, 0,
+                       (const struct sockaddr *)peer, sizeof *peer);
+    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) break;
+    if (w != (ssize_t)queue[order[done]].len) { perror("sendto"); return -1; }
+    queue[order[done]].used = 0;
+    sent++;
+  }
+#endif
   return 0;
 }
 
 static void emit_reliable(uint16_t slot) {
+  if (session.channels[0].ctx.tx_buffer[slot].tx_count == 0U)
+    session.channels[0].ctx.tx_buffer[slot].tx_count = 1U;
   const rudp_frame_s *f = rudp_get_slot_frame(&session.channels[0].ctx, slot);
   uint8_t bytes[12];
-  rudp_datagram_header_s h = {session.channels[0].ctx.expected_seq_num, 0, 1};
-  rudp_record_s r = {0, RUDP_RECORD_FLAG_RELIABLE, f->header.seq_num, f->packet};
+  rudp_datagram_header_s h = {.ack = session.channels[0].ctx.expected_seq_num, .ack_channel = 0, .count = 1};
+  rudp_record_s r = {.channel_id = 0, .flags = RUDP_RECORD_FLAG_RELIABLE, .seq_num = f->header.seq_num, .payload = f->packet};
   rudp_pack_datagram_header(&h, bytes, sizeof bytes);
   rudp_pack_record(&r, bytes + 4, sizeof bytes - 4);
   enqueue(bytes, sizeof bytes);
@@ -108,7 +187,7 @@ static int send_value(int reliable, unsigned value) {
     uint16_t slot = session.channels[0].ctx.head;
     int ret = rudp_session_send_reliable(&session, 0, p, (uint32_t)now_ms());
     if (ret != RUDP_OK) { fprintf(stderr, "Reliable send rejected: %d\n", ret); return -1; }
-    emit_reliable(slot);
+    if (!session.channels[0].rto_min_ms) emit_reliable(slot);
   } else {
     uint8_t bytes[12];
     int n = rudp_session_send_unreliable(&session, 1, p, 0, bytes, sizeof bytes);
@@ -139,7 +218,10 @@ static void usage(const char *name) {
          "  --bind IPv4 --peer IPv4 (default 127.0.0.1)\n"
          "  --port N --peer-port N (server 9000/9001, client 9001/9000)\n"
          "  --loss 0..100 --latency MS --jitter MS --seed N\n"
+         "  --dscp 0..63 (optional IPv4 socket traffic class; network may ignore it)\n"
          "  --timeout MS (default 500, measured from enqueue)\n"
+         "  --adaptive 0|1 (default 0; session RTT recovery, initial --timeout, bounds 10..60000 ms)\n"
+         "  --crypto 0|1 (default 0; RFC 8439 ChaCha20-Poly1305 AEAD + 64-pkt anti-replay)\n"
          "  --count N (send N reliable AND N unreliable values automatically)\n"
          "  --interval MS (default 100) --duration MS (0 = until q/Ctrl-C)\n"
          "Each peer injects loss/delay on its own outgoing traffic.\n", name);
@@ -151,6 +233,8 @@ int main(int argc, char **argv) {
   int server = !strcmp(argv[1], "server");
   unsigned port = server ? 9000 : 9001, peer_port = server ? 9001 : 9000;
   unsigned seed = server ? 1 : 2, timeout = 500, count = 0, interval = 100, duration = 0;
+  unsigned dscp = 0;
+  unsigned adaptive = 0;
   const char *bind_ip = "127.0.0.1", *peer_ip = "127.0.0.1";
   for (int i = 2; i < argc; i++) {
     const char *key = argv[i];
@@ -164,6 +248,9 @@ int main(int argc, char **argv) {
       else if (!strcmp(key, "--peer-port")) { target = &peer_port; max = 65535; }
       else if (!strcmp(key, "--seed")) { target = &seed; max = UINT32_MAX; }
       else if (!strcmp(key, "--loss")) { target = &loss; max = 100; }
+      else if (!strcmp(key, "--dscp")) { target = &dscp; max = 63; }
+      else if (!strcmp(key, "--adaptive")) { target = &adaptive; max = 1; }
+      else if (!strcmp(key, "--crypto")) { target = &crypto_enabled; max = 1; }
       else if (!strcmp(key, "--latency")) target = &latency;
       else if (!strcmp(key, "--jitter")) target = &jitter;
       else if (!strcmp(key, "--timeout")) target = &timeout;
@@ -175,58 +262,127 @@ int main(int argc, char **argv) {
   }
   if (!port || !peer_port || !seed || !interval || !timeout) { fprintf(stderr, "Ports, seed, interval and timeout must be positive\n"); return 2; }
   rng = seed;
-  struct sockaddr_in local = {0}, peer = {0};
-  local.sin_family = peer.sin_family = AF_INET;
-  local.sin_port = htons((uint16_t)port); peer.sin_port = htons((uint16_t)peer_port);
+  struct sockaddr_in local = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port)};
+  struct sockaddr_in peer = {.sin_family = AF_INET, .sin_port = htons((uint16_t)peer_port)};
   if (inet_pton(AF_INET, bind_ip, &local.sin_addr) != 1 || inet_pton(AF_INET, peer_ip, &peer.sin_addr) != 1) {
     fprintf(stderr, "Expected numeric IPv4 addresses\n"); return 2;
   }
   int fd = socket(AF_INET, SOCK_DGRAM, 0);
   if (fd < 0) { perror("socket"); return 1; }
+  if (dscp) {
+    int tos = (int)(dscp << 2);
+    if (setsockopt(fd, IPPROTO_IP, IP_TOS, &tos, sizeof tos) < 0) {
+      perror("setsockopt IP_TOS"); close(fd); return 1;
+    }
+  }
   if (bind(fd, (struct sockaddr *)&local, sizeof local) < 0) { perror("bind"); close(fd); return 1; }
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) { perror("fcntl"); close(fd); return 1; }
   rudp_session_init(&session);
   rudp_session_config_channel(&session, 0, RUDP_CHANNEL_FLAG_RELIABLE | RUDP_CHANNEL_FLAG_ORDERED);
   rudp_session_config_channel(&session, 1, RUDP_CHANNEL_FLAG_UNRELIABLE);
+  if (adaptive && rudp_session_config_recovery(&session, 0, timeout, 10, 60000) != RUDP_OK) {
+    fprintf(stderr, "Adaptive initial timeout must be 10..60000 ms\n"); close(fd); return 2;
+  }
+  if (crypto_enabled) {
+    /* Demo-only fixed PSK so local server/client processes interoperate out of the box. */
+    static const uint8_t demo_psk[RUDP_CRYPTO_KEY_BYTES] = {
+        0x7a, 0x63, 0x72, 0x75, 0x64, 0x70, 0x2d, 0x64, 0x65, 0x6d, 0x6f,
+        0x2d, 0x6b, 0x65, 0x79, 0x2d, 0x32, 0x35, 0x36, 0x62, 0x69, 0x74,
+        0x2d, 0x72, 0x66, 0x63, 0x38, 0x34, 0x33, 0x39, 0x21, 0x05};
+    rudp_crypto_init(&crypto_ctx, demo_psk, UINT64_C(0x5A43525544503035),
+                     (uint8_t)(!server));
+  }
   signal(SIGINT, stop); signal(SIGTERM, stop);
   setvbuf(stdout, NULL, _IOLBF, 0);
   printf("READY %s %s:%u -> %s:%u loss=%u%% latency=%ums jitter=0..%ums seed=%u\n",
          argv[1], bind_ip, port, peer_ip, peer_port, loss, latency, jitter, seed);
   puts("Commands: r <value>, u <value>, stats, q");
-  uint64_t start = now_ms(), next = start;
-  unsigned generated = 0;
+  uint64_t start = now_ms(), next_rel = start, next_unrel = start;
+  unsigned gen_rel = 0, gen_unrel = 0;
   int status = 0;
-  struct pollfd fds[2] = {{fd, POLLIN, 0}, {STDIN_FILENO, POLLIN, 0}};
+  struct pollfd fds[2] = {
+      {.fd = fd, .events = POLLIN, .revents = 0},
+      {.fd = STDIN_FILENO, .events = POLLIN, .revents = 0},
+  };
   char line[128]; size_t used = 0; int too_long = 0;
   while (running && (!duration || now_ms() - start < duration)) {
-    if (generated < count && now_ms() >= next) {
-      if (send_value(1, generated) == 0) { (void)send_value(0, generated); generated++; }
-      next = now_ms() + interval;
+    uint64_t cur_ms = now_ms();
+    if (gen_rel < count && cur_ms >= next_rel) {
+      if (send_value(1, gen_rel) == 0) {
+        gen_rel++;
+        next_rel = cur_ms + interval;
+      } else {
+        next_rel = cur_ms + 10;
+      }
     }
-    uint16_t indices[RUDP_WINDOW_SIZE];
-    rudp_tick_result_s tick = rudp_tick(&session.channels[0].ctx, (uint32_t)now_ms(), timeout, indices, RUDP_WINDOW_SIZE);
-    if (tick.status != RUDP_OK) { fprintf(stderr, "Reliable channel disconnected (retry limit)\n"); status = 1; break; }
-    for (int i = 0; i < tick.count; i++) { emit_reliable(indices[i]); retried++; }
+    if (gen_unrel < count && cur_ms >= next_unrel) {
+      (void)send_value(0, gen_unrel);
+      gen_unrel++;
+      next_unrel = cur_ms + interval;
+    }
+    if (adaptive) {
+      uint8_t bytes[MAX_DGRAM_LEN];
+      unsigned before = 0, after = 0;
+      for (size_t i = 0; i < RUDP_WINDOW_SIZE; ++i) before += session.channels[0].ctx.tx_buffer[i].retries;
+      int pending_ack = session.channels[0].ack_pending;
+      int length = rudp_session_build_datagram(&session, 0, bytes, sizeof bytes, (uint32_t)now_ms(), timeout);
+      if (length < 0 || session.channels[0].ctx.state != RUDP_STATE_CONNECTED) {
+        fprintf(stderr, "Reliable channel disconnected (retry limit)\n"); status = 1; break;
+      }
+      for (size_t i = 0; i < RUDP_WINDOW_SIZE; ++i) after += session.channels[0].ctx.tx_buffer[i].retries;
+      retried += after - before;
+      if (length > 4 || pending_ack) enqueue(bytes, (size_t)length);
+    } else {
+      uint16_t indices[RUDP_WINDOW_SIZE];
+      rudp_tick_result_s tick = rudp_tick(&session.channels[0].ctx, (uint32_t)now_ms(), timeout, indices, RUDP_WINDOW_SIZE);
+      if (tick.status != RUDP_OK) { fprintf(stderr, "Reliable channel disconnected (retry limit)\n"); status = 1; break; }
+      for (int i = 0; i < tick.count; i++) { emit_reliable(indices[i]); retried++; }
+    }
     if (flush(fd, &peer) < 0) { status = 1; break; }
-    int ready = poll(fds, 2, 5);
+    /* Bench bias fix: while a burst is in flight (auto-generation still running,
+     * reliable slots unacked, or datagrams waiting in the delay queue) poll
+     * without blocking so measured latency is not quantised to the OS scheduler
+     * tick. Fall back to a bounded 5 ms wait only when the loop is truly idle. */
+    int busy = gen_rel < count || gen_unrel < count ||
+               session.channels[0].ctx.head != session.channels[0].ctx.tail;
+    for (unsigned i = 0; !busy && i < QUEUE_SIZE; i++) busy = queue[i].used;
+    int ready = poll(fds, 2, busy ? 0 : 5);
     if (ready < 0) { if (errno == EINTR) continue; perror("poll"); status = 1; break; }
     if (fds[0].revents & POLLIN) {
       uint8_t bytes[2048]; struct sockaddr_in from; socklen_t from_len = sizeof from;
       ssize_t n = recvfrom(fd, bytes, sizeof bytes, 0, (struct sockaddr *)&from, &from_len);
       if (n < 0) { if (errno == EINTR) continue; perror("recvfrom"); status = 1; break; }
       if (from.sin_addr.s_addr != peer.sin_addr.s_addr || from.sin_port != peer.sin_port) continue;
+      uint8_t plain[2048];
+      const uint8_t *rx_ptr = bytes;
+      size_t rx_len = (size_t)n;
+      if (crypto_enabled) {
+        int plen = rudp_crypto_open(&crypto_ctx, NULL, 0, bytes, (size_t)n, plain, sizeof plain);
+        if (plen < 0) {
+          fprintf(stderr, "Rejected unauthenticated/replayed datagram: %d\n", plen);
+          continue;
+        }
+        rx_ptr = plain;
+        rx_len = (size_t)plen;
+      }
       rudp_record_s records[255];
-      int got = rudp_session_process_datagram(&session, bytes, (size_t)n, records, 255);
+      int got = rudp_session_process_datagram_at(&session, rx_ptr, rx_len, records, 255, (uint32_t)now_ms());
       received++;
       if (got < 0) fprintf(stderr, "Rejected datagram: %d\n", got);
-      else for (int i = 0; i < got; i++) {
-        printf("RX %s seq=%u value=%u\n", records[i].channel_id == 0 ? "reliable" : "unreliable",
-               records[i].seq_num, records[i].payload.value);
-        delivered++;
+      else {
+        do {
+          for (int i = 0; i < got; i++) {
+            printf("RX %s seq=%u value=%u\n", records[i].channel_id == 0 ? "reliable" : "unreliable",
+                   records[i].seq_num, records[i].payload.value);
+            delivered++;
+          }
+          got = rudp_session_poll(&session, records, 255);
+        } while (got > 0);
+        if (got < 0) fprintf(stderr, "Poll error: %d\n", got);
       }
-      if (session.channels[0].ack_pending) {
-        rudp_datagram_header_s ack = {session.channels[0].ctx.expected_seq_num, 0, 0};
+      if (!adaptive && session.channels[0].ack_pending) {
+        rudp_datagram_header_s ack = {.ack = session.channels[0].ctx.expected_seq_num, .ack_channel = 0, .count = 0};
         rudp_pack_datagram_header(&ack, bytes, sizeof bytes);
         enqueue(bytes, 4);
         session.channels[0].ack_pending = 0;
@@ -250,7 +406,8 @@ int main(int argc, char **argv) {
   stats();
   unsigned queued = 0;
   for (unsigned i = 0; i < QUEUE_SIZE; i++) queued += queue[i].used != 0;
-  printf("EXIT generated=%u queued_on_exit=%u\n", generated, queued);
+  printf("EXIT gen_rel=%u gen_unrel=%u queued_on_exit=%u\n", gen_rel, gen_unrel, queued);
+  if (crypto_enabled) rudp_crypto_wipe(&crypto_ctx);
   close(fd);
   return status;
 }

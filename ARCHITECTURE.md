@@ -1,132 +1,177 @@
-# zcrudp Architecture
+# zcrudp architecture
 
-This document describes the design and implementation details of the `zcrudp` (Zero-allocation C Reliable UDP) protocol.
+This document describes the code currently implemented in
+the public module headers and the implementation modules in `src/`.
+`protocol_rudp.h` remains a compatibility facade. See [MODULES.md](docs/MODULES.md)
+for link dependencies, source lists and the optional caller-owned RX storage ABI. Future wire changes are tracked in
+`TODO.md` and are not described here as existing behavior.
 
-## Protocol Design
+The application owns the UDP socket, the clock, output buffers and object
+lifetime. The core uses fixed-size storage and performs no heap allocation.
 
-The protocol operates with zero dynamic memory allocation, targeting high-performance game network state synchronization and embedded devices.
+## Protocol layers
 
-### Multi-Tier Frame Format
+zcrudp currently exposes two related interfaces:
 
-1. **Tier 1 (4-byte Standalone ACK & Control)**:
-   - Wire Size: 4 bytes (`rudp_header_s`).
-   - Format: `seq_num` (16 bits, 0 for pure ACK) + `ack` (16 bits, expected cumulative sequence number).
-   - Functions: `rudp_pack_ack()`, `rudp_unpack_ack()`, `rudp_unpack_header()`.
+Applications and optional profiles call the multichannel session API or the
+single-context reliability API. Both use explicit byte codecs; the caller provides
+UDP I/O.
 
-2. **Tier 2 (8-byte Standard Game Frame)**:
-   - Wire Size: 8 bytes (`rudp_frame_s`).
-   - Format: 4-byte header (`rudp_header_s`) + 4-byte payload (`tfv_packet_u`).
-   - Functions: `rudp_pack_frame()`, `rudp_unpack_frame()`.
+`rudp_context_s` is the small single-window ARQ engine. `rudp_session_s` owns
+one context per channel and adds multiplexing, unreliable records, reliable RX
+reassembly, scheduling, QoS metadata and adaptive timeout state. The two wire
+formats are explicit alternatives; a receiver must know which one it expects.
+UDP payload length alone is not a format negotiation mechanism.
 
-3. **Atomic Building Blocks (4-byte Primitives)**:
-   - `rudp_pack_header()` / `rudp_unpack_header()`: Serializes / deserializes 4-byte header.
-   - `rudp_pack_payload()` / `rudp_unpack_payload()`: Serializes / deserializes 4-byte TFV payload.
+## Current wire formats
 
-### 32-bit TFV (Type-Flags-Value) Payload
-Represented by the `tfv_packet_u` union in `include/protocol_tfv.h`:
-- **Type**: 8 bits (Command / message opcode)
-- **Flags**: 8 bits (Metadata flags)
-- **Value**: 16 bits (Signed or unsigned numeric payload / entity ID)
+The single-context API carries one TFV packet at a time:
 
----
+| Standalone item | Wire fields in order | Size |
+| --- | --- | --- |
+| ACK | Unused sequence (2 B), ACK (2 B) | 4 B |
+| Frame | Sequence (2 B), ACK (2 B), TFV payload (4 B) | 8 B |
 
-## Protocol Data Flow & Symmetry (TX / RX Pipeline)
+The session API can bundle records from several channels:
 
-```text
- SENDER WORKFLOW (Game -> Network)         RECEIVER WORKFLOW (Network -> Game)
- ─────────────────────────────────         ───────────────────────────────────
- 1. Game Data: tfv_packet_u                1. Raw Bytes from UDP socket
-         │                                         │
-         ▼                                         ▼
- 2. rudp_send(ctx, packet, now);           2. bytes == 4: rudp_unpack_ack() -> rudp_recv_ack()
-    (Assigns seq, ack, queues in tx_buf)      bytes == 8: rudp_unpack_frame() -> rudp_recv()
-         │                                         │
-         ▼                                         ▼
- 3. rudp_pack_frame(&frame, buf, 8);       3. In-order packet delivered to game!
-    (Serializes 8B Big-Endian for socket)     (Duplicate/out-of-order safely handled)
-```
+| Session item | Wire fields in order | Size |
+| --- | --- | --- |
+| Header | ACK (2 B), ACK channel (1 B), record count (1 B) | 4 B |
+| Record | Channel (1 B), flags (1 B), sequence (2 B), TFV payload (4 B) | 8 B |
 
----
+A datagram contains one header and `count` records: `4 + 8 * count` bytes.
 
-## Sliding Window & Memory Layout
+`rudp_datagram_header_s` describes the datagram once. `rudp_record_s` describes
+one data item or explicit ACK inside that datagram. It is therefore different
+from `rudp_session_s`, which is local protocol state and is never serialized.
 
-Reliability is managed using a ring buffer of `RUDP_WINDOW_SIZE` slots (default 64, configurable up to 32768 as a power of 2).
+The header ACK applies to `ack_channel`. An ACK record can acknowledge another
+channel. `count == 0` is a header-only ACK. ACK value `N` means that every
+sequence before `N` was received in order and `N` is the next expected value.
 
-### Exact Memory Footprint (1036 Bytes)
+All multibyte fields are packed explicitly in network byte order. Raw C
+structure memory, including `tfv_packet_u.raw`, is not a portable wire format.
 
-```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      RUDP_CONTEXT_S (Total: 1036 Bytes)                     │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  tx_buffer[64] : 64 slots * 16 bytes = 1024 Bytes                           │
-│  ─────────────────────────────────────────────────────────────────────────  │
-│  current_seq_num     : uint16_t (2B) - Next sequence number to transmit     │
-│  expected_seq_num    : uint16_t (2B) - Next in-order sequence expected (RX) │
-│  last_ack_received   : uint16_t (2B) - Last seen cumulative ACK (Tri-ACK)   │
-│  head                : uint16_t (2B) - Write index in tx_buffer             │
-│  tail                : uint16_t (2B) - Oldest in-flight index in tx_buffer  │
-│  duplicate_ack_count : uint8_t  (1B) - Fast Retransmit counter              │
-│  state               : uint8_t  (1B) - RUDP_STATE_CONNECTED / DISCONNECTED │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+## State and memory
 
-Each slot in `tx_buffer` (`rudp_slot_s`) is strictly aligned to 16 bytes:
-- `frame`: 8 bytes (`rudp_header_s` + `tfv_packet_u`)
-- `timestamp`: 4 bytes (`uint32_t`, send timestamp in ms)
-- `state`: 1 byte (`RUDP_SLOT_FREE` or `RUDP_SLOT_IN_FLIGHT`)
-- `retries`: 1 byte (`uint8_t`, count of retransmissions)
-- `fast_retransmit`: 1 byte (`uint8_t`, Tri-ACK single-trigger flag)
-- `reserved`: 1 byte (Explicit padding)
+A `rudp_session_s` contains `channels[RUDP_MAX_CHANNELS]`, `active_channels`
+and `rr_cursor`. Each `rudp_channel_s` holds channel flags, ID, priority, DSCP,
+unreliable sequence state, pending ACK state and a `rudp_context_s`.
 
----
+The context owns `tx_buffer[RUDP_WINDOW_SIZE]` of `rudp_slot_s`, ring indices,
+sequence numbers, duplicate ACK and liveness state. Each slot contains a
+`rudp_frame_s` (header and TFV payload), timestamp, state, retries,
+`fast_retransmit` and `tx_count`.
 
-## Reliability Engine & State Machine
+Channels also hold reliable RX storage and its presence bitmap, timeout backoffs
+and adaptive RTT/RTO state. The default layout embeds RX arrays; external RX mode
+attaches caller-owned storage through pointers.
 
-### Cumulative ACKs (N+1 Convention)
-The protocol strictly uses cumulative acknowledgments with $N+1$ semantics:
-- When a peer receives packet $N$, it sends `ACK = N + 1` (meaning: *"I have received everything up to $N$, and am now expecting $N+1$."*).
-- An incoming `ACK = A` slides `tail` forward, freeing all slots with `seq_num < A`.
+With the default 64-slot window and four channels on the checked ABI:
 
-### Window Floor & Stale ACK Protection
-In `rudp_recv_ack()`, delayed or reordered ACKs that fall behind the oldest in-flight packet (`tail`) are rejected:
-```c
-if ((int16_t)(ack_num - tail_seq) < 0) {
-    return RUDP_ERR_OUT_OF_WINDOW;
-}
-```
+| Object | Calculation | Size |
+| --- | ---: | ---: |
+| `rudp_slot_s` | frame 8 + timestamp 4 + four 1-byte fields (packed backoff + fast/FEC flags) | 16 B |
+| `rudp_context_s` | `64 * 16 + 16` | 1,040 B |
+| `rudp_channel_s` | `align4(1,040 + 12 + 4*64 + ceil(64/8)) + 24` | 1,340 B |
+| `rudp_session_s` | `4 * 1,340 + 4` | 5,364 B |
 
-### Fast Retransmit (Tri-ACK State Machine)
-- Tri-ACK trigger: When the window is stalled (`tail != head`) and the same ACK arrives 3 times consecutively (`duplicate_ack_count == 3`), the oldest packet at `tail` is flagged for immediate retransmission (`slot->fast_retransmit = RUDP_FAST_RETRANSMIT_PENDING`).
-- Anti-storm lock: Fast retransmission triggers strictly on `== 3` to prevent cascading storms on subsequent duplicate ACKs (count 4+).
-- Dynamic ACK refresh: During retransmission in `rudp_tick()`, `slot->frame.header.ack` is dynamically refreshed to `ctx->expected_seq_num` so peers are updated with latest reception state.
+The exact formulas and default-size `_Static_assert` checks live beside the
+structures in `rudp_types.h`. Changing `RUDP_WINDOW_SIZE`,
+`RUDP_MAX_CHANNELS`, compiler ABI or packing options can change public object
+sizes. The library and its caller must use matching compile settings. Every
+default-layout session channel reserves its reliable TX and RX arrays, including a
+channel used only for unreliable traffic.
 
-### Dead Peer Detection & Zombie Protection
-- Retransmissions are tracked per slot (`slot->retries++`).
-- When `retries > RUDP_MAX_RETRIES` (default 10):
-  - `ctx->state` transitions to `RUDP_STATE_DISCONNECTED`.
-  - `rudp_tick()` returns `rudp_tick_result_s` with `status = RUDP_ERR_DISCONNECTED` while preserving the count of already collected expired indices.
-  - Subsequent calls to `rudp_tick()` and `rudp_send()` are inert and return `RUDP_ERR_DISCONNECTED`, preventing uint8 counter overflow from resurrecting dead sessions.
-  - The application can call `rudp_get_unacked_slots()` to inspect unacknowledged in-flight packets and execute game rollbacks.
-  - To reconnect, the application explicitly calls `rudp_reset(ctx)`.
+### Why the TX ring keeps one slot free
 
----
+`head` is the next write position and `tail` is the oldest unacknowledged
+position. `head == tail` represents an empty ring. If all 64 physical slots
+were allowed to fill, the same equality would also represent a full ring.
+`rudp_send()` therefore refuses the write whose next `head` would equal
+`tail`. A 64-slot ring can hold 63 outstanding reliable messages. This avoids
+an extra occupancy counter and keeps the empty/full test constant and local.
 
-## Physical Layer Realities & The "Zero-Wait" Bundling Principle
+### RX storage is different
 
-### The Ethernet Minimum Frame Paradox (84-byte Wire Floor)
-Under the IEEE 802.3 Ethernet standard, any MAC frame carrying less than 46 bytes of IP payload is automatically padded with zeros up to 64 bytes (CSMA/CD collision detection floor). Adding the preamble, SFD, and Inter-Packet Gap (IPG) results in an exact physical wire footprint of **84 bytes**:
-- 4-byte UDP datagram  -> 32B IPv4/UDP + 14B MAC padding + 20B L1 = **84 bytes** (4.76% wire efficiency).
-- 8-byte UDP datagram  -> 36B IPv4/UDP + 10B MAC padding + 20B L1 = **84 bytes** (9.52% wire efficiency).
+`rx_buffer` is local reassembly memory. A session channel stores reliable
+records that arrived ahead of a missing sequence; these bytes are not a second
+UDP payload and are not used by unreliable delivery. `rx_present` marks the
+occupied positions. `rudp_rx_drain()` releases only the contiguous prefix and
+advances the cumulative ACK only when records are copied to caller-owned
+output. The single-context `rudp_recv()` has no such reassembly buffer and
+drops out-of-order frames.
 
-### Transmission Time vs. Inter-Frame Latency
-A common theoretical misconception is to artificially buffer packets across frames to avoid Ethernet hardware padding. The physical timing proves this is an anti-pattern for real-time applications:
-- **Wire transmission delay of an 84-byte frame on a 1 Gbps link**:
-  $$T_{tx} = \frac{84 \times 8 \text{ bits}}{10^9 \text{ bps}} = 0.672 \;\mu\text{s} \quad (672 \text{ nanoseconds})$$
-- **Inter-frame waiting time for the next game tick**:
-  - At 60 Hz: $16.67 \text{ ms} = 16,670 \;\mu\text{s}$ ($24,800\times$ slower than sending immediately).
-  - At 128 Hz: $7.81 \text{ ms} = 7,810 \;\mu\text{s}$ ($11,620\times$ slower).
+## Send, receive and recovery paths
 
-### Architectural Principle: "Intra-Tick Bundling, Never Cross-Tick Delay"
-`zcrudp` adheres strictly to the **Anti-Nagle Principle**:
-1. **Zero Artificial Egress Delay**: An isolated urgent packet is transmitted immediately. Padding insertion is performed in hardware by the Network Interface Card (NIC) at zero CPU cost and sub-microsecond wire latency.
-2. **Intra-Tick Bundling Only**: MTU batching (up to 1400 bytes) aggregates *only* messages produced synchronously within the *same game frame / tick* (e.g. 1 position update + 1 reliable action + 1 ACK). It never delays egress waiting for future game ticks.
+For a single context, initialize with `rudp_init()`, enqueue with `rudp_send()`,
+retrieve frames with `rudp_get_slot_frame()`, and serialize with `rudp_pack_frame()`.
+Decode received frames with `rudp_unpack_frame()` before `rudp_recv()`, which
+processes passive ACKs through `rudp_recv_ack_ex()`. `rudp_tick()` returns expired
+slot indices for caller-managed retransmission.
+
+For sessions, initialize and configure channels before enqueueing reliable messages.
+The unreliable send API packs a single 12-byte datagram; the session builder bundles
+reliable records and ACKs. The caller sends the resulting bytes. Reception validates
+the complete datagram before ACK processing or state mutation, retains reliable
+gaps, filters unreliable sequences and drains contiguous records to caller output.
+`rudp_session_poll()` drains records retained by output backpressure.
+
+The session builder emits pending ACKs before data, sorts channels by priority,
+rotates equal priorities with `rr_cursor`, and clamps output to
+`RUDP_DEFAULT_MTU`. A reliable slot is emitted only when it is new, marked for
+fast retransmission, or expired. With fixed recovery, the caller supplies the
+timeout. With opt-in adaptive recovery, each channel uses its `rto_ms` and
+separate bounded timeout-backoff array.
+
+Three deliberate duplicate ACKs mark the oldest slot for fast retransmission.
+Passive duplicate ACK values piggybacked on unrelated data do not increment
+that counter. Timeout retransmissions use bounded exponential backoff. Passing
+`timeout == 0` in fixed mode deliberately makes every active slot eligible on
+each build. Exceeding `RUDP_MAX_RETRIES` disconnects the context.
+
+Adaptive RTT sampling is session-only and opt-in. The caller must use
+`rudp_session_process_datagram_at()` with a monotonic millisecond timestamp.
+Karn's rule rejects a cumulative RTT sample if any newly acknowledged slot was
+retransmitted. Reset preserves configured recovery bounds and resets the
+estimate to the configured maximum.
+
+## Channel flags and stored hints
+
+The public flags do not all select implemented behavior:
+
+| Flag | Current effect |
+| --- | --- |
+| `RUDP_CHANNEL_FLAG_UNRELIABLE` | Value zero: absence of the reliable capability. It cannot be tested as a bit, and the unreliable send API does not inspect it. |
+| `RUDP_CHANNEL_FLAG_RELIABLE` | Required by `rudp_session_send_reliable()`. |
+| `RUDP_CHANNEL_FLAG_ORDERED` | Metadata only. Reliable session delivery is already always ordered. |
+| `RUDP_CHANNEL_FLAG_ENCRYPTED` | Metadata only. No encryption or authentication is performed. |
+
+The `dscp` field set by `rudp_session_set_qos()` is also a hint: the socket
+owner must apply it to outgoing packets. These inert values remain public for
+now so current callers compile, while their final semantics or removal are
+tracked in `TODO.md`.
+
+## Liveness, restart and security limits
+
+`rudp_touch()` records a valid receive time and `rudp_is_alive()` checks it,
+but the current receive functions do not call `rudp_touch()` automatically.
+The integration must do so after successful validation. Automatic liveness is
+planned in `TODO.md`.
+
+The current wire format has no establishment handshake, random initial
+sequence negotiation or authenticated reset. A restarted peer can therefore
+require coordinated calls to `rudp_session_reset()`, and the first accepted
+unreliable record currently establishes its receive baseline. The forward-jump
+bound protects later unreliable records but does not protect that first one.
+
+The base protocol also has no peer authentication, cryptographic integrity,
+encryption, congestion controller or socket I/O. Randomized sequence anchors
+can reduce blind injection probability, but cannot authenticate a peer that
+can observe traffic. Use an authenticated wrapper such as Noise, DTLS or
+WireGuard on untrusted networks. See `SECURITY.md` and the concrete follow-up
+work in `TODO.md`.
+
+Optional stream, scalar and motion profiles live in
+`src/stream.c`, `src/scalar.c` and `src/motion.c`; their storage is caller-owned. See `docs/PHASE4.md` and
+`docs/ADAPTIVE_RECOVERY.md`.

@@ -4,7 +4,7 @@ This document outlines the coding standards and conventions used in the `zcrudp`
 
 ## C Standards
 
-- The project follows the **C99** or **C11** standards.
+- The project follows the **C11** standards.
 - Use standard integer types from `<stdint.h>` (e.g., `uint32_t`, `uint16_t`).
 
 ## Naming Conventions
@@ -15,11 +15,25 @@ This document outlines the coding standards and conventions used in the `zcrudp`
 - **Unions**: Use `snake_case` with a `_u` suffix (e.g., `tfv_packet_u`).
 - **Constants/Macros**: Use `UPPER_SNAKE_CASE` (e.g., `RUDP_WINDOW_SIZE`).
 
+## Structure initialization
+
+- Use C11 designated initializers for structures and unions: explicitly name
+  each supplied field, including nested members. Avoid positional initializers.
+- Example: `rudp_header_s header = {.seq_num = 0, .ack = 1};`.
+- For a complete value written into an existing object, pointer destination or
+  array element, use a designated compound literal:
+  `col->iovecs[col->count] = (rudp_iovec_s){.base = base, .len = len};`.
+- Omitted fields are zero-initialized by C. Keep individual assignments for
+  partial state updates and keep direct structure copies when copying a value.
+- When filling a reused or variable-length payload buffer, write only the valid
+  bytes and update its metadata. Do not introduce a full-buffer clear just to
+  replace those partial writes with a compound literal.
+
 ## Formatting
 
-- **Indentation**: The codebase currently uses a mix of **2 and 4 spaces**. For new code, **2 spaces** is preferred to maintain consistency with `rudp.c`.
+- **Indentation**: Use **2 spaces**, with the repository `.clang-format` as the source of truth.
 - **Brace Style**: Use the **K&R style** (opening brace on the same line).
-- **Control Statements**: Braces are encouraged but can be omitted for simple single-line `if` statements as seen in `rudp.c`.
+- **Control Statements**: Braces are encouraged but can be omitted for simple single-line `if` statements when unambiguous.
 
 ## Documentation
 

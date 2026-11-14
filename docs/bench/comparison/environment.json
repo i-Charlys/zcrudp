@@ -1,0 +1,77 @@
+{
+  "host": "Linux-6.1.155-x86_64-with-glibc2.43",
+  "cpu": "Intel(R) Xeon(R) Processor @ 2.90GHz",
+  "compiler": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+  "build_command": [
+    "gcc",
+    "-O2",
+    "-std=c11",
+    "-fno-lto",
+    "-UNDEBUG",
+    "-I/home/user/workspace/zcrudp/include",
+    "-I/home/user/workspace/zcrudp/bench",
+    "-I/home/user/workspace/zcrudp/build/compare-deps/kcp-b1a7a2101dcbb96017681a500d6b82bbe5a88766",
+    "-I/home/user/workspace/zcrudp/build/compare-deps/enet-5a9c537fd464b3c6d3c55e1d3bd47588faf71b42/include",
+    "-I/home/user/workspace/zcrudp/build/compare-deps/enet-8b43b92591fa9458662262a598b092ecc5132865/include",
+    "/home/user/workspace/zcrudp/bench/compare_transport.c",
+    "/home/user/workspace/zcrudp/bench/compare_enet_zpl.c",
+    "/home/user/workspace/zcrudp/src/codec.c",
+    "/home/user/workspace/zcrudp/src/reliability.c",
+    "/home/user/workspace/zcrudp/src/session.c",
+    "/home/user/workspace/zcrudp/src/session_tx.c",
+    "/home/user/workspace/zcrudp/src/session_rx.c",
+    "/home/user/workspace/zcrudp/src/rx.c",
+    "/home/user/workspace/zcrudp/src/io.c",
+    "/home/user/workspace/zcrudp/src/crypto.c",
+    "/home/user/workspace/zcrudp/build/compare-deps/kcp-b1a7a2101dcbb96017681a500d6b82bbe5a88766/ikcp.c",
+    "/home/user/workspace/zcrudp/build/compare-deps/enet-5a9c537fd464b3c6d3c55e1d3bd47588faf71b42/callbacks.c",
+    "/home/user/workspace/zcrudp/build/compare-deps/enet-5a9c537fd464b3c6d3c55e1d3bd47588faf71b42/compress.c",
+    "/home/user/workspace/zcrudp/build/compare-deps/enet-5a9c537fd464b3c6d3c55e1d3bd47588faf71b42/host.c",
+    "/home/user/workspace/zcrudp/build/compare-deps/enet-5a9c537fd464b3c6d3c55e1d3bd47588faf71b42/list.c",
+    "/home/user/workspace/zcrudp/build/compare-deps/enet-5a9c537fd464b3c6d3c55e1d3bd47588faf71b42/packet.c",
+    "/home/user/workspace/zcrudp/build/compare-deps/enet-5a9c537fd464b3c6d3c55e1d3bd47588faf71b42/peer.c",
+    "/home/user/workspace/zcrudp/build/compare-deps/enet-5a9c537fd464b3c6d3c55e1d3bd47588faf71b42/protocol.c",
+    "-o",
+    "/home/user/workspace/zcrudp/build/compare_transport"
+  ],
+  "sources": {
+    "enet": [
+      "lsalzman",
+      "enet",
+      "5a9c537fd464b3c6d3c55e1d3bd47588faf71b42",
+      "537d42f31b0c0d27f5a9635f6c224f2451c1c1484bfde50e94c884e96181c290"
+    ],
+    "enet-zpl": [
+      "zpl-c",
+      "enet",
+      "8b43b92591fa9458662262a598b092ecc5132865",
+      "355d615f088d82ae4f01623a82b2b4d5dce2a504a57ffaea9eb701b2da3e007e"
+    ],
+    "kcp": [
+      "skywind3000",
+      "kcp",
+      "b1a7a2101dcbb96017681a500d6b82bbe5a88766",
+      "291d08cd1fba918645a12078cbb6dfffa0825c57e33c0d0ec093604621bf3292"
+    ]
+  },
+  "zcrudp_source_sha256": {
+    "src/codec.c": "798fbc3f86872975fd038b324b6962c60e7db990dfb412a39094f180251858e6",
+    "src/reliability.c": "a41dcb4aa767133d12d79d81200a463acf1c6b870ba481938cfe31ccb8bd41c2",
+    "src/session.c": "193610271eab257e7cbf5eb123d6a6e58daf3c178c8c40186e231065bddc96fb",
+    "src/session_tx.c": "a9a25b4bfdac44f9085ffdb6c300b8bd6fb0f71af5fe3dedb17f350bcc066209",
+    "src/session_rx.c": "63472a721c59df770d1eca48761ea5bc3a97d5959a7bd46a7dd8e732698dac9d",
+    "src/rx.c": "309baa522be8c46c2453dfa34d7e7acd92c40c5347b06f5ae09df90ff704ea61",
+    "src/io.c": "18859dbf5cd7e34dacd5d6091b50de6547f7365adb544b3e69eab9f38fdd4cf5",
+    "src/crypto.c": "895f4edeef3dc4642f3a8f4f165441e9dfdb3c3d438d1db9e9de2cc2394cedab"
+  },
+  "zcrudp_header_sha256": "0fe41177cd3c98d81bc20de9e8762e9273c08d03e72f9f998c72db8b7f74ad11",
+  "harness_sha256": "19b87528d4f929aad5fb7a0c3596b638a4feed6aba5990bf716c3a1adfe98c08",
+  "enet_zpl_bridge_sha256": "1457262fc3c9006032786e28598f81f68c2e9a554a5683e04c7f1293a30a2004",
+  "runner_sha256": "58ceb36cead33183e73244042daa0ad5ddfdcc50b95ab12412f6d6026d22a5fa",
+  "messages": 2400,
+  "seeds": 5,
+  "simulation": "1ms ticks; unlimited bandwidth; jitter 0..40ms",
+  "kcp_fast": "ikcp_nodelay(1,10,2,1); default window sizes",
+  "zcrudp_rto_ms": 100,
+  "zcrudp_recovery": "adaptive; initial=100ms min=10ms max_base=2000ms; 32-bit SACK + FACK + RFC 8985 TLP/RACK"
+}

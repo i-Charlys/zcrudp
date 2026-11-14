@@ -1,0 +1,21 @@
+CompileFlags:
+  Add:
+    - -I../include
+    - -Iinclude
+    - -Wall
+    - -Wextra
+
+---
+If:
+  PathMatch: .*\.c
+CompileFlags:
+  Add:
+    - -std=c11
+
+---
+If:
+  PathMatch: .*\.h
+CompileFlags:
+  Add:
+    - -xc-header
+    - -std=c11
