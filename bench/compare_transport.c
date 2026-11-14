@@ -197,8 +197,26 @@ static unsigned pending(unsigned engine) {
   if (engine == 2) return zpl_enet_pending();
   return (unsigned)ikcp_waitsnd(k[0]);
 }
+static unsigned admission_cap(unsigned engine) {
+  static unsigned cap = 0;
+  if (cap == 0) {
+    const char *env = getenv("ZCRUDP_ADMISSION_CAP");
+    cap = 63;
+    if (env && env[0]) {
+      unsigned long v = strtoul(env, NULL, 10);
+      if (v >= 1 && v <= 1024) {
+        cap = (unsigned)v;
+      }
+    }
+  }
+  if (engine == 0 && cap > (RUDP_WINDOW_SIZE - 1)) {
+    return RUDP_WINDOW_SIZE - 1;
+  }
+  return cap;
+}
 static void submit(unsigned engine) {
-  while (admitted < total && pending(engine) < 63) {
+  unsigned cap = admission_cap(engine);
+  while (admitted < total && pending(engine) < cap) {
     uint32_t scheduled = offered_rate ? origin + (uint32_t)(((uint64_t)admitted * 1000 + offered_rate-1) / offered_rate) : now;
     if (scheduled > now) break;
     tfv_packet_u p = {.type=1, .flags=0, .value=(uint16_t)admitted};

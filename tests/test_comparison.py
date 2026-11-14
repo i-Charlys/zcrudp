@@ -38,3 +38,18 @@ for loss in (1, 5):
         row = next(csv.reader(io.StringIO(result.stdout)))
         assert int(row[6]) == 2400 and row[16] == "1", row
 print(f"PASS: paced 240 Hz, 2,400 messages, 1%/5% loss, {seeds} seeds each")
+
+# Finite-bandwidth & bounded-queue comparison checks (deterministic replay + cap control)
+finite = subprocess.run([str(BIN), "0", "400", "240", "25", "1", "7", "5", "100", "2000", "64"],
+                        text=True, capture_output=True, timeout=30)
+assert finite.returncode == 0, (finite.stdout, finite.stderr)
+finite_row = next(csv.reader(io.StringIO(finite.stdout)))
+assert int(finite_row[6]) == 400 and finite_row[16] == "1", finite_row
+
+capped_env = dict(os.environ, ZCRUDP_ADMISSION_CAP="32")
+capped = subprocess.run([str(BIN), "0", "400", "240", "25", "1", "7", "5", "100", "2000", "64"],
+                        text=True, capture_output=True, env=capped_env, timeout=30)
+assert capped.returncode == 0, (capped.stdout, capped.stderr)
+capped_row = next(csv.reader(io.StringIO(capped.stdout)))
+assert int(capped_row[6]) == 400 and capped_row[16] == "1", capped_row
+print("PASS: finite-bandwidth (2000 kbps, 64 pkts) & ZCRUDP_ADMISSION_CAP=32 gate")

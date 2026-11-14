@@ -39,6 +39,16 @@ static void apply_rtt_sample(rudp_channel_s *chan, uint32_t sample, uint32_t now
   chan->last_rtt_sample = now;
 }
 
+static uint16_t find_first_reliable_slot(const rudp_context_s *ctx) {
+  uint16_t curr = ctx->tail;
+  while (curr != ctx->head &&
+         (ctx->tx_buffer[curr].state == RUDP_SLOT_FREE ||
+          ctx->tx_buffer[curr].state == RUDP_SLOT_UNRELIABLE)) {
+    curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+  }
+  return curr;
+}
+
 static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sack_mask,
                                  bool duplicates, bool timed, uint32_t now,
                                  bool allow_sack_rtt, rudp_stats_s *stats) {
@@ -48,23 +58,39 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
   }
 
   uint16_t prev_tail = ctx->tail;
+  uint16_t first_rel = find_first_reliable_slot(ctx);
   uint32_t sample = 0U;
-  bool eligible = timed && (chan->rto_min_ms > 0U) && (ctx->tail != ctx->head);
+  bool eligible = timed && (chan->rto_min_ms > 0U) && (first_rel != ctx->head);
   if (eligible) {
     uint16_t advance =
-        (uint16_t)(ack - ctx->tx_buffer[ctx->tail].frame.header.seq_num);
+        (uint16_t)(ack - ctx->tx_buffer[first_rel].frame.header.seq_num);
     uint16_t pending = (uint16_t)((ctx->head - ctx->tail) & (RUDP_WINDOW_SIZE - 1U));
     eligible = (advance > 0U) && (advance <= pending);
-    for (uint16_t n = 0U; eligible && n < advance; ++n) {
-      rudp_slot_s *slot =
-          &ctx->tx_buffer[(ctx->tail + n) & (RUDP_WINDOW_SIZE - 1U)];
-      /* Conservative Karn: skip cumulative ranges containing any repair or SACKed slot
-       * whose RTT was already sampled. */
-      if (slot->state != RUDP_SLOT_IN_FLIGHT || slot->tx_count != 1U ||
-          slot->retries != 0U) {
-        eligible = false;
-      } else {
+    if (eligible) {
+      uint16_t acked_rel = 0U;
+      uint16_t scan = first_rel;
+      while (scan != ctx->head) {
+        const rudp_slot_s *slot = &ctx->tx_buffer[scan];
+        if (slot->state == RUDP_SLOT_FREE || slot->state == RUDP_SLOT_UNRELIABLE) {
+          scan = (uint16_t)((scan + 1U) & (RUDP_WINDOW_SIZE - 1U));
+          continue;
+        }
+        if ((int16_t)(ack - slot->frame.header.seq_num) <= 0) {
+          break;
+        }
+        /* Conservative Karn: skip cumulative ranges containing any repair or SACKed
+         * slot whose RTT was already sampled. */
+        if (slot->state != RUDP_SLOT_IN_FLIGHT || slot->tx_count != 1U ||
+            slot->retries != 0U) {
+          eligible = false;
+          break;
+        }
         sample = (uint32_t)(now - slot->timestamp);
+        acked_rel++;
+        scan = (uint16_t)((scan + 1U) & (RUDP_WINDOW_SIZE - 1U));
+      }
+      if (acked_rel != advance) {
+        eligible = false;
       }
     }
   }
@@ -81,15 +107,29 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
     apply_rtt_sample(chan, sample, now);
   }
 
-  if (sack_mask == 0U || ctx->tail == ctx->head) {
+  first_rel = find_first_reliable_slot(ctx);
+  if (sack_mask == 0U || first_rel == ctx->head) {
     return;
   }
 
-  uint16_t tail_seq = ctx->tx_buffer[ctx->tail].frame.header.seq_num;
+  uint16_t tail_seq = ctx->tx_buffer[first_rel].frame.header.seq_num;
   if (ack != tail_seq) {
     return;
   }
-  uint16_t pending = (uint16_t)((ctx->head - ctx->tail) & (RUDP_WINDOW_SIZE - 1U));
+
+  uint16_t rel_slots[33];
+  uint16_t rel_count = 0U;
+  uint16_t scan = first_rel;
+  while (scan != ctx->head) {
+    const rudp_slot_s *s = &ctx->tx_buffer[scan];
+    if (s->state == RUDP_SLOT_IN_FLIGHT || s->state == RUDP_SLOT_SACKED) {
+      if (rel_count < 33U) {
+        rel_slots[rel_count] = scan;
+      }
+      rel_count++;
+    }
+    scan = (uint16_t)((scan + 1U) & (RUDP_WINDOW_SIZE - 1U));
+  }
 
   /* Validate all SACK bits BEFORE mutating slot state: reject forged SACKs
    * targeting sequences ahead of head or queued slots with tx_count == 0. */
@@ -98,14 +138,13 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
     if ((sack_mask >> b) & UINT32_C(1)) {
       highest_sack_bit = b;
       uint16_t offset = (uint16_t)(1U + b);
-      if (offset >= pending) {
+      if (offset >= rel_count) {
         if (stats) {
           rudp_stat_inc(&stats->rx_ack_rejected);
         }
         return;
       }
-      rudp_slot_s *s =
-          &ctx->tx_buffer[(ctx->tail + offset) & (RUDP_WINDOW_SIZE - 1U)];
+      rudp_slot_s *s = &ctx->tx_buffer[rel_slots[offset]];
       if (s->state == RUDP_SLOT_FREE || s->tx_count == 0U) {
         if (stats) {
           rudp_stat_inc(&stats->rx_ack_rejected);
@@ -116,12 +155,14 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
   }
 
   bool any_sacked_above_mask = false;
-  for (uint16_t off = (uint16_t)(2U + highest_sack_bit); off < pending; ++off) {
-    if (ctx->tx_buffer[(ctx->tail + off) & (RUDP_WINDOW_SIZE - 1U)].state ==
-        RUDP_SLOT_SACKED) {
+  uint16_t above_scan =
+      (uint16_t)((rel_slots[1U + highest_sack_bit] + 1U) & (RUDP_WINDOW_SIZE - 1U));
+  while (above_scan != ctx->head) {
+    if (ctx->tx_buffer[above_scan].state == RUDP_SLOT_SACKED) {
       any_sacked_above_mask = true;
       break;
     }
+    above_scan = (uint16_t)((above_scan + 1U) & (RUDP_WINDOW_SIZE - 1U));
   }
 
   unsigned newly_sacked_count = 0U;
@@ -130,8 +171,7 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
   for (unsigned b = 0U; b < 32U; ++b) {
     if ((sack_mask >> b) & UINT32_C(1)) {
       uint16_t offset = (uint16_t)(1U + b);
-      rudp_slot_s *s =
-          &ctx->tx_buffer[(ctx->tail + offset) & (RUDP_WINDOW_SIZE - 1U)];
+      rudp_slot_s *s = &ctx->tx_buffer[rel_slots[offset]];
       if (s->state == RUDP_SLOT_IN_FLIGHT) {
         newly_sacked_count++;
         if (b == highest_sack_bit && timed && chan->rto_min_ms > 0U &&
@@ -159,15 +199,16 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
   /* RFC 6675 FACK Multi-Loss Recovery: scan backwards from highest pending slot
    * and arm fast retransmit on any unrepaired hole with >= 3 SACKed slots above it. */
   uint16_t sacked_above = 0U;
-  for (uint16_t pos = pending; pos > 0U; --pos) {
-    uint16_t offset = (uint16_t)(pos - 1U);
-    rudp_slot_s *s = &ctx->tx_buffer[(ctx->tail + offset) & (RUDP_WINDOW_SIZE - 1U)];
+  uint16_t cur = ctx->head;
+  while (cur != ctx->tail) {
+    cur = (uint16_t)((cur - 1U) & (RUDP_WINDOW_SIZE - 1U));
+    rudp_slot_s *s = &ctx->tx_buffer[cur];
     if (s->state == RUDP_SLOT_SACKED) {
       sacked_above++;
     } else if (s->state == RUDP_SLOT_IN_FLIGHT && s->tx_count > 0U &&
                s->retries == 0U && sacked_above >= 3U) {
       rudp_slot_set_fast_state(s, RUDP_FAST_RETRANSMIT_PENDING);
-      if (offset == 0U && ctx->duplicate_ack_count < 3U) {
+      if (cur == first_rel && ctx->duplicate_ack_count < 3U) {
         ctx->last_ack_received = ack;
         ctx->duplicate_ack_count = 3U;
       }

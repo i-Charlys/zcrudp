@@ -91,6 +91,14 @@ static void inspect_channel_tail_state(const rudp_channel_s *chan, uint32_t now,
         }
       }
       sc.total_in_flight++;
+    } else if (s->state == RUDP_SLOT_UNRELIABLE) {
+      if (!sc.has_unsent) {
+        sc.has_unsent = true;
+        sc.first_unsent_idx = curr;
+        sc.inflight_before_first_unsent = sc.total_in_flight;
+        sc.sacked_before_first_unsent = sc.total_sacked;
+      }
+      sc.total_in_flight++;
     } else if (s->state == RUDP_SLOT_SACKED) {
       sc.total_sacked++;
     }
@@ -250,6 +258,7 @@ static bool channel_has_ready_fec(const rudp_channel_s *chan) {
       uint16_t even_idx = (uint16_t)((curr - 1U) & (RUDP_WINDOW_SIZE - 1U));
       const rudp_slot_s *even = &chan->ctx.tx_buffer[even_idx];
       if (even->frame.header.seq_num == (uint16_t)(odd_seq - 1U) &&
+          (even->state == RUDP_SLOT_IN_FLIGHT || even->state == RUDP_SLOT_SACKED) &&
           even->tx_count >= 1U) {
         return true;
       }
@@ -326,6 +335,33 @@ int rudp_session_send_unreliable(rudp_session_s *session, uint8_t channel_id,
   return (RUDP_WIRE_DATAGRAM_HEADER_SIZE + RUDP_WIRE_RECORD_SIZE);
 }
 
+int rudp_session_queue_unreliable(rudp_session_s *session, uint8_t channel_id,
+                                  tfv_packet_u payload) {
+  if (!session || channel_id >= RUDP_MAX_CHANNELS) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  rudp_channel_s *chan = &session->channels[channel_id];
+  if (chan->ctx.state != RUDP_STATE_CONNECTED) {
+    return RUDP_ERR_DISCONNECTED;
+  }
+  uint16_t next_head = (uint16_t)((chan->ctx.head + 1U) & (RUDP_WINDOW_SIZE - 1U));
+  if (next_head == chan->ctx.tail) {
+    return RUDP_ERR_BUFFER_FULL;
+  }
+  rudp_slot_s *slot = &chan->ctx.tx_buffer[chan->ctx.head];
+  *slot = (rudp_slot_s){
+      .frame = {.header = {.seq_num = chan->next_unreliable_seq++},
+                .packet = payload},
+      .timestamp = 0U,
+      .state = RUDP_SLOT_UNRELIABLE,
+      .retries = 0U,
+      .fast_retransmit = 0U,
+      .tx_count = 0U,
+  };
+  chan->ctx.head = next_head;
+  return RUDP_OK;
+}
+
 static void capture_channel_snapshot(const rudp_session_s *session,
                                      rudp_tx_plan_s *plan) {
   for (uint8_t c = 0; c < RUDP_MAX_CHANNELS; ++c) {
@@ -333,6 +369,7 @@ static void capture_channel_snapshot(const rudp_session_s *session,
     plan->prev_last_ack_sent[c] = session->channels[c].last_ack_sent;
     plan->prev_ack_pending[c] = session->channels[c].ack_pending;
     plan->prev_state[c] = session->channels[c].ctx.state;
+    plan->prev_tail[c] = session->channels[c].ctx.tail;
   }
   plan->prev_rr_cursor = session->rr_cursor;
   plan->record_count = 0U;
@@ -347,6 +384,7 @@ static void snapshot_slot_in_plan(rudp_tx_plan_s *plan, uint8_t c, uint16_t curr
   plan->prev_tx_count[idx] = slot->tx_count;
   plan->prev_retries[idx] = slot->retries;
   plan->prev_fast_retransmit[idx] = slot->fast_retransmit;
+  plan->prev_slot_state[idx] = slot->state;
   plan->prev_timestamp[idx] = slot->timestamp;
 }
 
@@ -669,6 +707,34 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
             lead_set = true;
             count++;
           }
+        } else if (slot->state == RUDP_SLOT_UNRELIABLE) {
+          rem_inflight--;
+          rudp_record_s rec = {.channel_id = c,
+                               .flags = RUDP_RECORD_FLAG_UNRELIABLE,
+                               .seq_num = slot->frame.header.seq_num,
+                               .payload = slot->frame.packet};
+          size_t offset =
+              RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)count * RUDP_WIRE_RECORD_SIZE);
+          int ret = rudp_pack_record(&rec, out_buf + offset, effective_max - offset);
+          if (ret != RUDP_WIRE_RECORD_SIZE) {
+            if (plan) {
+              rudp_session_cancel_datagram(session, plan);
+              plan->valid = 0U;
+            }
+            return ret;
+          }
+          if (plan) {
+            snapshot_slot_in_plan(plan, c, curr, slot);
+          }
+          slot->state = RUDP_SLOT_FREE;
+          slot->tx_count = 0U;
+          while (chan->ctx.tail != chan->ctx.head &&
+                 chan->ctx.tx_buffer[chan->ctx.tail].state == RUDP_SLOT_FREE) {
+            chan->ctx.tail = (uint16_t)((chan->ctx.tail + 1U) & (RUDP_WINDOW_SIZE - 1U));
+          }
+          lead_channel = c;
+          lead_set = true;
+          count++;
         }
         curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
       }
@@ -693,7 +759,10 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
               !(fec_touched_pair && even_seq == fec_touched_base)) {
             uint16_t even_idx = (uint16_t)((curr - 1U) & (RUDP_WINDOW_SIZE - 1U));
             const rudp_slot_s *even = &chan->ctx.tx_buffer[even_idx];
-            if (even->frame.header.seq_num == even_seq && even->tx_count >= 1U) {
+            if (even->frame.header.seq_num == even_seq &&
+                (even->state == RUDP_SLOT_IN_FLIGHT ||
+                 even->state == RUDP_SLOT_SACKED) &&
+                even->tx_count >= 1U) {
               rudp_record_s prec = {
                   .channel_id = c,
                   .flags = RUDP_RECORD_FLAG_FEC_PARITY,
@@ -893,6 +962,7 @@ int rudp_session_cancel_datagram(rudp_session_s *session, const rudp_tx_plan_s *
     slot->tx_count = plan->prev_tx_count[idx];
     slot->retries = plan->prev_retries[idx];
     slot->fast_retransmit = plan->prev_fast_retransmit[idx];
+    slot->state = plan->prev_slot_state[idx];
     slot->timestamp = plan->prev_timestamp[idx];
   }
   for (uint8_t c = 0; c < RUDP_MAX_CHANNELS; ++c) {
@@ -900,6 +970,7 @@ int rudp_session_cancel_datagram(rudp_session_s *session, const rudp_tx_plan_s *
     session->channels[c].last_ack_sent = plan->prev_last_ack_sent[c];
     session->channels[c].ack_pending = plan->prev_ack_pending[c];
     session->channels[c].ctx.state = plan->prev_state[c];
+    session->channels[c].ctx.tail = plan->prev_tail[c];
   }
   session->rr_cursor = plan->prev_rr_cursor;
   return RUDP_OK;
@@ -960,4 +1031,9 @@ uint32_t rudp_session_next_wakeup_ms(const rudp_session_s *session, uint32_t now
     }
   }
   return min_wait;
+}
+
+bool rudp_session_has_pending_work(const rudp_session_s *session, uint32_t now,
+                                   uint32_t fallback_timeout_ms) {
+  return rudp_session_next_wakeup_ms(session, now, fallback_timeout_ms) == 0U;
 }

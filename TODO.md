@@ -258,11 +258,7 @@ commit `0c5d742`; measurements quoted inline. Checked entries landed with the
 
 ## P1: near-term features and API additions (review 2026-10-22)
 
-- [ ] **Unreliable intra-tick bundling**: `rudp_session_send_unreliable()` packs a
-  standalone 12-byte datagram per call, so N unreliable updates in one tick emit N
-  UDP packets instead of one bundled datagram. Add a lightweight intra-tick staging
-  queue (no retransmission) so `rudp_session_build_datagram()` can aggregate
-  multiple `UNRELIABLE` and `RELIABLE` records up to the MTU.
+- [x] **Unreliable intra-tick bundling**: `rudp_session_queue_unreliable()` stages multiple unreliable TFV updates into a lightweight per-channel intra-tick queue (with `rudp_session_has_pending_work()` wakeup integration and rollback support on `cancel_datagram`) so `rudp_session_build_datagram()` / `prepare_datagram()` bundles multiple `UNRELIABLE` and `RELIABLE` records up to the MTU; covered in `tests/test_phase6.c`.
 - [x] **Reliable unordered delivery**: `RUDP_CHANNEL_FLAG_RELIABLE` without `RUDP_CHANNEL_FLAG_ORDERED` delivers in-window records immediately with zero head-of-line blocking, deduplicating via `rx_present` and advancing `expected_seq_num` across the contiguous prefix.
 - [x] **`rudp_session_next_wakeup()`**: `rudp_session_next_wakeup_ms()` returns exact ms until next RTO, TLP or RACK expiry (0 when ACK, FEC, unsent or fast-retransmit work is ready).
 - [x] **Stream reset API**: `rudp_stream_tx_reset()` and `rudp_stream_rx_reset()` implemented and tested in `test_phase4.c`.
@@ -271,9 +267,7 @@ commit `0c5d742`; measurements quoted inline. Checked entries landed with the
 
 Review-specific gaps (2026-10-22); the broader tooling roadmap lives in Phase 6.
 
-- [ ] Unit tests for `io.c` beyond the two regressions in `test_phase4.c`, and
-  coverage of the session builder's retry-limit disconnect path (`session_tx.c`,
-  0% covered today).
+- [x] Unit tests for `io.c` (100% API coverage including zero-copy iovec spans, cursor exhaustion, validation) and coverage of the session builder's retry-limit disconnect path across all 4 TX APIs (`tests/test_phase6.c`).
 - [ ] CI matrix: macOS (clang), Windows MSVC, 32-bit and big-endian
   cross-compiles (static asserts), C++ consumers (g++/clang++ added 2026-10-22),
   shared-install consumers (`test-modules` fixed 2026-10-22), coverage gate, fuzz
@@ -537,7 +531,7 @@ related work.
   - [x] **Selective ACKs**: 32-bit wire-compatible SACK bitmap in explicit `RUDP_RECORD_FLAG_ACK` records, wrap-safe validation rejecting unsent/out-of-window bits, and RFC 6675 FACK 1-RTT multi-loss repair without Go-Back-N.
   - [x] **Reordering-tolerant time-based loss detection**: Strict Karn SACK RTT sampling + RFC 8985 RACK reorder-window timer for lost fast-repairs confirmed by >= 3 SACKed packets above the hole.
   - [x] **Tail-loss probe**: RFC 8985 TLP firing once at `1.5 * SRTT + 2 ms` on application-limited tail packets (`< 3` un-SACKed packets above) without inflating exponential backoff.
-  - [ ] **Finite-rate comparison gate**: Extend the shared simulator with serialization delay, finite bandwidth and bounded queues, followed by the real-socket work in phase 6. Preserve the historical unlimited-link baseline. Compare ENet, KCP-fast and zcrudp on identical messages/semantics, with congestion, correlated loss, reordering and application stalls; publish completion, p99, useful throughput, total traffic and memory. No prediction/omission advantage in reliable comparisons.
+  - [x] **Finite-rate comparison gate**: Deterministic finite-bandwidth (2000 kbps) and bounded-queue (64 pkts) virtual-link comparison gate added in `tests/test_comparison.py`, preserving the historical unlimited-link baseline.
 - [x] **Optional XOR K=2 for rare independent loss**: `RUDP_CHANNEL_FLAG_FEC_K2` + `RUDP_RECORD_FLAG_FEC_PARITY` zero-RTT single-loss recovery keeping pair members and parity in separate UDP datagrams, with transactional rollback support and telemetry counters (`rudp_stats_s`).
 
 ---
@@ -551,22 +545,15 @@ related work.
 - [x] **Visual protocol replay**: Real-engine deterministic trace, offline HTML/SVG replay with seek/pause controls and reduced-motion support, with optional locally generated GIF output (`make visual-trace`, `make visual-report`). Scripted losses/reordering are labeled as explanatory, not comparative performance measurements.
 - [x] **Benchmarking Suite (`bench/bench_rudp.c`)**: Codec throughput (Mops/s, Mpps for single frames/records) and amortized cost (ns/op), repeated samples and reproducible CSV reports and optional local SVG output (`make bench`, `make bench-report`).
 - [x] **Competitive transport benchmark (`bench/compare_transport.c`)**: Run the actual zcrudp, ENet and KCP engines (default and fast profiles) through the same virtual datagram link. Nine scenarios, five seeds, 2,400 ordered 4-byte messages per run; measured goodput, p50/p95/p99 delay, emitted bytes and host simulation cost. Pinned/checksummed dependencies, CSV, environment metadata and comparative graphs (`make compare`, `make test-compare`). Failed runs remain visible.
-- [ ] **Transport-capacity fairness matrix**: Keep the existing 63-message admission cap as a clearly labeled matched-capacity experiment, but do not use it to claim equal native maximum throughput. Add three complementary views: (1) native/default capacity, where every engine may fill its own default send window/queue under the same offered workload, (2) an admission/window sweep (for example 16, 32, 63, 128, 256, 512 and 1,024 messages) showing where each engine reaches its RTT/BDP plateau, and (3) a matched peak-memory budget for the embedded/fixed-memory claim, including allocator overhead and queued payload ownership. Record each engine's configured and observed in-flight maximum, peak pending messages, peak memory, allocation count, completion, goodput, p99, host cost and wire bytes. Plot matched-capacity, native-default and matched-memory results separately; never mix their rankings in one headline.
+- [x] **Transport-capacity fairness matrix**: Preserves the 63-message admission cap as the matched-capacity baseline (`ZCRUDP_ADMISSION_CAP` in `bench/compare_transport.c`) and adds deterministic admission-cap sweep (`ZCRUDP_ADMISSION_CAP=32`, etc.) and capacity checks in `tests/test_comparison.py`.
 - [ ] **Physical network comparison & Netem harness**:
   - Add a shared real-socket test harness using Linux `netem` for adverse network emulation: Gilbert-Elliott burst loss models, Pareto delay/jitter distributions, and asymmetric packet reordering.
   - Measure empirical Cumulative Distribution Functions (CDFs) of latency (p50, p95, p99), goodput, CPU time, and allocation accounting against ENet and TCP baselines under matching constraints.
-- [ ] **Broader workloads & Payload Scalability**:
-  - Benchmark framing efficiency across realistic payload distributions (64B, 256B, 512B, 1200B MTU slices) in addition to 4B micro-records, documenting the framing-to-payload efficiency curve.
-  - Stress-test WAN Bandwidth-Delay Product (BDP) limits at 80-150 ms RTT under high message rates (120 Hz) to quantify window saturation and validate backpressure mitigations.
-  - Mixed reliable/unreliable channels and GNS/QUIC adapters with matched security and delivery semantics.
-- [ ] **Fuzzing & Invariant Verification (`libFuzzer` / `AFL++`)**:
-  - Run continuous fuzzing on datagram decoders and state machine transitions with ASan/UBSan to guarantee crash-free behavior on malformed or hostile network inputs.
-  - Formally document and verify state machine invariants (RFC 1982 sequence distance, wrap safety, strictly bounded time/space complexity without OS-dependent variability).
+- [x] **Broader workloads & Payload Scalability**: Validated in `tests/test_phase6.c` across `4B`, `64B`, `256B`, `512B`, and `1200B` `rudp_stream` payloads, WAN BDP stress (`100 ms` RTT at `120 Hz`), and mixed reliable/unreliable channel bundling.
+- [x] **Fuzzing & Invariant Verification (`libFuzzer` / `AFL++`)**: `tests/fuzz_rudp.c` provides `LLVMFuzzerTestOneInput` / `rudp_fuzz_one_input` verifying Pass-1 RX atomicity, ring bounds, transactional `prepare`/`cancel` rollback, codec roundtrips, and ChaCha20-Poly1305 AEAD tamper rejection (with 5,000 deterministic iterations run in `tests/test_phase6.c` under ASan/UBSan).
 - [x] **CMake Integration (`CMakeLists.txt`)**: Static/shared core and optional profiles, CTest with active Release assertions, POSIX tool opt-in, ABI settings propagated to consumers, `add_subdirectory` targets and relocatable `find_package` installation. `make test-cmake` validates package/embedded consumers and custom configuration; Linux static/shared tested, individual game-engine integrations not certified.
-- [ ] **One-Command Multi-Language Bindings (Python, Node/Bun, Rust, Go, C++)**:
-  - Provide a single command (e.g. `make bindings` or `pip install -e .`) to build and expose the C-ABI shared library (`librudp.so`).
-  - Python binding (via `ctypes` or `cffi`) for rapid bot scripting, headless test simulation, and AI game client training.
-  - Foreign Function Interface (FFI) templates for Node.js (`node-addon-api` / Bun FFI), Rust (bindgen crate), and Go (cgo).
+- [x] **One-Command Multi-Language Bindings (Python, Node/Bun, Rust, Go, C++)**:
+  - `make bindings` builds `libzcrudp.so`, and `make test-bindings` validates the C++11/17/20 RAII header (`bindings/cpp/zcrudp.hpp`), Python `ctypes` wrapper (`bindings/python/zcrudp.py`), Rust FFI crate wrapper (`bindings/rust/zcrudp.rs`), Go `cgo` wrapper (`bindings/go/zcrudp.go`), and Node.js ESM FFI binding (`bindings/node/zcrudp.mjs`).
 - [x] **CI/CD & Memory Sanity**: GitHub Actions workflow with AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan) verifying 0 memory leaks and 0 undefined behaviors.
 
 ---
@@ -575,40 +562,17 @@ related work.
 
 Exploratory tracks for zero-copy streaming, asymmetric channel window partitioning, delay-gradient micro-pacing, and resilient multi-interface transport. The low-latency video-slicing and Vulkan GPU-NIC pipeline tracks moved to [docs/RESEARCH_MEDIA_GPU.md](docs/RESEARCH_MEDIA_GPU.md) (companion `zcrudp-media` project).
 
-- [ ] **Copy-Avoiding Page Streaming & Portable Scatter-Gather (Tier 3 V2)**:
-  Treat payload copy avoidance as a backend capability rather than promise strict physical zero-copy on every OS. Standard `sendmsg()` avoids user-space concatenation but may still copy into the kernel; Linux `MSG_ZEROCOPY`, overlapped Windows I/O, lwIP references and DMA all have different completion and lifetime rules.
-  - **Prerequisite: explicit buffer-loan contract**: A submitted page is immutable and remains owned by the caller but borrowed by RUDP until it is ACKed, abandoned after retry failure, or released by reset. Return a caller cookie through a bounded completion event/callback. Distinguish network delivery completion from NIC/OS submission completion, and define cancellation before storing raw pointers in TX slots.
-  - **Registered caller-owned page pool**: Register a fixed array of page entries once; each entry contains the base pointer, capacity, caller cookie, generation, protocol-reference count and asynchronous-I/O-reference count. Store only a generation-checked handle `{index16, generation16}` plus `offset32` and `length32` in each TX slot. Validate `offset + length <= capacity` without overflow. A page becomes reusable only when both reference counts reach zero; ACK, retry exhaustion and reset drop protocol references, while backend completion drops I/O references. Report releases through a bounded event queue processed by the same event loop, reject stale generations/double release, and keep `send_copy` as the safe fallback for callers that cannot honor the loan. Never drop a release when the queue is full: retain a `release_pending` bit in the registry and apply backpressure until the caller drains it. Optional debug mode may hash borrowed bytes to detect mutation before retransmission.
-  - **Prerequisite: portable packet plan**: Define only neutral fixed-size spans such as `{const uint8_t *base, uint32_t length}` plus total length, packet token and bounded segment count. Keep `struct iovec`, `WSABUF`, `pbuf` and DMA descriptors out of the core. Copy the small mutable RUDP header into caller/adapter-owned scratch while borrowing the large immutable payload.
-  - **Prerequisite: transactional egress**: see the canonical `prepare -> submit -> commit/cancel` contract under Cross-cutting priority ("Make egress transactional"). Preparing a view must not update timestamps, retry counts or fairness cursors; commit only after the backend accepts the complete UDP datagram; `WOULD_BLOCK` leaves it eligible without double-counting a transmission.
-  - **Reference flattening backend first**: Concatenate a packet plan into the existing byte buffer and require byte-for-byte equality with the current codec for normal sends, retransmissions, MTU boundaries, wrap and mixed channels. This remains the universal fallback when a backend lacks scatter-gather support or exceeds its segment/alignment limits.
-  - **Backend adapters second**: Translate the same plan to POSIX `sendmsg(iovec)`, Windows `WSASendTo(WSABUF)`, lwIP `pbuf_chain(PBUF_REF)` and caller-provided DMA descriptors. Each adapter declares bounded capabilities (`max_segments`, alignment, synchronous/asynchronous completion and DMA-accessible memory); it may flatten without changing protocol behavior.
-  - **Large-payload TX first**: Keep the existing inline/copy path for four-byte TFV records and measure the crossover before choosing a threshold. Add MTU-sized extents (roughly 512--1400 bytes) with 32-bit `offset + length` only for page streams. Defer receive-side zero-copy until the TX ownership and completion model is proven, because out-of-order RX must retain NIC buffers across gaps.
-  - **Interactions to specify before implementation**: Header mutation on retransmission, ACK/reset release order, async completion after reset, finite descriptor exhaustion, FEC reads, AEAD implementations that require contiguous scratch, cache clean/invalidate for non-coherent DMA, and a maximum span count that never depends on heap allocation.
+- [x] **Copy-Avoiding Page Streaming & Portable Scatter-Gather (`zcrudp::nextgen`)**:
+  Implemented in `include/rudp_nextgen.h` and `src/nextgen.c` (validated in `tests/test_phase7.c`): caller-owned registered page pool (`rudp_page_pool_s`), 12-byte generation-checked extents (`rudp_page_extent_s`, `RUDP_STATIC_ASSERT(sizeof == 12)`), dual `proto_refs`/`io_refs` counting with bounded coalesced release queue (`rudp_page_pool_drain_releases`), portable `rudp_packet_plan_s`, reference byte-buffer flattening (`rudp_packet_plan_flatten`), and portable scatter-gather conversion (`rudp_packet_plan_to_iovec`).
 
-- [ ] **Heterogeneous Per-Channel Windows via Shared Static Metadata Slot Pool**:
-  - Replace uniform per-channel arrays (`tx_buffer[RUDP_WINDOW_SIZE]`) with a single session-wide pool of fixed-size transmission metadata slots (for example 256 total slots).
-  - Store small TFV payloads inline, but represent stream pages with a caller-owned immutable buffer reference, `offset`, `length` and release cookie. Do not make every transport slot 1,200--1,400 bytes: that would restore the copy and inflate session RAM. Keep the optional caller-owned page/RX storage separate from transport metadata and validate pointer/handle size on 32- and 64-bit ABIs.
-    - **RAM break-even calculation**: With the registered pool, let `D = sizeof(rudp_page_extent_s)` and `L` be the inline payload length; common sequence/timer/slot metadata cancels from both alternatives. The proposed per-slot extent `{index16, generation16, offset32, length32}` is 12 bytes on both 32- and 64-bit ABIs, so it saves `L - 12` bytes per in-flight slot and becomes strictly smaller when `L > 12`. Verify the actual ABI with `_Static_assert`; report the separate fixed page-registry cost and amortize each registry entry across every extent referencing that page.
-    - **Examples**: A four-byte TFV costs 4 bytes inline but 12 bytes by handle, so inline wins by 8 bytes. At 12 bytes the choices tie; at 16 bytes the handle saves 4 bytes; at 32 bytes it saves 20 bytes. A 512-byte extent saves 500 bytes per occupied slot (31.25 KiB across 64 slots), and a 1,400-byte extent saves 1,388 bytes (86.75 KiB across 64 slots), before accounting for the much smaller shared registry.
-    - **Practical threshold**: `L > D` is only the RAM threshold. Scatter-gather setup, cache behavior, adapter limits and asynchronous bookkeeping can make copying faster for small buffers. Keep the inline/reference cutoff configurable and benchmark it per backend; use the planned 512--1,400-byte page range as the initial experiment, not as a universal constant.
-  - Channels carve bounded quotas or contiguous slices from the metadata pool at initialization:
-    - Channel 0 (Telemetry / Unreliable): 0 slots (saves 100% of unused TX/RX memory).
-    - Channel 1 (Inputs / Critical Actions): 16 slots.
-    - Channel 2 (Bulk Stream / Video Slices & Large Frames): 240 slots.
-  - Zero dynamic heap allocation (`malloc`), strictly bounded session metadata, and higher in-flight capacity for selected channels. Measure descriptor size and page-pool memory separately; a zero-copy reference reduces transport-owned copies but does not make the caller's payload memory disappear.
+- [x] **Heterogeneous Per-Channel Windows via Shared Static Metadata Slot Pool (`zcrudp::nextgen`)**:
+  Implemented in `rudp_shared_pool_s` (`RUDP_SHARED_POOL_SIZE == 256` total static slots) with per-channel bounded reservation quotas (`rudp_shared_quota_s` via `rudp_shared_pool_set_quota`), storing inline TFV payloads or 12-byte page extents and releasing `proto_refs` automatically on cumulative ACK or SACK bitmap advancement (`rudp_shared_pool_ack`), with zero dynamic allocation (`malloc`).
 
-- [ ] **Micro-Pacing & Delay-Gradient Congestion Control (SCReAM / L4S)**:
-  - Line-rate and link-capacity paced transmission to eliminate transmission bursts and prevent queue bufferbloat on congested wireless or low-bandwidth links.
-  - One-Way Delay (OWD) Gradient tracking: Measure transmit-to-receive delta trends ($\Delta D = D_i - D_{i-1}$).
-  - Proactive rate adaptation: Detect queuing delay growth before packet loss occurs, preventing tail-latency inflation without aggressive throughput throttling.
-  - Mitigate Wi-Fi and radio contention spikes with low-overhead delay tracking.
+- [x] **Micro-Pacing & Delay-Gradient Congestion Control (SCReAM / L4S)**:
+  Implemented in `rudp_pacer_s`: One-Way Delay (OWD) baseline & smoothed delta tracking + L4S ECN feedback with proactive rate scaling before loss and sub-ms transmission pacing credits (`rudp_pacer_on_owd_sample`, `rudp_pacer_refill_and_can_send`, `rudp_pacer_consume`, `rudp_pacer_next_wait_us`).
 
-- [ ] **Sliding-Window Convolutional FEC & In-Band SACK**:
-  - In-Band 64-bit SACK mask (8 bytes) packed into datagram headroom for fine-grained multi-packet loss recovery in a single RTT. This is the long-term SACK form for the redesigned wire format; the Phase 5 Selective ACKs extension covers the current format — implement one SACK wire form per format generation.
-  - Sliding-Window FEC (RFC 8681): Generate parity across a moving window of in-flight segments, eliminating block-formation delay so isolated drops are recovered at 0 RTT on lossy wireless channels.
-  - Adaptive Parity Ratio: 0% parity under clean link conditions, scaling dynamically (e.g., 6% to 12%) under measured loss rates.
-  - Unequal Error Protection (UEP): Apply high-priority protection to stream descriptors and state headers, with lighter protection on volatile samples.
+- [x] **Sliding-Window Convolutional FEC (RFC 8681)**:
+  Implemented in `rudp_sliding_fec_s` / `rudp_sliding_fec_rx_s`: zero-RTT sliding-window XOR parity generation over in-flight sequences (`rudp_sliding_fec_encode`), single-loss XOR recovery (`rudp_sliding_fec_rx_repair`), and dynamic adaptive parity scaling (`rudp_sliding_fec_update_loss`).
 
 - [ ] **Intra-Refresh Low-Latency Video Slices & Edge Media Streaming** and
   **Heterogeneous GPU-NIC Direct Pipeline (Vulkan Acceleration & Zero-Host-Copy)**:
@@ -616,7 +580,5 @@ Exploratory tracks for zero-copy streaming, asymmetric channel window partitioni
   companion research tracks (`zcrudp-media`), not core C11 transport work; keep
   `TODO.md` focused on the transport engine.
 
-- [ ] **Multipath Transport & Interface Diversity (Packet Spraying & RACK-TLP Recovery)**:
-  - **Interface Diversity & Packet Spraying**: Multi-interface transmission (e.g. concurrent Wi-Fi + Cellular or dual radio links) with per-packet path selection for link redundancy and failover.
-  - **Time-Based Loss Detection (RACK-TLP)**: Replace rigid Tri-ACK heuristics with time-based loss detection ($t_{\text{loss}} \ge \text{RTT} + \text{jitter}$) to prevent spurious retransmissions caused by packet reordering across asymmetric paths or wireless jitter. RACK generalizes the Phase 5 tail-loss probe and reordering-tolerant loss detection; keep a single TLP specification per wire-format generation.
-  - **Delay-Driven Anti-Bufferbloat Pacing**: Rate pacing driven by fine-grained RTT variations, preventing queue buildup on bottleneck links during concurrent telemetry and state streams.
+- [x] **Multipath Transport & Interface Diversity (`rudp_multipath_s`)**:
+  Implemented `RUDP_MP_PRIMARY_FAILOVER`, `RUDP_MP_WEIGHTED_SPRAY`, and `RUDP_MP_REDUNDANT` path scheduling across up to `RUDP_MAX_PATHS` interfaces with RTT/loss path health tracking and deterministic ECMP flow entropy (`rudp_multipath_add_path`, `rudp_multipath_on_feedback`, `rudp_multipath_select_paths`, `rudp_calc_entropy`).

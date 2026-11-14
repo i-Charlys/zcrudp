@@ -1,6 +1,6 @@
 @PACKAGE_INIT@
 include("${CMAKE_CURRENT_LIST_DIR}/zcrudpTargets.cmake")
-foreach(component IN ITEMS core config codec reliability session io crypto profiles stream scalar motion)
+foreach(component IN ITEMS core config codec reliability session io crypto profiles stream scalar motion nextgen)
   if(TARGET zcrudp::${component})
     set(zcrudp_${component}_FOUND TRUE)
   else()

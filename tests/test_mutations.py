@@ -11,9 +11,12 @@ CFLAGS = ["-Iinclude", "-Wall", "-Wextra", "-std=c11", "-pedantic", "-O1", "-UND
 SRC = [
     "src/codec.c", "src/reliability.c", "src/session.c", "src/session_tx.c",
     "src/session_rx.c", "src/rx.c", "src/io.c", "src/crypto.c",
-    "src/stream.c", "src/scalar.c", "src/motion.c",
+    "src/stream.c", "src/scalar.c", "src/motion.c", "src/nextgen.c",
 ]
-SUITES = ["tests/test_phase5.c", "tests/test_phase4.c", "tests/test_rudp.c"]
+SUITES = [
+    "tests/test_phase7.c", "tests/test_phase6.c", "tests/test_phase5.c",
+    "tests/test_phase4.c", "tests/test_rudp.c",
+]
 
 MUTANTS = [
     (
@@ -58,6 +61,18 @@ MUTANTS = [
         "if (channel->rx_present[slot / 8] & mask) {\n        channel->ack_pending = 1;",
         "if (0 && (channel->rx_present[slot / 8] & mask)) {\n        channel->ack_pending = 1;",
     ),
+    (
+        "nextgen-aba-gen-check-bypass",
+        "src/nextgen.c",
+        "if (!d->allocated || d->release_pending || d->gen != extent.gen) {",
+        "if (!d->allocated || d->release_pending) {",
+    ),
+    (
+        "nextgen-sliding-fec-xor-broken",
+        "src/nextgen.c",
+        "acc = nextgen_payload_xor(acc, rx->payloads[idx]);",
+        "acc = repair->xor_payload; /* broken xor */",
+    ),
 ]
 
 
@@ -65,8 +80,10 @@ def build_and_run(work: Path) -> bool:
     for idx, suite in enumerate(SUITES):
         exe = work / f"suite_{idx}"
         sources = SRC if "phase" in suite else SRC[:8]
+        extra = ["tests/fuzz_rudp.c"] if suite.endswith("test_phase6.c") else []
         cmd = [*CC, *CFLAGS, "-I" + str(work / "include"),
-               *[str(work / s) for s in sources], str(work / suite), "-o", str(exe)]
+               *[str(work / s) for s in sources], str(work / suite),
+               *[str(work / e) for e in extra], "-o", str(exe)]
         res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if res.returncode != 0:
             return False

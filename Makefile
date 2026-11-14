@@ -4,8 +4,8 @@ CFLAGS = -Iinclude -Wall -Wextra -std=c11 -pedantic -Werror -O2 -UNDEBUG
 ASAN_CFLAGS = -Iinclude -Wall -Wextra -std=c11 -pedantic -Werror -g -fsanitize=address,undefined -UNDEBUG
 BUILD_DIR = build
 SRC = src/codec.c src/reliability.c src/session.c src/session_tx.c src/session_rx.c src/rx.c src/io.c src/crypto.c
-PROFILES_SRC = src/stream.c src/scalar.c src/motion.c
-BINS = $(BUILD_DIR)/test_rudp $(BUILD_DIR)/test_tfv $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max $(BUILD_DIR)/test_phase4 $(BUILD_DIR)/test_phase5
+PROFILES_SRC = src/stream.c src/scalar.c src/motion.c src/nextgen.c
+BINS = $(BUILD_DIR)/test_rudp $(BUILD_DIR)/test_tfv $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max $(BUILD_DIR)/test_phase4 $(BUILD_DIR)/test_phase5 $(BUILD_DIR)/test_phase6 $(BUILD_DIR)/test_phase7
 
 .PHONY: all clean test test_rudp test_tfv test_window asan demo bench bench-report test-tools
 
@@ -84,6 +84,21 @@ $(BUILD_DIR)/test_phase4: $(PROFILES_SRC) tests/test_phase4.c include/protocol_p
 $(BUILD_DIR)/test_phase5: $(PROFILES_SRC) tests/test_phase5.c include/protocol_profiles.h $(SRC) $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase5.c -o $@
 
+$(BUILD_DIR)/test_phase6: $(PROFILES_SRC) tests/test_phase6.c tests/fuzz_rudp.c include/protocol_profiles.h $(SRC) $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase6.c tests/fuzz_rudp.c -o $@
+
+$(BUILD_DIR)/test_phase7: $(PROFILES_SRC) tests/test_phase7.c include/protocol_profiles.h $(SRC) $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase7.c -o $@
+
+.PHONY: bindings test-bindings
+$(BUILD_DIR)/libzcrudp.so: $(SRC) $(PROFILES_SRC) $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -fPIC -shared $(SRC) $(PROFILES_SRC) -o $@
+
+bindings: $(BUILD_DIR)/libzcrudp.so
+
+test-bindings: $(BUILD_DIR)/libzcrudp.so
+	ZCRUDP_LIB=./$(BUILD_DIR)/libzcrudp.so $(COMPARE_PYTHON) bindings/python/zcrudp.py
+
 $(BUILD_DIR)/test_tfv: tests/test_tfv.c $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) tests/test_tfv.c -o $@
 
@@ -103,7 +118,9 @@ test_window: $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max
 	./$(BUILD_DIR)/test_window_min
 	./$(BUILD_DIR)/test_window_max
 
-test: all
+test: all test-bindings
+	./$(BUILD_DIR)/test_phase7
+	./$(BUILD_DIR)/test_phase6
 	./$(BUILD_DIR)/test_phase5
 	./$(BUILD_DIR)/test_phase4
 	./$(BUILD_DIR)/test_rudp
@@ -112,6 +129,10 @@ test: all
 	./$(BUILD_DIR)/test_window_max
 
 asan: | $(BUILD_DIR)
+	$(CC) $(ASAN_CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase7.c -o $(BUILD_DIR)/test_phase7_asan
+	./$(BUILD_DIR)/test_phase7_asan
+	$(CC) $(ASAN_CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase6.c tests/fuzz_rudp.c -o $(BUILD_DIR)/test_phase6_asan
+	./$(BUILD_DIR)/test_phase6_asan
 	$(CC) $(ASAN_CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase5.c -o $(BUILD_DIR)/test_phase5_asan
 	./$(BUILD_DIR)/test_phase5_asan
 	$(CC) $(ASAN_CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase4.c -o $(BUILD_DIR)/test_phase4_asan

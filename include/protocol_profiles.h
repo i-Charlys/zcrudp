@@ -5,5 +5,6 @@
 #include "rudp_stream.h"
 #include "rudp_scalar.h"
 #include "rudp_motion.h"
+#include "rudp_nextgen.h"
 
 #endif /* PROTOCOL_PROFILES_H */

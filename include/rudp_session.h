@@ -117,9 +117,11 @@ typedef struct {
   uint8_t prev_tx_count[RUDP_MAX_RECORDS_PER_DATAGRAM];
   uint8_t prev_retries[RUDP_MAX_RECORDS_PER_DATAGRAM];
   uint8_t prev_fast_retransmit[RUDP_MAX_RECORDS_PER_DATAGRAM];
+  uint8_t prev_slot_state[RUDP_MAX_RECORDS_PER_DATAGRAM];
   uint32_t prev_timestamp[RUDP_MAX_RECORDS_PER_DATAGRAM];
   uint8_t prev_chan_backoff[RUDP_MAX_CHANNELS];
   uint16_t prev_last_ack_sent[RUDP_MAX_CHANNELS];
+  uint16_t prev_tail[RUDP_MAX_CHANNELS];
   uint8_t prev_ack_pending[RUDP_MAX_CHANNELS];
   uint8_t prev_state[RUDP_MAX_CHANNELS];
   uint8_t prev_rr_cursor;
@@ -198,6 +200,23 @@ RUDP_EXPORT int rudp_session_set_mtu(rudp_session_s *session, size_t mtu_bytes);
 RUDP_EXPORT int rudp_session_send_unreliable(rudp_session_s *session, uint8_t channel_id,
                                              tfv_packet_u payload, uint8_t ack_channel,
                                              uint8_t *out_buf, size_t max_len);
+
+/**
+ * @brief Stages an unreliable payload into the channel ring for intra-tick
+ *        aggregation alongside reliable/ACK records by build_datagram().
+ *        Freed immediately on emission with zero retransmission or ACK wait.
+ */
+RUDP_EXPORT int rudp_session_queue_unreliable(rudp_session_s *session,
+                                              uint8_t channel_id,
+                                              tfv_packet_u payload);
+
+/**
+ * @brief Returns true if any connected channel has an immediate transmission due
+ *        (pending ACK, ready FEC parity, staged data, fast repair, or expired timer).
+ */
+RUDP_EXPORT bool rudp_session_has_pending_work(const rudp_session_s *session,
+                                               uint32_t now,
+                                               uint32_t fallback_timeout_ms);
 
 /**
  * @brief Processes an incoming datagram across session channels.

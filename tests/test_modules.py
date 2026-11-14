@@ -58,6 +58,11 @@ CASES = {
       assert(samples[0].value == 100 && samples[1].value == 200);'''),
     'motion': ('rudp_motion.h', '''rudp_motion_tx_s tx = {.scalar = {.next_seq = 0}}; uint8_t bytes[16];
       assert(rudp_motion_encode(&tx, 100, 1, 1, bytes, 16) == 1);'''),
+    'nextgen': ('rudp_nextgen.h', '''static uint8_t mem[4 * RUDP_PAGE_SIZE];
+      rudp_page_pool_s pool; rudp_page_extent_s ext;
+      assert(rudp_page_pool_init(&pool, mem, 4) == RUDP_OK);
+      assert(rudp_page_alloc(&pool, 64, &ext) == RUDP_OK);
+      assert(rudp_page_resolve(&pool, ext) != NULL);'''),
 }
 
 
@@ -90,7 +95,8 @@ with tempfile.TemporaryDirectory(prefix='zcrudp-modules-') as temporary:
     minimal = tmp / 'minimal'
     configure(minimal / 'build', '-DZCRUDP_BUILD_RELIABILITY=OFF',
               '-DZCRUDP_BUILD_SESSION=OFF', '-DZCRUDP_BUILD_IO=OFF',
-              '-DZCRUDP_BUILD_STREAM=OFF', '-DZCRUDP_BUILD_MOTION=OFF')
+              '-DZCRUDP_BUILD_STREAM=OFF', '-DZCRUDP_BUILD_MOTION=OFF',
+              '-DZCRUDP_BUILD_NEXTGEN=OFF')
     run(CMAKE, '--install', minimal / 'build', '--prefix', minimal / 'prefix')
     consumers(minimal, minimal / 'prefix', ['codec', 'scalar'])
     installed = {p.name for p in (minimal / 'prefix').rglob('libzcrudp*')}

@@ -97,7 +97,27 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
     return (ack_num == ctx->current_seq_num) ? RUDP_OK : RUDP_ERR_OUT_OF_WINDOW;
   }
 
-  uint16_t tail_seq = ctx->tx_buffer[ctx->tail].frame.header.seq_num;
+  /* Skip leading RUDP_SLOT_FREE holes left by inline unreliable bundling. */
+  uint16_t scan_tail = ctx->tail;
+  while (scan_tail != ctx->head && ctx->tx_buffer[scan_tail].state == RUDP_SLOT_FREE) {
+    scan_tail = (uint16_t)((scan_tail + 1U) & (RUDP_WINDOW_SIZE - 1U));
+  }
+
+  uint16_t first_rel = scan_tail;
+  while (first_rel != ctx->head &&
+         (ctx->tx_buffer[first_rel].state == RUDP_SLOT_FREE ||
+          ctx->tx_buffer[first_rel].state == RUDP_SLOT_UNRELIABLE)) {
+    first_rel = (uint16_t)((first_rel + 1U) & (RUDP_WINDOW_SIZE - 1U));
+  }
+  if (first_rel == ctx->head) {
+    if (ack_num == ctx->current_seq_num) {
+      ctx->tail = scan_tail;
+      return RUDP_OK;
+    }
+    return RUDP_ERR_OUT_OF_WINDOW;
+  }
+
+  uint16_t tail_seq = ctx->tx_buffer[first_rel].frame.header.seq_num;
   if ((int16_t)(ack_num - tail_seq) < 0) {
     /* ACK is for a sequence number older than the oldest in-flight packet */
     return RUDP_ERR_OUT_OF_WINDOW;
@@ -107,33 +127,53 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
    * Reject ACKs targeting slots that were queued but never sent on the wire
    * (tx_count == 0). */
   if ((int16_t)(ack_num - tail_seq) > 0) {
-    uint16_t check = ctx->tail;
-    while (check != ctx->head &&
-           (int16_t)(ack_num - ctx->tx_buffer[check].frame.header.seq_num) > 0) {
-      if (ctx->tx_buffer[check].state == RUDP_SLOT_FREE ||
-          ctx->tx_buffer[check].tx_count == 0) {
+    uint16_t check = first_rel;
+    while (check != ctx->head) {
+      const rudp_slot_s *s = &ctx->tx_buffer[check];
+      if (s->state == RUDP_SLOT_FREE || s->state == RUDP_SLOT_UNRELIABLE) {
+        check = (uint16_t)((check + 1U) & (RUDP_WINDOW_SIZE - 1U));
+        continue;
+      }
+      if ((int16_t)(ack_num - s->frame.header.seq_num) <= 0) {
+        break;
+      }
+      if (s->tx_count == 0) {
         return RUDP_ERR_OUT_OF_WINDOW;
       }
       check = (uint16_t)((check + 1U) & (RUDP_WINDOW_SIZE - 1U));
     }
   }
 
-  uint16_t old_tail = ctx->tail;
+  bool window_moved = false;
+  ctx->tail = scan_tail;
 
   /**
    * Iterate through the sliding window and free slots acknowledged by ack_num.
    * Modular signed arithmetic (int16_t) handles sequence number wraparound (65535 ->
    * 0).
    */
-  while (ctx->tail != ctx->head &&
-         (int16_t)(ack_num - ctx->tx_buffer[ctx->tail].frame.header.seq_num) > 0) {
-    ctx->tx_buffer[ctx->tail].state = RUDP_SLOT_FREE;
-    ctx->tx_buffer[ctx->tail].fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
-    ctx->tail = (ctx->tail + 1) & (RUDP_WINDOW_SIZE - 1);
+  uint16_t curr = first_rel;
+  while (curr != ctx->head) {
+    rudp_slot_s *s = &ctx->tx_buffer[curr];
+    if (s->state == RUDP_SLOT_FREE || s->state == RUDP_SLOT_UNRELIABLE) {
+      curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+      continue;
+    }
+    if ((int16_t)(ack_num - s->frame.header.seq_num) <= 0) {
+      break;
+    }
+    s->state = RUDP_SLOT_FREE;
+    s->fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
+    window_moved = true;
+    curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+  }
+
+  while (ctx->tail != ctx->head && ctx->tx_buffer[ctx->tail].state == RUDP_SLOT_FREE) {
+    ctx->tail = (uint16_t)((ctx->tail + 1U) & (RUDP_WINDOW_SIZE - 1U));
   }
 
   /* Fast Retransmit & NewReno Partial ACK State Machine (RFC 5681 / RFC 6582) */
-  if (ctx->tail != old_tail) {
+  if (window_moved) {
     /* Window moved: this is a new ACK acknowledging fresh packets */
     ctx->last_ack_received = ack_num;
     ctx->duplicate_ack_count = 0;
@@ -141,7 +181,10 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
     /* Partial ACK during loss recovery immediately triggers repair of the next
      * un-SACKed lost packet that was already in flight when recovery began. */
     uint16_t scan = ctx->tail;
-    while (scan != ctx->head && ctx->tx_buffer[scan].state == RUDP_SLOT_SACKED) {
+    while (scan != ctx->head &&
+           (ctx->tx_buffer[scan].state == RUDP_SLOT_FREE ||
+            ctx->tx_buffer[scan].state == RUDP_SLOT_UNRELIABLE ||
+            ctx->tx_buffer[scan].state == RUDP_SLOT_SACKED)) {
       scan = (uint16_t)((scan + 1U) & (RUDP_WINDOW_SIZE - 1U));
     }
     if (scan != ctx->head) {
@@ -152,8 +195,8 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
       }
     }
   } else if (count_duplicate_ack &&
-             ctx->tx_buffer[ctx->tail].state == RUDP_SLOT_IN_FLIGHT &&
-             ctx->tx_buffer[ctx->tail].tx_count > 0) {
+             ctx->tx_buffer[first_rel].state == RUDP_SLOT_IN_FLIGHT &&
+             ctx->tx_buffer[first_rel].tx_count > 0) {
     /* Only deliberate ACKs for an actually transmitted slot count toward Tri-ACK. */
     if (ack_num == ctx->last_ack_received) {
       if (ctx->duplicate_ack_count < 255) {
@@ -162,16 +205,16 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
 
       /* Fast Retransmit Trigger: Exactly 3 duplicate ACKs signify packet loss */
       if (ctx->duplicate_ack_count == 3) {
-        rudp_slot_set_fast_state(&ctx->tx_buffer[ctx->tail],
+        rudp_slot_set_fast_state(&ctx->tx_buffer[first_rel],
                                  RUDP_FAST_RETRANSMIT_PENDING);
-        uint16_t curr = (uint16_t)((ctx->tail + 1U) & (RUDP_WINDOW_SIZE - 1U));
-        while (curr != ctx->head) {
-          rudp_slot_s *s = &ctx->tx_buffer[curr];
+        uint16_t scan = (uint16_t)((first_rel + 1U) & (RUDP_WINDOW_SIZE - 1U));
+        while (scan != ctx->head) {
+          rudp_slot_s *s = &ctx->tx_buffer[scan];
           if (s->state == RUDP_SLOT_IN_FLIGHT && s->tx_count > 0 &&
               rudp_slot_fast_state(s) == RUDP_FAST_RETRANSMIT_OFF) {
             rudp_slot_set_fast_state(s, RUDP_FAST_RETRANSMIT_IN_RECOVERY);
           }
-          curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+          scan = (uint16_t)((scan + 1U) & (RUDP_WINDOW_SIZE - 1U));
         }
       }
     } else {

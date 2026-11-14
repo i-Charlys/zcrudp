@@ -15,6 +15,7 @@ background thread, heap allocation, or mandatory batching delay.
 | `zcrudp::stream` | `rudp_stream.h` | `stream.c` | session |
 | `zcrudp::scalar` | `rudp_scalar.h` | `scalar.c` | configuration only |
 | `zcrudp::motion` | `rudp_motion.h` | `motion.c` | scalar |
+| `zcrudp::nextgen` | `rudp_nextgen.h` | `nextgen.c` | session, io |
 
 `rudp_config.h` owns common configuration and error codes. `rudp_types.h` owns
 shared protocol types and ABI assertions. `rx_internal.h` is private: the session
@@ -42,12 +43,12 @@ By default all previous functionality is enabled. A codec/scalar-only build:
 ```sh
 cmake -S . -B build/minimal \
   -DZCRUDP_BUILD_RELIABILITY=OFF -DZCRUDP_BUILD_SESSION=OFF \
-  -DZCRUDP_BUILD_IO=OFF -DZCRUDP_BUILD_STREAM=OFF -DZCRUDP_BUILD_MOTION=OFF
+  -DZCRUDP_BUILD_IO=OFF -DZCRUDP_BUILD_CRYPTO=OFF -DZCRUDP_BUILD_STREAM=OFF -DZCRUDP_BUILD_MOTION=OFF -DZCRUDP_BUILD_NEXTGEN=OFF
 cmake --build build/minimal
 ```
 
 `ZCRUDP_BUILD_PROFILES=OFF` disables all profiles. Each profile also has its own
-`ZCRUDP_BUILD_STREAM`, `ZCRUDP_BUILD_SCALAR` or `ZCRUDP_BUILD_MOTION` switch.
+`ZCRUDP_BUILD_STREAM`, `ZCRUDP_BUILD_SCALAR`, `ZCRUDP_BUILD_MOTION` or `ZCRUDP_BUILD_NEXTGEN` switch.
 CMake rejects missing dependencies rather than silently enabling them. Host tools
 are opt-in, require sessions, and currently use the default inline RX storage.
 

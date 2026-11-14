@@ -41,6 +41,8 @@
 #define RUDP_SLOT_IN_FLIGHT 1
 /** Selectively acknowledged ahead of cumulative tail; never retransmitted */
 #define RUDP_SLOT_SACKED 2
+/** Unreliable update staged for intra-tick bundling; freed immediately on build */
+#define RUDP_SLOT_UNRELIABLE 3
 
 /** Low-nibble fast-recovery state in rudp_slot_s::fast_retransmit */
 #define RUDP_FAST_STATE_MASK 0x0FU

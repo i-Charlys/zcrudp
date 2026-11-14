@@ -144,8 +144,8 @@ The public flags do not all select implemented behavior:
 | --- | --- |
 | `RUDP_CHANNEL_FLAG_UNRELIABLE` | Value zero: absence of the reliable capability. It cannot be tested as a bit, and the unreliable send API does not inspect it. |
 | `RUDP_CHANNEL_FLAG_RELIABLE` | Required by `rudp_session_send_reliable()`. |
-| `RUDP_CHANNEL_FLAG_ORDERED` | Metadata only. Reliable session delivery is already always ordered. |
-| `RUDP_CHANNEL_FLAG_ENCRYPTED` | Metadata only. No encryption or authentication is performed. |
+| `RUDP_CHANNEL_FLAG_ORDERED` | When set alongside `RUDP_CHANNEL_FLAG_RELIABLE`, delivers reliable records strictly in sequence order. Omitting it on a `RELIABLE` channel selects zero-HoL reliable unordered delivery. |
+| `RUDP_CHANNEL_FLAG_ENCRYPTED` | Integration hint for `zcrudp::crypto` (`rudp_crypto.h` ChaCha20-Poly1305 AEAD envelope); base session codecs do not encrypt implicitly. |
 
 The `dscp` field set by `rudp_session_set_qos()` is also a hint: the socket
 owner must apply it to outgoing packets. These inert values remain public for
@@ -172,6 +172,9 @@ can observe traffic. Use an authenticated wrapper such as Noise, DTLS or
 WireGuard on untrusted networks. See `SECURITY.md` and the concrete follow-up
 work in `TODO.md`.
 
-Optional stream, scalar and motion profiles live in
-`src/stream.c`, `src/scalar.c` and `src/motion.c`; their storage is caller-owned. See `docs/PHASE4.md` and
-`docs/ADAPTIVE_RECOVERY.md`.
+Optional security, transport-nextgen, stream, scalar and motion modules live in
+`src/crypto.c` (`zcrudp::crypto`), `src/nextgen.c` (`zcrudp::nextgen`),
+`src/stream.c`, `src/scalar.c` and `src/motion.c`; their storage is caller-owned.
+Sessions also support intra-tick unreliable batching via `rudp_session_queue_unreliable()`
+and `rudp_session_has_pending_work()`, plus multi-language bindings in `bindings/`.
+See `docs/PHASE4.md` and `docs/ADAPTIVE_RECOVERY.md`.

@@ -13,11 +13,13 @@ messages on that channel. Separate channels let an unreliable update continue
 while a reliable channel waits for retransmission.
 
 The library provides:
-- **Unreliable updates:** They bypass the reliable TX window and are serialized
-  into a caller-provided UDP buffer. Older sequence numbers are discarded.
+- **Unreliable updates:** `rudp_session_send_unreliable()` emits an immediate datagram,
+  while `rudp_session_queue_unreliable()` bundles multiple unreliable updates and reliable
+  records into a single MTU-bounded datagram (`rudp_session_has_pending_work()` checks pending state).
+  Older sequence numbers are discarded.
 - **Reliable messages:** Each channel has its own TX window and bounded RX buffer.
-  Ordered delivery is attempted until the retry limit is reached; applications
-  must handle disconnection and coordinate resets with their peers.
+  Ordered or zero-HoL reliable unordered delivery is attempted until the retry limit is
+  reached; applications must handle disconnection and coordinate resets with their peers.
 - **Caller-owned storage:** The core does not call `malloc`. A default four-channel
   session occupies 5,364 bytes on the tested ABI (1,340 bytes per channel), including
   storage reserved for channels configured as unreliable.
@@ -28,6 +30,11 @@ The library provides:
   anti-replay and pluggable hardware/OS AEAD vtable), transactional scatter-gather TX
   (`rudp_session_build_iovec` / `rudp_session_prepare_iovec`), and kinematic dead-reckoning
   (`zcrudp::motion`).
+- **Phase 6 & 7 bindings, fuzzing & `zcrudp::nextgen`:** Includes `tests/fuzz_rudp.c`,
+  multi-language bindings under `bindings/` (C++, Python, Rust, Go, Node.js via `make bindings`),
+  and `zcrudp::nextgen` (`include/rudp_nextgen.h`) providing a registered page pool with 12-byte
+  generation-checked extents, 256-slot shared static metadata pool with per-channel quotas,
+  SCReAM/L4S OWD micro-pacing, RFC 8681 sliding-window convolutional FEC, and multipath scheduling.
 
 [Transport benchmarks](#transport-benchmarks-vs-enet-enet-zpl-and-kcp) ·
 [Codec benchmarks](#codec-benchmarks) ·
@@ -72,16 +79,17 @@ they can be delivered in order. Unreliable records bypass both windows.
 - **No heap calls, background threads or socket API in the core.** Integrate
   only the modules you need; call the protocol from your own loop.
   See [module targets, source lists and ownership](docs/MODULES.md).
-- **Optional profiles & crypto:** bounded multipart messages, compact4/rolling8 scalar
-  telemetry, kinematic dead-reckoning and RFC 8439 ChaCha20-Poly1305 AEAD envelope.
-  Link `zcrudp::crypto`, `zcrudp::stream`, `zcrudp::scalar` or `zcrudp::motion` when needed.
+- **Optional profiles, crypto & nextgen:** bounded multipart messages, compact4/rolling8 scalar
+  telemetry, kinematic dead-reckoning, RFC 8439 ChaCha20-Poly1305 AEAD envelope, and the
+  copy-avoiding/multipath next-gen extension (`rudp_nextgen.h`).
+  Link `zcrudp::crypto`, `zcrudp::stream`, `zcrudp::scalar`, `zcrudp::motion` or `zcrudp::nextgen` when needed.
   Session priorities and recovery state remain in the core and its fixed session size.
   [Wire formats and tradeoffs](docs/PHASE4.md).
 
 ## Modular integration
 
 Use `zcrudp::codec`, `zcrudp::reliability`, `zcrudp::session`, `zcrudp::io`,
-`zcrudp::crypto`, `zcrudp::stream`, `zcrudp::scalar` and `zcrudp::motion` independently.
+`zcrudp::crypto`, `zcrudp::stream`, `zcrudp::scalar`, `zcrudp::motion` and `zcrudp::nextgen` independently.
 `zcrudp::core` and `zcrudp::profiles` remain facade targets; the original public
 headers remain available. The default memory layout and wire format are preserved.
 
@@ -192,11 +200,13 @@ game engine. Packaging follows CMake's
 | `src/session*.c`, `src/rx.c` | Session setup, scheduling, routing and ordered RX |
 | `src/io.c` | Portable scatter/gather helpers |
 | `src/crypto.c` | Optional RFC 8439 ChaCha20-Poly1305 AEAD envelope & anti-replay |
+| `src/nextgen.c` | Optional Phase 7 page pool, 256-slot metadata pool, SCReAM pacer, conv FEC, multipath |
 | `src/stream.c`, `src/scalar.c`, `src/motion.c` | Optional profiles (streaming, scalar, kinematic dead-reckoning) |
+| `bindings/` | Multi-language bindings (`cpp`, `python`, `rust`, `go`, `node`) built via `make bindings` |
 | `examples/demo_loss.c` | Interactive POSIX UDP peers with simulated loss/delay |
 | `bench/` | Benchmark and trace tools |
 | `docs/bench/` | Recorded benchmark data and methodology |
-| `tests/` | Protocol, integration and module checks |
+| `tests/` | Protocol (`test_phase4`..`test_phase7`), `fuzz_rudp.c`, integration and module checks |
 
 ## Quick Start / Usage
 
@@ -255,11 +265,15 @@ both Zig and GCC.
 make asan
 ```
 
-### Build individual tests
+### Build individual tests and multi-language bindings
 ```bash
 make test_rudp
 make test_tfv
 make test_window
+make test_phase6    # Unreliable bundling, io.c, retry disconnect, stream/WAN BDP, deterministic fuzz
+make test_phase7    # zcrudp::nextgen page pool, slot pool, SCReAM, conv FEC, multipath
+make bindings       # Build libzcrudp.so for Python/Rust/Go/Node/C++ bindings
+make test-bindings  # Verify C++11/17/20, Python ctypes, and shared library symbols
 ```
 
 ### Manual compilation (alternative)
