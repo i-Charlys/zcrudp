@@ -20,7 +20,7 @@
 /* POSIX host example; protocol state and simulated network queue are bounded.
  * Both peers have explicit addresses: no discovery or authentication is implied. */
 #define QUEUE_SIZE 512
-#define MAX_DGRAM_LEN 64
+#define MAX_DGRAM_LEN 128
 typedef struct {
   uint8_t bytes[MAX_DGRAM_LEN];
   size_t len;
@@ -31,6 +31,8 @@ typedef struct {
 static delayed_s queue[QUEUE_SIZE];
 static uint64_t enqueue_seq = 0;
 static rudp_session_s session;
+static rudp_crypto_ctx_s crypto_ctx;
+static unsigned crypto_enabled = 0;
 static uint32_t rng;
 static unsigned loss, latency, jitter;
 static unsigned dropped, sent, received, delivered, retried, overflow;
@@ -61,6 +63,17 @@ static int number(const char *s, unsigned max, unsigned *out) {
 /* Injection applies once to every outgoing datagram, including ACKs/retries.
  * Jitter is additive [0,jitter] ms and can cause reordering. */
 static void enqueue(const uint8_t *bytes, size_t len) {
+  uint8_t sealed[MAX_DGRAM_LEN];
+  if (crypto_enabled) {
+    int slen = rudp_crypto_seal(&crypto_ctx, NULL, 0, bytes, len, sealed, sizeof sealed);
+    if (slen < 0) {
+      overflow++;
+      fprintf(stderr, "DROP crypto seal failed (%d)\n", slen);
+      return;
+    }
+    bytes = sealed;
+    len = (size_t)slen;
+  }
   if (len > sizeof(queue[0].bytes)) {
     overflow++;
     fprintf(stderr, "DROP datagram exceeds queue slot capacity (%zu > %zu)\n", len, sizeof(queue[0].bytes));
@@ -208,6 +221,7 @@ static void usage(const char *name) {
          "  --dscp 0..63 (optional IPv4 socket traffic class; network may ignore it)\n"
          "  --timeout MS (default 500, measured from enqueue)\n"
          "  --adaptive 0|1 (default 0; session RTT recovery, initial --timeout, bounds 10..60000 ms)\n"
+         "  --crypto 0|1 (default 0; RFC 8439 ChaCha20-Poly1305 AEAD + 64-pkt anti-replay)\n"
          "  --count N (send N reliable AND N unreliable values automatically)\n"
          "  --interval MS (default 100) --duration MS (0 = until q/Ctrl-C)\n"
          "Each peer injects loss/delay on its own outgoing traffic.\n", name);
@@ -236,6 +250,7 @@ int main(int argc, char **argv) {
       else if (!strcmp(key, "--loss")) { target = &loss; max = 100; }
       else if (!strcmp(key, "--dscp")) { target = &dscp; max = 63; }
       else if (!strcmp(key, "--adaptive")) { target = &adaptive; max = 1; }
+      else if (!strcmp(key, "--crypto")) { target = &crypto_enabled; max = 1; }
       else if (!strcmp(key, "--latency")) target = &latency;
       else if (!strcmp(key, "--jitter")) target = &jitter;
       else if (!strcmp(key, "--timeout")) target = &timeout;
@@ -268,6 +283,15 @@ int main(int argc, char **argv) {
   rudp_session_config_channel(&session, 1, RUDP_CHANNEL_FLAG_UNRELIABLE);
   if (adaptive && rudp_session_config_recovery(&session, 0, timeout, 10, 60000) != RUDP_OK) {
     fprintf(stderr, "Adaptive initial timeout must be 10..60000 ms\n"); close(fd); return 2;
+  }
+  if (crypto_enabled) {
+    /* Demo-only fixed PSK so local server/client processes interoperate out of the box. */
+    static const uint8_t demo_psk[RUDP_CRYPTO_KEY_BYTES] = {
+        0x7a, 0x63, 0x72, 0x75, 0x64, 0x70, 0x2d, 0x64, 0x65, 0x6d, 0x6f,
+        0x2d, 0x6b, 0x65, 0x79, 0x2d, 0x32, 0x35, 0x36, 0x62, 0x69, 0x74,
+        0x2d, 0x72, 0x66, 0x63, 0x38, 0x34, 0x33, 0x39, 0x21, 0x05};
+    rudp_crypto_init(&crypto_ctx, demo_psk, UINT64_C(0x5A43525544503035),
+                     (uint8_t)(!server));
   }
   signal(SIGINT, stop); signal(SIGTERM, stop);
   setvbuf(stdout, NULL, _IOLBF, 0);
@@ -330,8 +354,20 @@ int main(int argc, char **argv) {
       ssize_t n = recvfrom(fd, bytes, sizeof bytes, 0, (struct sockaddr *)&from, &from_len);
       if (n < 0) { if (errno == EINTR) continue; perror("recvfrom"); status = 1; break; }
       if (from.sin_addr.s_addr != peer.sin_addr.s_addr || from.sin_port != peer.sin_port) continue;
+      uint8_t plain[2048];
+      const uint8_t *rx_ptr = bytes;
+      size_t rx_len = (size_t)n;
+      if (crypto_enabled) {
+        int plen = rudp_crypto_open(&crypto_ctx, NULL, 0, bytes, (size_t)n, plain, sizeof plain);
+        if (plen < 0) {
+          fprintf(stderr, "Rejected unauthenticated/replayed datagram: %d\n", plen);
+          continue;
+        }
+        rx_ptr = plain;
+        rx_len = (size_t)plen;
+      }
       rudp_record_s records[255];
-      int got = rudp_session_process_datagram_at(&session, bytes, (size_t)n, records, 255, (uint32_t)now_ms());
+      int got = rudp_session_process_datagram_at(&session, rx_ptr, rx_len, records, 255, (uint32_t)now_ms());
       received++;
       if (got < 0) fprintf(stderr, "Rejected datagram: %d\n", got);
       else {
@@ -345,7 +381,7 @@ int main(int argc, char **argv) {
         } while (got > 0);
         if (got < 0) fprintf(stderr, "Poll error: %d\n", got);
       }
-      if (session.channels[0].ack_pending) {
+      if (!adaptive && session.channels[0].ack_pending) {
         rudp_datagram_header_s ack = {.ack = session.channels[0].ctx.expected_seq_num, .ack_channel = 0, .count = 0};
         rudp_pack_datagram_header(&ack, bytes, sizeof bytes);
         enqueue(bytes, 4);
@@ -371,6 +407,7 @@ int main(int argc, char **argv) {
   unsigned queued = 0;
   for (unsigned i = 0; i < QUEUE_SIZE; i++) queued += queue[i].used != 0;
   printf("EXIT gen_rel=%u gen_unrel=%u queued_on_exit=%u\n", gen_rel, gen_unrel, queued);
+  if (crypto_enabled) rudp_crypto_wipe(&crypto_ctx);
   close(fd);
   return status;
 }

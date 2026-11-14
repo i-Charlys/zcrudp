@@ -33,19 +33,29 @@ extern "C" {
 #endif
 
 // Check compiler built-in bit swap for ENDIANNESS change
-#if defined(__GNUC__) || defined(__clang__)
-#define rudp_bswap16(x) __builtin_bswap16(x)
-#define rudp_bswap32(x) __builtin_bswap32(x)
-#elif defined(_MSC_VER)
+#if defined(_MSC_VER)
 #include <stdlib.h>
-#define rudp_bswap16(x) _byteswap_ushort(x)
-#define rudp_bswap32(x) _byteswap_ulong(x)
-#else
-#define rudp_bswap16(x) ((uint16_t)(((x) >> 8) | ((x) << 8)))
-#define rudp_bswap32(x)                                                                \
-  ((uint32_t)(((x) >> 24) | (((x) & 0x00FF0000) >> 8) | (((x) & 0x0000FF00) << 8) |    \
-              ((x) << 24)))
 #endif
+
+static inline uint16_t rudp_bswap16(uint16_t x) {
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_bswap16(x);
+#elif defined(_MSC_VER)
+  return _byteswap_ushort(x);
+#else
+  return (uint16_t)((x >> 8) | (x << 8));
+#endif
+}
+
+static inline uint32_t rudp_bswap32(uint32_t x) {
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_bswap32(x);
+#elif defined(_MSC_VER)
+  return _byteswap_ulong(x);
+#else
+  return ((x >> 24) | ((x & 0x00FF0000U) >> 8) | ((x & 0x0000FF00U) << 8) | (x << 24));
+#endif
+}
 
 /* Zero-dependency Network Byte Order conversions (Big-Endian wire format) */
 #if RUDP_IS_LITTLE_ENDIAN

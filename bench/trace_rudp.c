@@ -27,13 +27,15 @@ static void emit(int from, const uint8_t *bytes, int length, unsigned now) {
   if (length == 12) {
     assert(rudp_unpack_record(bytes + 4, 8, &record) == 0);
     seq = record.seq_num;
-    kind = record.flags == RUDP_RECORD_FLAG_RELIABLE ? "reliable" : "unreliable";
+    kind = (record.flags & RUDP_RECORD_FLAG_ACK)
+               ? "ack"
+               : (record.flags == RUDP_RECORD_FLAG_RELIABLE ? "reliable" : "unreliable");
     if (record.flags == RUDP_RECORD_FLAG_RELIABLE) {
       retry = peers[from].channels[0].ctx.tx_buffer[seq & (RUDP_WINDOW_SIZE - 1)].retries;
       if (retry) retries++;
       if (seq == 2 && !retry) lost = 1;
       if (seq == 3 && !retry) delay = 70;
-    } else {
+    } else if (record.flags == RUDP_RECORD_FLAG_UNRELIABLE) {
       if (seq == 4) delay = 80;
       if (seq == 9) lost = 1;
     }

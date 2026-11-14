@@ -203,16 +203,18 @@ static void recovery(void) {
   assert(rudp_session_build_datagram(&session, 0, bytes, sizeof bytes, 1200, 100) == 12);
   for (unsigned i = 0; i < 3; ++i) assert(timed_ack(&session, 2, 1210 + i) == 0);
   assert(rudp_session_build_datagram(&session, 0, bytes, sizeof bytes, 1212, 100) == 12);
-  assert(chan->ctx.tx_buffer[2].retries == 1 && chan->timeout_backoffs[2] == 0);
+  assert(chan->ctx.tx_buffer[2].retries == 1 &&
+         rudp_slot_backoff(&chan->ctx.tx_buffer[2]) == 0);
   assert(rudp_session_build_datagram(&session, 0, bytes, sizeof bytes, 1262, 100) == 4);
   assert(rudp_session_build_datagram(&session, 0, bytes, sizeof bytes, 1263, 100) == 12);
-  assert(chan->timeout_backoffs[2] == 1);
+  assert(rudp_slot_backoff(&chan->ctx.tx_buffer[2]) == 1);
   assert(rudp_session_build_datagram(&session, 0, bytes, sizeof bytes, 1363, 100) == 4);
   assert(rudp_session_build_datagram(&session, 0, bytes, sizeof bytes, 1364, 100) == 12);
-  assert(chan->timeout_backoffs[2] == 2);
+  assert(rudp_slot_backoff(&chan->ctx.tx_buffer[2]) == 2);
   assert(timed_ack(&session, 3, 1380) == 0 && chan->rto_ms == 50); /* Karn. */
   assert(rudp_session_reset_channel(&session, 0) == 0);
-  assert(!chan->srtt_scaled && chan->rto_ms == 100 && !chan->timeout_backoffs[2]);
+  assert(!chan->srtt_scaled && chan->rto_ms == 100 &&
+         !rudp_slot_backoff(&chan->ctx.tx_buffer[2]));
 
   /* Unsigned clock wrap, one sample per RTT, and minimum clamp. */
   assert(rudp_session_config_recovery(&session, 0, 100, 10, 2000) == 0);
@@ -292,7 +294,7 @@ static void channel_backoff_inheritance_and_cap(void) {
 
   /* Newly queued packet 1 inherits chan_backoff to break Karn's deadlock. */
   assert(rudp_session_send_reliable(&s, 0, (tfv_packet_u){.type = 1, .value = 2}, 1510) == RUDP_OK);
-  assert(s.channels[0].timeout_backoffs[1] == 4U);
+  assert(rudp_slot_backoff(&s.channels[0].ctx.tx_buffer[1]) == 4U);
   assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), 1510, 100) == 12);
   /* ACK=1 frees only retransmitted pkt 0 (Karn skips sample; chan_backoff remains 4). */
   uint8_t ack[4];
@@ -321,7 +323,7 @@ static void channel_backoff_inheritance_and_cap(void) {
     /* At t + wait + 1 (including >64x at step 7 => 1280ms and capped at step 8 => 2000ms): retransmit fires. */
     assert(rudp_session_build_datagram(&s, 0, out, sizeof(out), t, 10) == 12);
   }
-  assert(s.channels[0].timeout_backoffs[0] == 9U);
+  assert(rudp_slot_backoff(&s.channels[0].ctx.tx_buffer[0]) == 9U);
   assert(s.channels[0].chan_backoff == 9U);
   puts("PASS: channel backoff inheritance, Karn reset, and >64x backoff capped at rto_max_ms");
 }

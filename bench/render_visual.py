@@ -11,7 +11,8 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_SOURCES = ["src/codec.c", "src/reliability.c", "src/session.c",
-                "src/session_tx.c", "src/session_rx.c", "src/rx.c", "src/io.c"]
+                "src/session_tx.c", "src/session_rx.c", "src/rx.c", "src/io.c",
+                "src/crypto.c"]
 
 
 def generate(output, capture):

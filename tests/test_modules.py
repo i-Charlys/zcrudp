@@ -38,6 +38,13 @@ CASES = {
       uint8_t bytes[3], src[3] = {1,2,3};
       assert(rudp_iovec_add(&c, src, 3) == RUDP_OK);
       assert(rudp_iovec_flatten(&c, bytes, 3) == 3); assert(bytes[2] == 3);'''),
+    'crypto': ('rudp_crypto.h', '''rudp_crypto_ctx_s tx, rx;
+      uint8_t key[32] = {1}, wire[64], plain[32], msg[4] = {9, 8, 7, 6};
+      assert(rudp_crypto_init(&tx, key, 42, 1) == RUDP_OK);
+      assert(rudp_crypto_init(&rx, key, 42, 0) == RUDP_OK);
+      assert(rudp_crypto_seal(&tx, NULL, 0, msg, 4, wire, sizeof(wire)) == 28);
+      assert(rudp_crypto_open(&rx, NULL, 0, wire, 28, plain, sizeof(plain)) == 4);
+      assert(plain[0] == 9 && plain[3] == 6);'''),
     'stream': ('rudp_stream.h', '''rudp_stream_tx_s tx = {.data = NULL};
       rudp_session_s session; uint8_t bytes[9] = {0};
       assert(rudp_session_init(&session) == RUDP_OK);

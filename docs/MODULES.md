@@ -11,6 +11,7 @@ background thread, heap allocation, or mandatory batching delay.
 | `zcrudp::reliability` | `rudp_reliability.h` | `reliability.c` | configuration only |
 | `zcrudp::session` | `rudp_session.h` | `session.c`, `session_tx.c`, `session_rx.c`, `rx.c` | reliability, codec |
 | `zcrudp::io` | `rudp_io.h` | `io.c` | configuration only |
+| `zcrudp::crypto` | `rudp_crypto.h` | `crypto.c` | configuration only |
 | `zcrudp::stream` | `rudp_stream.h` | `stream.c` | session |
 | `zcrudp::scalar` | `rudp_scalar.h` | `scalar.c` | configuration only |
 | `zcrudp::motion` | `rudp_motion.h` | `motion.c` | scalar |
@@ -58,8 +59,8 @@ full default facade. Existing manual commands compiling only `src/rudp.c` or
 
 ## Optional caller-owned reliable RX storage
 
-The default layout and behavior remain unchanged: 5,620 bytes per four-channel
-session on the checked ABI, with embedded RX arrays. For channels that do not
+The default layout and behavior remain unchanged: 5,364 bytes per four-channel
+session on the checked ABI (1,340 bytes per channel), with embedded RX arrays. For channels that do not
 need reliable reception, select the alternative ABI:
 
 ```sh
@@ -92,9 +93,9 @@ execution contexts. Attach/detach requires empty TX and retained RX windows;
 To abandon data and release storage, reset first, then detach. Calling init again
 starts a new lifetime with no attachments.
 
-At the checked 64-bit ABI, the external-storage session is 4,648 bytes, plus
-264 bytes per attached RX object. One receiving channel costs 4,912 bytes in
-aggregate versus 5,620 by default. With all four RX objects it costs 5,704 bytes:
+At the checked 64-bit ABI, the external-storage session is 4,392 bytes, plus
+264 bytes per attached RX object. One receiving channel costs 4,656 bytes in
+aggregate versus 5,364 by default. With all four RX objects it costs 5,448 bytes:
 external storage is useful for sparse reliable reception, not universally smaller.
 Actual sizes depend on ABI and settings. TX slots and adaptive recovery metadata
 remain embedded; independently sized caller-owned TX pools remain roadmap work.

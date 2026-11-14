@@ -110,7 +110,7 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
     uint16_t check = ctx->tail;
     while (check != ctx->head &&
            (int16_t)(ack_num - ctx->tx_buffer[check].frame.header.seq_num) > 0) {
-      if (ctx->tx_buffer[check].state != RUDP_SLOT_IN_FLIGHT ||
+      if (ctx->tx_buffer[check].state == RUDP_SLOT_FREE ||
           ctx->tx_buffer[check].tx_count == 0) {
         return RUDP_ERR_OUT_OF_WINDOW;
       }
@@ -139,12 +139,16 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
     ctx->duplicate_ack_count = 0;
 
     /* Partial ACK during loss recovery immediately triggers repair of the next
-     * lost packet that was already in flight when recovery began. */
-    if (ctx->tail != ctx->head) {
-      rudp_slot_s *next_hole = &ctx->tx_buffer[ctx->tail];
+     * un-SACKed lost packet that was already in flight when recovery began. */
+    uint16_t scan = ctx->tail;
+    while (scan != ctx->head && ctx->tx_buffer[scan].state == RUDP_SLOT_SACKED) {
+      scan = (uint16_t)((scan + 1U) & (RUDP_WINDOW_SIZE - 1U));
+    }
+    if (scan != ctx->head) {
+      rudp_slot_s *next_hole = &ctx->tx_buffer[scan];
       if (next_hole->state == RUDP_SLOT_IN_FLIGHT && next_hole->tx_count > 0 &&
-          next_hole->fast_retransmit == RUDP_FAST_RETRANSMIT_IN_RECOVERY) {
-        next_hole->fast_retransmit = RUDP_FAST_RETRANSMIT_PENDING;
+          rudp_slot_fast_state(next_hole) == RUDP_FAST_RETRANSMIT_IN_RECOVERY) {
+        rudp_slot_set_fast_state(next_hole, RUDP_FAST_RETRANSMIT_PENDING);
       }
     }
   } else if (count_duplicate_ack &&
@@ -158,13 +162,14 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
 
       /* Fast Retransmit Trigger: Exactly 3 duplicate ACKs signify packet loss */
       if (ctx->duplicate_ack_count == 3) {
-        ctx->tx_buffer[ctx->tail].fast_retransmit = RUDP_FAST_RETRANSMIT_PENDING;
+        rudp_slot_set_fast_state(&ctx->tx_buffer[ctx->tail],
+                                 RUDP_FAST_RETRANSMIT_PENDING);
         uint16_t curr = (uint16_t)((ctx->tail + 1U) & (RUDP_WINDOW_SIZE - 1U));
         while (curr != ctx->head) {
           rudp_slot_s *s = &ctx->tx_buffer[curr];
           if (s->state == RUDP_SLOT_IN_FLIGHT && s->tx_count > 0 &&
-              s->fast_retransmit == RUDP_FAST_RETRANSMIT_OFF) {
-            s->fast_retransmit = RUDP_FAST_RETRANSMIT_IN_RECOVERY;
+              rudp_slot_fast_state(s) == RUDP_FAST_RETRANSMIT_OFF) {
+            rudp_slot_set_fast_state(s, RUDP_FAST_RETRANSMIT_IN_RECOVERY);
           }
           curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
         }
@@ -216,7 +221,7 @@ rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout
     }
 
     // Check if slot has expired or has fast_retransmit flagged
-    bool is_fast = (slot->fast_retransmit == RUDP_FAST_RETRANSMIT_PENDING);
+    bool is_fast = (rudp_slot_fast_state(slot) == RUDP_FAST_RETRANSMIT_PENDING);
     bool timed_out = ((uint32_t)(now - slot->timestamp) > current_timeout);
     if (slot->state == RUDP_SLOT_IN_FLIGHT && (is_fast || timed_out)) {
       if (slot->retries >= RUDP_MAX_RETRIES) {
@@ -226,14 +231,14 @@ rudp_tick_result_s rudp_tick(rudp_context_s *ctx, uint32_t now, uint32_t timeout
         return result;
       }
 
-      slot->fast_retransmit = RUDP_FAST_RETRANSMIT_OFF; // Clear fast retransmit flag
+      rudp_slot_set_fast_state(slot, RUDP_FAST_RETRANSMIT_OFF);
       if (!is_fast) {
         /* Timer expiration exits NewReno fast recovery across the window. */
         uint16_t clear = ctx->tail;
         while (clear != ctx->head) {
-          if (ctx->tx_buffer[clear].fast_retransmit ==
+          if (rudp_slot_fast_state(&ctx->tx_buffer[clear]) ==
               RUDP_FAST_RETRANSMIT_IN_RECOVERY) {
-            ctx->tx_buffer[clear].fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
+            rudp_slot_set_fast_state(&ctx->tx_buffer[clear], RUDP_FAST_RETRANSMIT_OFF);
           }
           clear = (uint16_t)((clear + 1U) & (RUDP_WINDOW_SIZE - 1U));
         }

@@ -3,9 +3,9 @@ CC ?= cc
 CFLAGS = -Iinclude -Wall -Wextra -std=c11 -pedantic -Werror -O2 -UNDEBUG
 ASAN_CFLAGS = -Iinclude -Wall -Wextra -std=c11 -pedantic -Werror -g -fsanitize=address,undefined -UNDEBUG
 BUILD_DIR = build
-SRC = src/codec.c src/reliability.c src/session.c src/session_tx.c src/session_rx.c src/rx.c src/io.c
+SRC = src/codec.c src/reliability.c src/session.c src/session_tx.c src/session_rx.c src/rx.c src/io.c src/crypto.c
 PROFILES_SRC = src/stream.c src/scalar.c src/motion.c
-BINS = $(BUILD_DIR)/test_rudp $(BUILD_DIR)/test_tfv $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max $(BUILD_DIR)/test_phase4
+BINS = $(BUILD_DIR)/test_rudp $(BUILD_DIR)/test_tfv $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max $(BUILD_DIR)/test_phase4 $(BUILD_DIR)/test_phase5
 
 .PHONY: all clean test test_rudp test_tfv test_window asan demo bench bench-report test-tools
 
@@ -81,6 +81,9 @@ $(BUILD_DIR)/test_rudp: $(SRC) tests/test_rudp.c $(HEADERS) | $(BUILD_DIR)
 $(BUILD_DIR)/test_phase4: $(PROFILES_SRC) tests/test_phase4.c include/protocol_profiles.h $(SRC) $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase4.c -o $@
 
+$(BUILD_DIR)/test_phase5: $(PROFILES_SRC) tests/test_phase5.c include/protocol_profiles.h $(SRC) $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase5.c -o $@
+
 $(BUILD_DIR)/test_tfv: tests/test_tfv.c $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) tests/test_tfv.c -o $@
 
@@ -101,6 +104,7 @@ test_window: $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max
 	./$(BUILD_DIR)/test_window_max
 
 test: all
+	./$(BUILD_DIR)/test_phase5
 	./$(BUILD_DIR)/test_phase4
 	./$(BUILD_DIR)/test_rudp
 	./$(BUILD_DIR)/test_tfv
@@ -108,6 +112,8 @@ test: all
 	./$(BUILD_DIR)/test_window_max
 
 asan: | $(BUILD_DIR)
+	$(CC) $(ASAN_CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase5.c -o $(BUILD_DIR)/test_phase5_asan
+	./$(BUILD_DIR)/test_phase5_asan
 	$(CC) $(ASAN_CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase4.c -o $(BUILD_DIR)/test_phase4_asan
 	./$(BUILD_DIR)/test_phase4_asan
 	$(CC) $(ASAN_CFLAGS) $(SRC) tests/test_rudp.c -o $(BUILD_DIR)/test_rudp_asan
@@ -122,9 +128,12 @@ asan: | $(BUILD_DIR)
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: test-modules test-external-rx
+.PHONY: test-modules test-external-rx test-mutations
 test-modules:
 	python3 tests/test_modules.py
+
+test-mutations:
+	python3 tests/test_mutations.py
 
 test-external-rx: | $(BUILD_DIR)
 	$(CC) $(ASAN_CFLAGS) -DRUDP_EXTERNAL_RX_STORAGE=1 $(SRC) tests/test_external_rx.c -o $(BUILD_DIR)/test_external_rx_asan

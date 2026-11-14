@@ -45,7 +45,7 @@ replace an authenticator.
 
 If deployed in untrusted network environments or for security-sensitive game traffic:
 
-1. **Encrypted Transport Layer**: Wrap RUDP traffic in a secure tunnel such as DTLS (Datagram Transport Layer Security) or WireGuard.
+1. **In-Tree AEAD Envelope (`zcrudp::crypto`) or Tunnel**: Wrap datagrams with `rudp_crypto_seal()` / `rudp_crypto_open()` (`include/rudp_crypto.h`, constant-time RFC 8439 ChaCha20-Poly1305 with directional subkeys, 64-packet anti-replay window, zero state mutation on tag failure, and optional hardware/OS `rudp_aead_ops_s` vtable) or encapsulate traffic in DTLS / WireGuard.
 2. **Application-Level Security**: Encrypt and sign sensitive transactions (e.g., authentication tokens, inventory trades) at the application level before handing them to `zcrudp`.
 3. **DoS and Amplification Prevention**: Enforce rate-limiting and connection validation at the firewall or edge load-balancer level to mitigate UDP amplification attacks. Bound responses sent before address validation, and never sacrifice the active session to admit an unknown candidate.
 
