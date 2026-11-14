@@ -108,7 +108,7 @@ extern "C" {
         capacity: usize,
     ) -> c_int;
 
-    pub fn rudp_pack_payload(payload: TfvPacket, out_buf: *mut u8, max_len: usize) -> c_int;
+    pub fn rudp_pack_payload(payload: *const TfvPacket, out_buf: *mut u8, max_len: usize) -> c_int;
     pub fn rudp_unpack_payload(
         in_buf: *const u8,
         len: usize,

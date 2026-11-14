@@ -172,7 +172,7 @@ def load_library(lib_path: Optional[str | Path] = None) -> ctypes.CDLL:
     lib.rudp_session_poll.argtypes = [c_vp, ctypes.POINTER(Record), ctypes.c_size_t]
     lib.rudp_session_poll.restype = ctypes.c_int
 
-    lib.rudp_pack_payload.argtypes = [TfvPacket, c_u8p, ctypes.c_size_t]
+    lib.rudp_pack_payload.argtypes = [ctypes.POINTER(TfvPacket), c_u8p, ctypes.c_size_t]
     lib.rudp_pack_payload.restype = ctypes.c_int
 
     lib.rudp_unpack_payload.argtypes = [c_cu8p, ctypes.c_size_t, ctypes.POINTER(TfvPacket)]
@@ -240,7 +240,7 @@ def make_packet(lib: ctypes.CDLL, ptype: int, flags: int, value: int) -> TfvPack
 
 def decode_packet(lib: ctypes.CDLL, pkt: TfvPacket) -> Tuple[int, int, int]:
     wire = (ctypes.c_uint8 * 4)()
-    _check(lib.rudp_pack_payload(pkt, wire, 4), "rudp_pack_payload")
+    _check(lib.rudp_pack_payload(ctypes.byref(pkt), wire, 4), "rudp_pack_payload")
     return wire[0], wire[1], (wire[2] << 8) | wire[3]
 
 
