@@ -78,14 +78,24 @@ int rudp_fuzz_one_input(const uint8_t *data, size_t size) {
     int hret = rudp_unpack_datagram_header(data, size, &hdr);
     if (hret == RUDP_OK) {
       uint8_t hbuf[RUDP_WIRE_DATAGRAM_HEADER_SIZE];
-      assert(rudp_pack_datagram_header(&hdr, hbuf, sizeof(hbuf)) ==
-             RUDP_WIRE_DATAGRAM_HEADER_SIZE);
-      assert(memcmp(hbuf, data, sizeof(hbuf)) == 0);
+      int pret = rudp_pack_datagram_header(&hdr, hbuf, sizeof(hbuf));
+      if (hdr.ack_channel < RUDP_MAX_CHANNELS) {
+        assert(pret == RUDP_WIRE_DATAGRAM_HEADER_SIZE);
+        assert(memcmp(hbuf, data, sizeof(hbuf)) == 0);
+      } else {
+        assert(pret == RUDP_ERR_INVALID_ARG);
+      }
     }
     rudp_record_s rec;
     if (rudp_unpack_record(data, size, &rec) == RUDP_OK) {
       uint8_t rbuf[RUDP_WIRE_RECORD_SIZE];
-      assert(rudp_pack_record(&rec, rbuf, sizeof(rbuf)) == RUDP_WIRE_RECORD_SIZE);
+      int pret = rudp_pack_record(&rec, rbuf, sizeof(rbuf));
+      if (rec.channel_id < RUDP_MAX_CHANNELS) {
+        assert(pret == RUDP_WIRE_RECORD_SIZE);
+        assert(memcmp(rbuf, data, sizeof(rbuf)) == 0);
+      } else {
+        assert(pret == RUDP_ERR_INVALID_ARG);
+      }
     }
   }
 
