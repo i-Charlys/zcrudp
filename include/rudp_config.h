@@ -39,13 +39,21 @@
 
 #define RUDP_SLOT_FREE 0
 #define RUDP_SLOT_IN_FLIGHT 1
+/** Selectively acknowledged ahead of cumulative tail; never retransmitted */
+#define RUDP_SLOT_SACKED 2
 
+/** Low-nibble fast-recovery state in rudp_slot_s::fast_retransmit */
+#define RUDP_FAST_STATE_MASK 0x0FU
 /** Normal timer-based transmission */
 #define RUDP_FAST_RETRANSMIT_OFF 0
-/** Fast retransmit flag raised by Tri-ACK or NewReno partial ACK */
+/** Fast retransmit flag raised by Tri-ACK, SACK FACK, or NewReno partial ACK */
 #define RUDP_FAST_RETRANSMIT_PENDING 1
 /** Slot was in flight when fast recovery began (RFC 6582 NewReno) */
 #define RUDP_FAST_RETRANSMIT_IN_RECOVERY 2
+/**Bit 3: K=2 XOR parity record already emitted for an odd-numbered pair slot */
+#define RUDP_SLOT_FLAG_FEC_SENT 0x08U
+/** High-nibble shift storing adaptive timeout backoff exponent (0..15) */
+#define RUDP_SLOT_BACKOFF_SHIFT 4U
 
 /** Standalone header size (Tier 1: seq_num + ack) */
 #define RUDP_WIRE_HEADER_SIZE 4
@@ -62,10 +70,13 @@
 #define RUDP_RECORD_FLAG_UNRELIABLE (0U)
 /** Reliable message requiring sliding window delivery */
 #define RUDP_RECORD_FLAG_RELIABLE (1U << 0)
-/** Explicit multi-channel ACK record (seq_num carries ACK N+1) */
+/** Explicit ACK record (seq_num = cumulative ACK N+1, payload = 32-bit SACK bitmap) */
 #define RUDP_RECORD_FLAG_ACK (1U << 1)
+/** Optional K=2 XOR parity record (seq_num = even pair base, payload = A ^ B) */
+#define RUDP_RECORD_FLAG_FEC_PARITY (1U << 2)
 /** Mask of defined wire record flag bits */
-#define RUDP_RECORD_VALID_FLAGS_MASK (RUDP_RECORD_FLAG_RELIABLE | RUDP_RECORD_FLAG_ACK)
+#define RUDP_RECORD_VALID_FLAGS_MASK                                                   \
+  (RUDP_RECORD_FLAG_RELIABLE | RUDP_RECORD_FLAG_ACK | RUDP_RECORD_FLAG_FEC_PARITY)
 
 /** Peer is disconnected or timed out */
 #define RUDP_STATE_DISCONNECTED 0
@@ -96,12 +107,14 @@
 #define RUDP_CHANNEL_FLAG_UNRELIABLE (0U)
 /** Allows reliable sends through the sliding TX window */
 #define RUDP_CHANNEL_FLAG_RELIABLE (1U << 0)
-/** Declarative hint; reliable session delivery is always ordered */
+/** Enforces strict in-order reliable delivery; omit for zero-HoL reliable unordered */
 #define RUDP_CHANNEL_FLAG_ORDERED (1U << 1)
 /** Integration hint only (legacy name); zcrudp performs NO internal encryption */
 #define RUDP_CHANNEL_FLAG_ENCRYPTED (1U << 2)
 /** Clear alias indicating caller-managed external AEAD/DTLS/WireGuard protection */
 #define RUDP_CHANNEL_HINT_EXTERNAL_AEAD RUDP_CHANNEL_FLAG_ENCRYPTED
+/** Enables opt-in K=2 XOR forward error correction in separate UDP loss domains */
+#define RUDP_CHANNEL_FLAG_FEC_K2 (1U << 3)
 
 #ifndef RUDP_DEFAULT_MTU
 /** Safe default UDP datagram payload limit preventing IP fragmentation */
@@ -119,5 +132,7 @@
 #define RUDP_ERR_BUFFER_FULL -3
 /** Sequence or ACK is outside active window boundaries */
 #define RUDP_ERR_OUT_OF_WINDOW -4
+/** Cryptographic authentication tag or anti-replay verification failed */
+#define RUDP_ERR_AUTH -5
 
 #endif /* RUDP_CONFIG_H */

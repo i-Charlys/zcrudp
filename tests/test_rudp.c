@@ -1580,11 +1580,17 @@ static void test_strict_pass1_validation_and_ack_only_null_out(void) {
     assert(rudp_session_process_datagram(&s, dgram, 12, out, 2) == RUDP_ERR_INVALID_ARG);
     assert(memcmp(&before, &s, sizeof(s)) == 0);
 
-    /* Unknown flag bit must fail Pass 1 atomically. */
-    rec.flags = 0x04U;
+    /* Unknown flag bit (0x08) and odd-seq FEC parity must fail Pass 1 atomically. */
+    rec.flags = 0x08U;
     assert(rudp_pack_record(&rec, dgram + 4, sizeof(dgram) - 4) == 8);
     assert(rudp_session_process_datagram(&s, dgram, 12, out, 2) == RUDP_ERR_INVALID_ARG);
     assert(memcmp(&before, &s, sizeof(s)) == 0);
+    rec.flags = RUDP_RECORD_FLAG_FEC_PARITY;
+    rec.seq_num = 1U;
+    assert(rudp_pack_record(&rec, dgram + 4, sizeof(dgram) - 4) == 8);
+    assert(rudp_session_process_datagram(&s, dgram, 12, out, 2) == RUDP_ERR_INVALID_ARG);
+    assert(memcmp(&before, &s, sizeof(s)) == 0);
+    rec.seq_num = 0U;
 
     /* Reliable record targeting an unreliable-only channel must fail Pass 1 atomically. */
     assert(rudp_session_config_channel(&s, 1, RUDP_CHANNEL_FLAG_UNRELIABLE) == RUDP_OK);

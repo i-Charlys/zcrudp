@@ -6,5 +6,6 @@
 #include "rudp_reliability.h"
 #include "rudp_session.h"
 #include "rudp_io.h"
+#include "rudp_crypto.h"
 
 #endif /* PROTOCOL_RUDP_H */

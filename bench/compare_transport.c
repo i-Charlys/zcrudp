@@ -20,6 +20,8 @@ typedef struct { uint32_t due; uint64_t order; unsigned len; uint8_t bytes[MTU];
 static datagram_s heaps[2][CAP];
 static unsigned sizes[2];
 static uint32_t now, delay_ms, jitter_ms, loss_percent, rng, origin;
+static uint32_t bw_kbps = 0, queue_pkts = 64;
+static uint64_t link_free_us[2];
 static uint64_t serial, wire_bytes, wire_packets, lost_packets;
 static uint32_t zcrudp_initial_rto_ms = 100;
 static unsigned delivered, admitted, total, offered_rate;
@@ -49,10 +51,23 @@ void link_send(int from, const void *bytes, unsigned len) {
   wire_bytes += len; wire_packets++;
   if (random_next() % 100 < loss_percent) { lost_packets++; return; }
   int to = 1 - from;
+  uint32_t depart_ms = now;
+  if (bw_kbps > 0) {
+    uint64_t now_us = (uint64_t)now * UINT64_C(1000);
+    unsigned queued = 0;
+    for (unsigned k = 0; k < sizes[to]; ++k) {
+      if (heaps[to][k].due > now + delay_ms) queued++;
+    }
+    if (queued >= queue_pkts) { lost_packets++; return; } /* Finite router queue drop-tail */
+    uint64_t tx_us = ((uint64_t)len * UINT64_C(8000) + bw_kbps - 1) / bw_kbps;
+    uint64_t start_us = (link_free_us[from] > now_us) ? link_free_us[from] : now_us;
+    link_free_us[from] = start_us + tx_us;
+    depart_ms = (uint32_t)((link_free_us[from] + UINT64_C(999)) / UINT64_C(1000));
+  }
   assert(sizes[to] < CAP); /* Never silently add simulator congestion loss. */
   /* Initialize only the used payload range; do not zero an MTU per datagram. */
   datagram_s p;
-  p.due = now + delay_ms + random_next() % (jitter_ms + 1);
+  p.due = depart_ms + delay_ms + random_next() % (jitter_ms + 1);
   p.order = serial++; p.len = len; memcpy(p.bytes, bytes, len);
   unsigned i = sizes[to]++;
   while (i && earlier(&p, &heaps[to][(i-1)/2])) {
@@ -171,6 +186,7 @@ static void setup(unsigned engine) {
     }
   }
   origin = now; wire_bytes = wire_packets = lost_packets = serial = 0;
+  link_free_us[0] = link_free_us[1] = 0;
   delivered = admitted = 0;
 }
 
@@ -239,18 +255,24 @@ static uint32_t percentile(unsigned pct) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 7 && argc != 8 && argc != 9) {
-    fprintf(stderr, "Usage: compare_transport ENGINE(0..4) COUNT RATE(0=saturated) DELAY_MS LOSS_PERCENT SEED [JITTER_MS [ZCRUDP_INITIAL_RTO_MS]]\n"); return 2;
+  if (argc < 7 || argc > 11) {
+    fprintf(stderr, "Usage: compare_transport ENGINE(0..4) COUNT RATE(0=saturated) DELAY_MS LOSS_PERCENT SEED [JITTER_MS [ZCRUDP_INITIAL_RTO_MS [BW_KBPS [QUEUE_PKTS]]]]\n"); return 2;
   }
   unsigned engine = (unsigned)strtoul(argv[1], NULL, 10);
   total = (unsigned)strtoul(argv[2], NULL, 10); offered_rate = (unsigned)strtoul(argv[3], NULL, 10);
   delay_ms = (unsigned)strtoul(argv[4], NULL, 10); loss_percent = (unsigned)strtoul(argv[5], NULL, 10);
   uint32_t seed = (uint32_t)strtoul(argv[6], NULL, 10);
   assert(engine < 5 && total > 0 && total <= MAX_MESSAGES && delay_ms > 0 && loss_percent <= 100 && seed);
-  jitter_ms = (argc == 8) ? (unsigned)strtoul(argv[7], NULL, 10) : (loss_percent ? 5 : 0);
-  if (argc == 9) {
-    jitter_ms = (unsigned)strtoul(argv[7], NULL, 10);
+  jitter_ms = (argc >= 8) ? (unsigned)strtoul(argv[7], NULL, 10) : (loss_percent ? 5 : 0);
+  if (argc >= 9) {
     zcrudp_initial_rto_ms = (uint32_t)strtoul(argv[8], NULL, 10);
+  }
+  if (argc >= 10) {
+    bw_kbps = (uint32_t)strtoul(argv[9], NULL, 10);
+  }
+  if (argc == 11) {
+    queue_pkts = (uint32_t)strtoul(argv[10], NULL, 10);
+    assert(queue_pkts > 0 && queue_pkts <= CAP);
   }
   rng = seed;
   assert(zcrudp_initial_rto_ms >= 10 && zcrudp_initial_rto_ms <= 2000);

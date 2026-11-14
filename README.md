@@ -19,8 +19,15 @@ The library provides:
   Ordered delivery is attempted until the retry limit is reached; applications
   must handle disconnection and coordinate resets with their peers.
 - **Caller-owned storage:** The core does not call `malloc`. A default four-channel
-  session occupies 5,620 bytes on the tested ABI, including storage reserved for
-  channels configured as unreliable.
+  session occupies 5,364 bytes on the tested ABI (1,340 bytes per channel), including
+  storage reserved for channels configured as unreliable.
+- **Phase 5 recovery, security & zero-copy I/O:** Includes 32-bit SACK + FACK 1-RTT
+  multi-loss repair, RFC 8985 Tail-Loss Probe and RACK reorder timer, reliable
+  unordered zero-HoL delivery, optional zero-RTT XOR K=2 FEC (`RUDP_CHANNEL_FLAG_FEC_K2`),
+  constant-time RFC 8439 ChaCha20-Poly1305 AEAD envelope (`zcrudp::crypto` with 64-packet
+  anti-replay and pluggable hardware/OS AEAD vtable), transactional scatter-gather TX
+  (`rudp_session_build_iovec` / `rudp_session_prepare_iovec`), and kinematic dead-reckoning
+  (`zcrudp::motion`).
 
 [Transport benchmarks](#transport-benchmarks-vs-enet-enet-zpl-and-kcp) ·
 [Codec benchmarks](#codec-benchmarks) ·
@@ -53,25 +60,28 @@ choice by the application; do not infer one from UDP length alone.
 `rx_buffer` stores reliable messages received ahead of a missing sequence until
 they can be delivered in order. Unreliable records bypass both windows.
 
-- **1,040 bytes per context; 5,620 bytes per four-channel session** on the measured
-  host ABI with default settings. Run `make test` to inspect sizes on your target.
+- **1,040 bytes per context; 5,364 bytes per four-channel session** on the measured
+  host ABI with default settings (4,392 bytes with `ZCRUDP_EXTERNAL_RX_STORAGE=ON`).
+  Run `make test` to inspect sizes on your target.
   Each default TX ring has 64 slots and holds 63 outstanding reliable messages.
-  Sessions now retain out-of-order reliable payloads in a fixed RX window.
+  Sessions retain out-of-order reliable payloads in a fixed RX window or deliver
+  reliable unordered channels immediately with zero head-of-line blocking.
 - **4-byte ACK; 12-byte single-update datagram; 132 bytes for 16 data records.**
-  These are UDP payload sizes, excluding UDP/IP and link-layer overhead.
+  These are UDP payload sizes, excluding UDP/IP and link-layer overhead (add 24 bytes
+  when wrapped in `zcrudp::crypto` AEAD).
 - **No heap calls, background threads or socket API in the core.** Integrate
   only the modules you need; call the protocol from your own loop.
   See [module targets, source lists and ownership](docs/MODULES.md).
-- **Optional profiles:** bounded multipart messages, compact4/rolling8 scalar
-  telemetry and adaptive duplication. Link `zcrudp::stream`, `zcrudp::scalar` or
-  `zcrudp::motion` when needed. Session
-  priorities and recovery state remain in the core and its fixed session size.
+- **Optional profiles & crypto:** bounded multipart messages, compact4/rolling8 scalar
+  telemetry, kinematic dead-reckoning and RFC 8439 ChaCha20-Poly1305 AEAD envelope.
+  Link `zcrudp::crypto`, `zcrudp::stream`, `zcrudp::scalar` or `zcrudp::motion` when needed.
+  Session priorities and recovery state remain in the core and its fixed session size.
   [Wire formats and tradeoffs](docs/PHASE4.md).
 
 ## Modular integration
 
 Use `zcrudp::codec`, `zcrudp::reliability`, `zcrudp::session`, `zcrudp::io`,
-`zcrudp::stream`, `zcrudp::scalar` and `zcrudp::motion` independently.
+`zcrudp::crypto`, `zcrudp::stream`, `zcrudp::scalar` and `zcrudp::motion` independently.
 `zcrudp::core` and `zcrudp::profiles` remain facade targets; the original public
 headers remain available. The default memory layout and wire format are preserved.
 
@@ -87,35 +97,34 @@ The comparative runner executes zcrudp, ENet (lsalzman), ENet-zpl (zpl-c), and K
 2,400 reliable ordered four-byte messages, nine scenarios, five seeds — **225 recorded runs**.
 
 The [raw results](docs/bench/comparison/results.csv) preserve all five engines.
-At 240 Hz on the clean 250 ms ping path, zcrudp sends more UDP payload bytes
-than ENet.
+On the clean 250 ms ping path at 240 Hz, channel backoff inheritance suppresses
+repeated cold-start timeouts so zcrudp emits 16.2 UDP payload bytes per message
+(38,816 B total) versus 24.1 B/message for ENet (57,886 B).
 
-This follow-up measures zcrudp with 100 ms and 300 ms initial retransmission
-timeouts on the same virtual 250 ms ping path. At 300 ms, clean traffic drops
-from 32.0 to 16.0 UDP payload bytes per delivered message with unchanged p99
-latency. Under 2% loss, its p99 rises from 379 to 1,429 ms. The 100 ms profile
-remains the published comparison; [the sensitivity data](docs/bench/comparison/rto-sensitivity.csv)
+A companion sensitivity sweep compares 100 ms and 300 ms initial retransmission
+timeouts on the virtual 250 ms ping path: clean traffic goes from 16.2 to 16.0
+UDP payload bytes per delivered message at unchanged 125 ms p99, while under 2%
+loss p99 moves from 889 ms to 1,412 ms. The 100 ms profile remains the published
+comparison; [the sensitivity data](docs/bench/comparison/rto-sensitivity.csv)
 shows the tradeoff rather than replacing it.
 
 These are **virtual-link transport measurements**: common delay/loss/jitter and
 1 ms service cadence, not physical-NIC benchmarks. The no-loss saturation cases
-show zcrudp matching ENet and ENet-zpl goodput at the common 63-message admission limit.
+show zcrudp matching ENet and ENet-zpl goodput at the common 63-message admission limit
+while using 5x less host CPU per message (`63.1 ns` vs `317.4 ns` for ENet).
 This is a matched in-flight-capacity result, not a measurement of each engine's
 maximum throughput with its native/default window capacity.
 In high-density saturation bursts, zcrudp aggregates records tightly to emit fewer
-UDP-payload bytes (8.1 B vs 18.2 B per message). In the clean 250 ms ping case,
-the benchmark's 100 ms initial retransmission timeout expires before an ACK can
-return. This causes unnecessary retransmissions: zcrudp emits 32.0 B/message
-versus 24.1 B/message for ENet. The 100 ms setting is part of the benchmark
-profile, not a suitable initial timeout for every network path.
+UDP-payload bytes (8.1 B vs 18.2 B per message).
 
-With adaptive recovery enabled, the median of the five per-run p99 values shows:
-- **5% loss (10 ms delay, 5 ms jitter)**: 57 ms for zcrudp, compared with 167 ms for ENet, 378 ms for ENet-zpl, and 69 ms for KCP-fast.
-- **High jitter (20 ms delay, 2% loss, 40 ms jitter)**: 189 ms for zcrudp, compared with 338 ms for ENet and 203 ms for ENet-zpl, with 22% less datagram wire traffic than ENet.
-- **KCP-fast under high jitter**: 159 ms p99, ahead of zcrudp's 189 ms in that scenario.
-- **High latency with loss (250 ms ping / 125 ms one-way, 2% loss, 10 ms jitter)**: 379 ms for zcrudp, compared with 803 ms for ENet (-53%) and 673 ms for ENet-zpl (-44%). In the clean 250 ms ping case, zcrudp, ENet, and ENet-zpl all deliver at the physical 125 ms one-way baseline.
+With adaptive recovery, 32-bit SACK, FACK, TLP and RACK enabled, the median of the five per-run p99 values shows:
+- **Saturated WAN with 2% loss (10 ms delay)**: 15 ms p99 for zcrudp, compared with 48 ms for ENet, 48 ms for ENet-zpl, and 107 ms for KCP-fast, at 56% lower UDP payload bytes than ENet.
+- **5% loss (10 ms delay, 5 ms jitter)**: 54 ms for zcrudp, compared with 167 ms for ENet, 378 ms for ENet-zpl, and 69 ms for KCP-fast, with 23% fewer UDP payload bytes than ENet.
+- **High jitter (20 ms delay, 2% loss, 40 ms jitter)**: 136 ms for zcrudp, ahead of KCP-fast (159 ms), ENet-zpl (203 ms), and ENet (338 ms).
+- **Clean 250 ms ping (125 ms one-way)**: 125 ms p99 for zcrudp, ENet, and ENet-zpl, with zcrudp emitting 38,816 B (-33% vs ENet's 57,886 B).
+- **High latency with loss (250 ms ping / 125 ms one-way, 2% loss, 10 ms jitter)**: 889 ms p99 for zcrudp (vs 10,422 ms for KCP-fast, 803 ms for ENet, and 673 ms for ENet-zpl) while emitting 52% fewer UDP payload bytes than ENet (23,752 B vs 49,664 B).
 
-It costs 352 B of session state and delivers significantly lower tail latency under packet loss.
+By packing per-slot timeout backoff into the upper nibble of `fast_retransmit`, Phase 5 reduces session RAM by 256 B relative to Phase 4 (5,364 B total) while improving tail latency and CPU efficiency.
 These results depend on the workload and transport settings, including KCP's
 selected profile. See [recovery settings and tradeoffs](docs/ADAPTIVE_RECOVERY.md).
 
@@ -182,7 +191,8 @@ game engine. Packaging follows CMake's
 | `src/reliability.c` | Standalone ARQ engine |
 | `src/session*.c`, `src/rx.c` | Session setup, scheduling, routing and ordered RX |
 | `src/io.c` | Portable scatter/gather helpers |
-| `src/stream.c`, `src/scalar.c`, `src/motion.c` | Optional profiles |
+| `src/crypto.c` | Optional RFC 8439 ChaCha20-Poly1305 AEAD envelope & anti-replay |
+| `src/stream.c`, `src/scalar.c`, `src/motion.c` | Optional profiles (streaming, scalar, kinematic dead-reckoning) |
 | `examples/demo_loss.c` | Interactive POSIX UDP peers with simulated loss/delay |
 | `bench/` | Benchmark and trace tools |
 | `docs/bench/` | Recorded benchmark data and methodology |
@@ -257,7 +267,7 @@ If you don't have `make`, you can compile manually (ensure the `build/` director
 ```bash
 mkdir -p build
 gcc -Iinclude -std=c11 -Wall -Wextra -O2 src/codec.c src/reliability.c \
-  src/session.c src/session_tx.c src/session_rx.c src/rx.c src/io.c \
+  src/session.c src/session_tx.c src/session_rx.c src/rx.c src/io.c src/crypto.c \
   tests/test_rudp.c -o build/test_rudp
 ./build/test_rudp
 ```

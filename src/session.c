@@ -20,6 +20,14 @@ int rudp_session_init(rudp_session_s *session) {
   return RUDP_OK;
 }
 
+int rudp_session_set_seed(rudp_session_s *session, uint16_t seed) {
+  if (!session) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  session->session_seed = seed;
+  return RUDP_OK;
+}
+
 int rudp_session_config_channel(rudp_session_s *session, uint8_t channel_id,
                                 uint8_t flags) {
   if (!session || channel_id >= RUDP_MAX_CHANNELS) {
@@ -77,7 +85,9 @@ int rudp_session_config_recovery(rudp_session_s *session, uint8_t channel,
   chan->rto_initial_ms = (uint16_t)initial_ms;
   chan->srtt_scaled = chan->rttvar_scaled = chan->last_rtt_sample = 0;
   chan->chan_backoff &= (uint8_t)~RUDP_CHAN_BACKOFF_MASK;
-  memset(chan->timeout_backoffs, 0, sizeof(chan->timeout_backoffs));
+  for (size_t i = 0; i < RUDP_WINDOW_SIZE; ++i) {
+    rudp_slot_set_backoff(&chan->ctx.tx_buffer[i], 0U);
+  }
   return RUDP_OK;
 }
 
@@ -100,7 +110,6 @@ int rudp_session_reset_channel(rudp_session_s *session, uint8_t channel_id) {
   if (chan->rx_present)
 #endif
     memset(chan->rx_present, 0, RUDP_RX_BITMAP_SIZE);
-  memset(chan->timeout_backoffs, 0, sizeof(chan->timeout_backoffs));
   chan->srtt_scaled = chan->rttvar_scaled = chan->last_rtt_sample = 0;
   chan->rto_ms = chan->rto_initial_ms;
 

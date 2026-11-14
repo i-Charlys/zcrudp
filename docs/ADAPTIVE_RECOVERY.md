@@ -67,23 +67,23 @@ samples. This is not an implementation of the full TCP timer standard or RACK.
 
 ## Memory and compatibility
 
-TX slots remain 16 bytes, context remains 1,040 bytes at window 64. Each channel
-adds 64 timeout-exponent bytes and six uint32_t estimator/configuration fields:
-**88 bytes/channel, 352 bytes/session**, statically reserved even in fixed mode.
-Default channel/session sizes are now **1,404 / 5,620 bytes**. For other window
-sizes, counter storage scales with `RUDP_WINDOW_SIZE`. Rebuild all consumers:
-the in-memory ABI changes, but the UDP wire format does not.
+TX slots remain 16 bytes (packing timeout backoff in the high nibble of `fast_retransmit`),
+context remains 1,040 bytes at window 64. Each channel adds six uint32_t
+estimator/configuration fields (**24 bytes/channel, 96 bytes/session**), statically
+reserved even in fixed mode, while saving 64 bytes/channel relative to Phase 4.
+Default channel/session sizes are **1,340 / 5,364 bytes**. Rebuild all consumers
+when changing compile-time window or channel macros.
 
 ## Results and tradeoffs
 
 Published medians over five seeds, 2,400 four-byte reliable ordered messages,
 240 Hz, 10 ms one-way delay and 0..5 ms jitter in lossy cases:
 
-| Metric | Phase 4 fixed | Adaptive | ENet |
+| Metric | Phase 4 fixed | Phase 5 adaptive (SACK+FACK+TLP/RACK) | ENet |
 | --- | ---: | ---: | ---: |
-| p99, 1% loss | 52 ms | 46 ms | 47 ms |
-| p99, 5% loss | 263 ms | 57 ms | 167 ms |
-| UDP payload bytes, 5% loss | 43,324 | 47,248 | 62,096 |
+| p99, 1% loss | 52 ms | 47 ms | 47 ms |
+| p99, 5% loss | 263 ms | 54 ms | 167 ms |
+| UDP payload bytes, 5% loss | 43,324 | 47,604 | 62,096 |
 
 At 5% loss this is about 78% lower p99 than phase 4 and 66% lower than ENet,
 but about 9% more traffic than phase 4. These are combined-policy results,

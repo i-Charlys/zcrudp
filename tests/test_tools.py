@@ -28,7 +28,7 @@ def ready(process):
         assert line.startswith(b"READY"), line
 
 
-def pair(loss, latency, jitter, count, duration, interactive=False, interval=30, adaptive=False):
+def pair(loss, latency, jitter, count, duration, interactive=False, interval=30, adaptive=False, crypto=False):
     # Reserve two distinct ephemeral UDP ports, then release just before launch.
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as a, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as b:
         a.bind(("127.0.0.1", 0))
@@ -36,7 +36,7 @@ def pair(loss, latency, jitter, count, duration, interactive=False, interval=30,
         port_a, port_b = a.getsockname()[1], b.getsockname()[1]
     common = ["--loss", str(loss), "--latency", str(latency), "--jitter", str(jitter),
               "--timeout", "150", "--interval", str(interval), "--dscp", "46",
-              "--adaptive", str(int(adaptive))]
+              "--adaptive", str(int(adaptive)), "--crypto", str(int(crypto))]
     processes = []
     try:
         server = subprocess.Popen([DEMO, "server", "--port", str(port_a), "--peer-port", str(port_b),
@@ -83,12 +83,13 @@ def pair(loss, latency, jitter, count, duration, interactive=False, interval=30,
 def main():
     for args in (["--help"],):
         subprocess.run([DEMO, *args], check=True, capture_output=True)
-    for args in (["client", "--loss", "101"], ["client", "--dscp", "64"], ["client", "--seed", "0"], ["client", "--port"], ["client", "--peer", "bad"]):
+    for args in (["client", "--loss", "101"], ["client", "--dscp", "64"], ["client", "--seed", "0"], ["client", "--port"], ["client", "--peer", "bad"], ["client", "--crypto", "2"]):
         assert subprocess.run([DEMO, *args], capture_output=True).returncode == 2
     pair(0, 0, 0, 6, 800)
     pair(0, 60, 0, 0, 800, interactive=True)
     pair(30, 15, 20, 10, 3000)
     pair(30, 15, 20, 10, 3000, adaptive=True)
+    pair(25, 10, 15, 10, 2800, adaptive=True, crypto=True)
     pair(100, 0, 0, 2, 400)
     pair(100, 0, 0, 80, 900, interval=1)
     with tempfile.TemporaryDirectory(prefix="zcrudp-bench-") as directory:

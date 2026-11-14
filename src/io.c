@@ -20,6 +20,17 @@ int rudp_iovec_add(rudp_iovec_collection_s *col, const void *base, uint32_t len)
   return RUDP_OK;
 }
 
+int rudp_iovec_reset(rudp_iovec_collection_s *col) {
+  if (!col) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  col->path_entropy = 0U;
+  col->total_len = 0U;
+  col->count = 0U;
+  col->dscp = 0U;
+  return RUDP_OK;
+}
+
 int rudp_iovec_flatten(const rudp_iovec_collection_s *col, uint8_t *out_buf,
                        size_t max_len) {
   if (!col || !out_buf) {

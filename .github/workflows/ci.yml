@@ -48,6 +48,9 @@ jobs:
     - name: Test independent modules and caller-owned RX storage
       run: make test-modules test-external-rx
 
+    - name: Run protocol and security mutation harness
+      run: make test-mutations
+
     - name: Test CMake shared libraries in Release mode
       run: |
         cmake -S . -B build/cmake-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DZCRUDP_WARNINGS_AS_ERRORS=ON

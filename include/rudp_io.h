@@ -93,6 +93,11 @@ RUDP_EXPORT int rudp_iovec_flatten(const rudp_iovec_collection_s *col, uint8_t *
 RUDP_EXPORT int rudp_iovec_add(rudp_iovec_collection_s *col, const void *base,
                                uint32_t len);
 
+/**
+ * @brief Clears slice count, total_len, DSCP, and path_entropy on a collection.
+ */
+RUDP_EXPORT int rudp_iovec_reset(rudp_iovec_collection_s *col);
+
 #ifdef __cplusplus
 }
 #endif

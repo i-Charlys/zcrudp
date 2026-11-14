@@ -71,10 +71,10 @@ With the default 64-slot window and four channels on the checked ABI:
 
 | Object | Calculation | Size |
 | --- | ---: | ---: |
-| `rudp_slot_s` | frame 8 + timestamp 4 + four 1-byte fields | 16 B |
+| `rudp_slot_s` | frame 8 + timestamp 4 + four 1-byte fields (packed backoff + fast/FEC flags) | 16 B |
 | `rudp_context_s` | `64 * 16 + 16` | 1,040 B |
-| `rudp_channel_s` | `align4(1,040 + 12 + 5*64 + ceil(64/8)) + 24` | 1,404 B |
-| `rudp_session_s` | `4 * 1,404 + 4` | 5,620 B |
+| `rudp_channel_s` | `align4(1,040 + 12 + 4*64 + ceil(64/8)) + 24` | 1,340 B |
+| `rudp_session_s` | `4 * 1,340 + 4` | 5,364 B |
 
 The exact formulas and default-size `_Static_assert` checks live beside the
 structures in `rudp_types.h`. Changing `RUDP_WINDOW_SIZE`,

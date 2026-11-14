@@ -16,7 +16,8 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_SOURCES = ["src/codec.c", "src/reliability.c", "src/session.c",
-                "src/session_tx.c", "src/session_rx.c", "src/rx.c", "src/io.c"]
+                "src/session_tx.c", "src/session_rx.c", "src/rx.c", "src/io.c",
+                "src/crypto.c"]
 DEPS = ROOT / "build/compare-deps"
 VERSIONS = {
     "enet": ("lsalzman", "enet", "5a9c537fd464b3c6d3c55e1d3bd47588faf71b42",
@@ -233,7 +234,7 @@ def main():
                    "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                    "messages": args.messages, "seeds": args.seeds, "simulation": "1ms ticks; unlimited bandwidth; jitter 0..40ms",
                    "kcp_fast": "ikcp_nodelay(1,10,2,1); default window sizes", "zcrudp_rto_ms": 100,
-                   "zcrudp_recovery": "adaptive; initial=100ms min=10ms max_base=2000ms; timeout-only backoff"}
+                   "zcrudp_recovery": "adaptive; initial=100ms min=10ms max_base=2000ms; 32-bit SACK + FACK + RFC 8985 TLP/RACK"}
     (args.output / "environment.json").write_text(json.dumps(environment, indent=2) + "\n")
     if not args.no_plots:
         plots(rows, args.output)

@@ -7,6 +7,7 @@
 #include "rudp_reliability.h"
 #include "rudp_session.h"
 #include "rudp_io.h"
+#include "rudp_crypto.h"
 #include "rudp_stream.h"
 #include "rudp_scalar.h"
 #include "rudp_motion.h"

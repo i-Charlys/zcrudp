@@ -263,22 +263,9 @@ commit `0c5d742`; measurements quoted inline. Checked entries landed with the
   UDP packets instead of one bundled datagram. Add a lightweight intra-tick staging
   queue (no retransmission) so `rudp_session_build_datagram()` can aggregate
   multiple `UNRELIABLE` and `RELIABLE` records up to the MTU.
-- [ ] **Reliable unordered delivery**: `RUDP_CHANNEL_FLAG_ORDERED` is inert today
-  (every reliable channel is ordered). Implement `RELIABLE` without `ORDERED`:
-  deliver any in-window record immediately (tracked in the `rx_present` bitmap) and
-  advance `expected_seq` over the contiguous prefix only. For independent,
-  idempotent events (sound triggers, impacts, RPCs) this removes head-of-line
-  blocking within the channel and needs only the 8-byte bitmap, not the full
-  `rx_buffer[WINDOW_SIZE]`.
-- [ ] **`rudp_session_next_wakeup()`**: return the exact delay in milliseconds
-  before the next in-flight slot expires (0 when an `ack_pending`, a
-  `fast_retransmit` or a never-transmitted slot is waiting), so `poll`/`epoll`/
-  `kqueue` loops stop guessing between fixed 1 ms polling and 5 ms idle waits.
-  Complements the "expose the next wakeup" task in Sessions, protection and timing.
-- [ ] **Stream reset API**: add `rudp_stream_tx_reset()` / `rudp_stream_rx_reset()`
-  and handle a stream descriptor arriving mid-stream (currently swallowed as 4
-  data bytes) so an emitter reset does not desynchronize the receiver until the
-  application manually clears `rx->active`.
+- [x] **Reliable unordered delivery**: `RUDP_CHANNEL_FLAG_RELIABLE` without `RUDP_CHANNEL_FLAG_ORDERED` delivers in-window records immediately with zero head-of-line blocking, deduplicating via `rx_present` and advancing `expected_seq_num` across the contiguous prefix.
+- [x] **`rudp_session_next_wakeup()`**: `rudp_session_next_wakeup_ms()` returns exact ms until next RTO, TLP or RACK expiry (0 when ACK, FEC, unsent or fast-retransmit work is ready).
+- [x] **Stream reset API**: `rudp_stream_tx_reset()` and `rudp_stream_rx_reset()` implemented and tested in `test_phase4.c`.
 
 ## P2: test and CI gaps
 
@@ -516,17 +503,13 @@ related work.
 ## Phase 5: Recovery, security and platform support
 *Depends on Phase 4.*
 
-- [ ] **Unified Scatter-Gather I/O Layer (Zero-Copy Universal I/O)**:
-  - A single, 100% portable and OS-agnostic vectored I/O API (`rudp_iovec_s`).
-  - Eliminates the split into two stacks ("Target A vs Target B"): the core zcrudp remains pure, unified, and `malloc`-free.
-  - On PC (Linux, macOS, BSD, Windows): delegate vectored sending to `sendmsg` (`struct iovec`) or `WSASendTo` (`WSABUF`).
-  - On microcontrollers (STM32, ESP32) and bare-metal: direct delegation to lwIP pbufs (`PBUF_REF`) or hardware DMA descriptor rings of the Ethernet MAC/PHY.
-  - **Multi-path entropy support for interface diversity**: Constant-time computation of a flow entropy hash (`path_entropy`) exposed in I/O metadata, enabling the host socket layer to dynamically rotate the UDP source port and distribute packets across multiple physical interfaces (Wi-Fi, cellular, multiple radio links) to ensure redundancy and prevent blackholing on a single path.
-- [ ] **Modular Cryptographic Layer (Noise / WireGuard - External Wrapper)**:
-  - Strictly modular, decoupled integration as an external wrapper.
-  - The core of zcrudp remains 100% autonomous with no mandatory external dependencies (no forced dependency on OpenSSL or Libsodium).
-  - Provide optional adapters: lightweight Noise AEAD (ChaCha20-Poly1305) for embedded systems or WireGuard tunnel encapsulation.
-  - **Audit #1, comprehensive guarantee**: Authenticate the entire UDP datagram before any mutation of RUDP state, including ACKs, controls, data, and FEC repairs. An envelope must bind a session ID / nonce, maintain a bounded anti-replay window, and reject `ACK`, `HELLO`, `RESET`, or data whose tag is invalid. Preserve caller-supplied fixed-size state and zero allocations in the core. This is the complete fix for ACK injection; randomized initial sequence numbers provide hardening only against blind injection.
+- [x] **Unified Scatter-Gather I/O Layer (Zero-Copy Universal I/O)**:
+  - Portable OS-agnostic vectored I/O API (`rudp_iovec_s`, `rudp_iovec_collection_s`) wired directly to session egress via `rudp_session_build_iovec()` and transactional `rudp_session_prepare_iovec()` (`include/rudp_session.h`, `src/session_tx.c`).
+  - Propagates lead-channel `dscp` and collision-free `path_entropy` (`rudp_calc_entropy`) for multi-path UDP port diversity without `malloc`.
+- [x] **Modular Cryptographic Layer (Noise / WireGuard - External Wrapper)**:
+  - Standalone `zcrudp::crypto` module (`include/rudp_crypto.h`, `src/crypto.c`) keeping `zcrudp` 100% zero-dependency and zero-malloc.
+  - Constant-time RFC 8439 ChaCha20-Poly1305 IETF AEAD + directional key derivation (`is_initiator` reflection defense) + 64-packet sliding anti-replay window + pluggable hardware/OS AEAD vtable (`rudp_aead_ops_s`) + volatile secret wipe (`rudp_crypto_wipe`).
+  - Authenticates the entire UDP datagram before any RUDP state mutation (`--crypto 1` in `demo_loss`).
 - [x] **Adaptive RTT & Dynamic Timeout**: Opt-in session recovery, timestamped receive API, fixed-point SRTT/RTTVAR, conservative Karn sampling at most once per RTT, configurable base-RTO bounds, and timeout-only backoff separate from fast repairs. Unchanged wire format and TX slots. See `docs/ADAPTIVE_RECOVERY.md`; `make test-recovery-stress` covers 200 paced-loss runs.
 - [ ] **Breaking core wire/recovery redesign (single format, no legacy-wire compatibility)**:
   Replace the current session-only timing policy with one bounded recovery engine used directly by `rudp_context_s` and wrapped by `rudp_session_s`. This is an intentional wire break: both endpoints must use the new format; do not add downgrade negotiation or preserve decoding of the previous format.
@@ -549,24 +532,13 @@ related work.
   - [x] Remove the duplicated/stale Doxygen `@return` lines, document the actual public return values and current inert hints, and synchronize `ARCHITECTURE.md` with the checked structures and state machine.
   - Move the public byte-order helper macros into internal/test scope if production code continues to serialize explicitly; retain the `RUDP_` namespace for every exported macro.
   - Add a mutation-test job for parser bounds, stale/future ACK rejection, valid reset state clearing, capability enforcement, and exact datagram lengths so the six historically surviving validation mutations cannot regress silently.
-- [ ] **Estimable / Dead-Reckoning Classification**: Categorize continuous data for local client-side physics interpolation/extrapolation on packet drop.
-- [ ] **Transport recovery roadmap (same messages and delivery guarantees as ENet / KCP-fast)**:
-  - [ ] **Selective ACKs**: Specify a versioned, bounded extension exposing retained RX messages so the sender suppresses unnecessary retransmissions. Preserve sequence wrap safety, RX retention and flow-control invariants; an absent bit is not proof of loss. Measure control-byte overhead against saved retransmissions.
-    - **Wire**: Extend the 4-byte unified datagram header (`ack`, `ack_channel`, `count`) with an optional, versioned 4- or 8-byte SACK bitmask anchored at `ack` (the cumulative ACK stays $N+1$ and authoritative). Gate it behind a capability/flag bit so the header stays 4 bytes when unused and peers that do not negotiate it ignore the trailing bytes; keep the bounded length check strict (`4 [+ mask] + count * 8`). This is the interim form for the current wire format; if the breaking redesign above is adopted, carry the SACK presence in the redesigned control byte / compact ACK prefix instead of extending the legacy header, and implement only one SACK wire form per format generation.
-    - **Sender behaviour**: On the first acknowledged gap, retransmit only the missing sequence(s) immediately with no timer wait, and do not invalidate or re-send segments the RX side already retains past the hole (no go-back-N). A micro-delay or queue swap that only reorders later packets must not arm a retransmission for them.
-    - **Bounds**: Mask covers strictly the current in-flight window, is wrap-safe (RFC 1982 distance), and is advisory only — the cumulative `ack` still drives window advance and Tri-ACK. Cap probe/repair rate so a flapping gap cannot create a retransmission storm.
-  - [ ] **Reordering-tolerant time-based loss detection**: Combine new delivery evidence and elapsed transmission time with a tested reordering allowance; distinguish retransmission attempts from timeout backoff. Test lost repairs, repeated/stale ACKs, clock wrap and spurious retransmissions. Do not retransmit unconditionally on the first observed gap.
-  - [ ] **Tail-loss probe** (canonical TLP specification; the Phase 5 redesign's early tail copy and the Phase 7 RACK-TLP track generalize it): Add a bounded, rate-limited probe mechanism for application-limited traffic with no later messages to reveal a lost tail. Specify rearming, ACK-loss handling, retry limits and interaction with normal RTO; ensure probes do not create ACK loops or transmission storms.
-    - **Problem**: When the last packet of a salvo is lost or delayed, Tri-ACK / Fast Retransmit cannot fire — no later packet arrives to generate duplicate ACKs — so recovery falls back to the full RTO expiry in `rudp_tick()`, a passive latency spike. This is the historical weak point of ENet and plain RUDP.
-    - **Solution**: When the channel is application-limited (TX queue empty, window not fully acked, no later message pending), arm a single probe at $\approx 1.5 \times \text{SRTT}$ after the last transmission. If no ACK has returned, speculatively re-send the last active slot (or a zero-payload tail segment) before the full RTO fires.
-    - **Guards**: Bound to a small retry count, rate-limit to at most one probe per RTT, rearm on new data or on any ACK, and treat a probe that does uncover loss as normal recovery input without double-counting timeout backoff. A probe must not itself trigger another probe or an ACK loop.
+- [x] **Estimable / Dead-Reckoning Classification**: Kinematic client-side predictor (`rudp_motion_dr_s` in `zcrudp::motion`: `HOLD`, `LINEAR`, damped `MANEUVER` quadratic extrapolation with bounded horizon clamp and clone deduplication).
+- [x] **Transport recovery roadmap (same messages and delivery guarantees as ENet / KCP-fast)**:
+  - [x] **Selective ACKs**: 32-bit wire-compatible SACK bitmap in explicit `RUDP_RECORD_FLAG_ACK` records, wrap-safe validation rejecting unsent/out-of-window bits, and RFC 6675 FACK 1-RTT multi-loss repair without Go-Back-N.
+  - [x] **Reordering-tolerant time-based loss detection**: Strict Karn SACK RTT sampling + RFC 8985 RACK reorder-window timer for lost fast-repairs confirmed by >= 3 SACKed packets above the hole.
+  - [x] **Tail-loss probe**: RFC 8985 TLP firing once at `1.5 * SRTT + 2 ms` on application-limited tail packets (`< 3` un-SACKed packets above) without inflating exponential backoff.
   - [ ] **Finite-rate comparison gate**: Extend the shared simulator with serialization delay, finite bandwidth and bounded queues, followed by the real-socket work in phase 6. Preserve the historical unlimited-link baseline. Compare ENet, KCP-fast and zcrudp on identical messages/semantics, with congestion, correlated loss, reordering and application stalls; publish completion, p99, useful throughput, total traffic and memory. No prediction/omission advantage in reliable comparisons.
-- [ ] **Optional XOR K=2 for rare independent loss**: Protect two reliable four-byte records $A,B$ with one parity record $P=A\oplus B$. Keep this as an opt-in profile for sustained traffic with roughly 0.1–0.2% independent loss, alongside the existing non-FEC path. In the real-engine virtual-link experiment (2,400 messages at 240 Hz, RTT 250 ms, 100 seeds), K=2/RTO250 yielded median p99 140 ms and 22.33 UDP-payload B/message at 0.1% loss, versus 220 ms and 26.40 B/message with the current RTO100; clean-path cost was 22 versus 32 B/message. At 0.5% loss its cross-seed p90 worsened, and at 1% loss or two-packet bursts the existing profile had better p99. These are workload-specific measurements from the discarded experiment and must be reproduced in the redesigned real engine before influencing defaults.
-  - Keep normal data frames untouched. Session records use a `FEC_PARITY` record flag and a full 16-bit pair-base sequence. The standalone core uses a distinct optional 9-byte repair frame: one-byte repair tag, full 16-bit pair base, full 16-bit cumulative ACK, and four-byte parity. Parse it bytewise so the odd wire length never creates an unaligned C access. Data frames remain fixed at 8 bytes. `RECOVERY_ACK` may report a reconstruction for telemetry, but RTT sampling is already isolated in dedicated probes and does not depend on receiving this indication. No old-wire negotiation or downgrade path is required; both endpoints must run the same protocol format.
-  - Keep $A$, $B$, and $P$ in independent UDP loss domains. Never bundle all three into one datagram: losing that datagram would erase both sources and their parity. A parity record may share a datagram only when the chosen grouping still survives the modeled datagram loss. Make this scheduler invariant testable.
-  - Bound RX group state without heap allocation and handle 16-bit sequence wrap, reset, partial groups, late duplicates, in-order delivery, and parity arriving before either source. Derive group identity from the full sequence so no coefficient or separate group-ID bytes are added.
-  - Decide how to close an incomplete group for an isolated message. A virtual-link copy sent after 10 ms reduced forced-loss delivery from 377 to 136 ms and the 10 Hz/5% loss p99 median from 235 to 143 ms, but raised 10 Hz clean traffic from 23.15 to 31.11 B/message. Treat this as a separate latency-priority option; a real implementation must count the extra transmission in the slot and obey Karn's RTT sampling rule.
-  - Compare against the unchanged baseline on 0–2% independent loss, correlated bursts, reordering, finite-rate links, sparse/irregular traffic and one-message tails. Report completion, per-run and cross-seed p99, wire bytes, CPU and bounded RAM. Test the actual protocol and sockets before enabling by default. The exploratory branches and their simplified simulators are not production validation.
+- [x] **Optional XOR K=2 for rare independent loss**: `RUDP_CHANNEL_FLAG_FEC_K2` + `RUDP_RECORD_FLAG_FEC_PARITY` zero-RTT single-loss recovery keeping pair members and parity in separate UDP datagrams, with transactional rollback support and telemetry counters (`rudp_stats_s`).
 
 ---
 
