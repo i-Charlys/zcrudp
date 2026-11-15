@@ -617,6 +617,7 @@ int rudp_pacer_on_owd_sample(rudp_pacer_s *pacer, uint32_t owd_us,
   if (!pacer->owd_initialized) {
     pacer->base_owd_us = owd_us;
     pacer->epoch_min_owd_us = owd_us;
+    pacer->prev_epoch_min_owd_us = owd_us;
     pacer->smooth_owd_us = owd_us;
     pacer->prev_smooth_owd_us = owd_us;
     pacer->owd_initialized = 1U;
@@ -629,8 +630,12 @@ int rudp_pacer_on_owd_sample(rudp_pacer_s *pacer, uint32_t owd_us,
       pacer->epoch_min_owd_us = owd_us;
     }
     pacer->epoch_samples++;
-    if (pacer->epoch_samples >= 64U) {
-      pacer->base_owd_us = pacer->epoch_min_owd_us;
+    if (pacer->epoch_samples >= 32U) {
+      uint32_t min2 = (pacer->prev_epoch_min_owd_us < pacer->epoch_min_owd_us)
+                          ? pacer->prev_epoch_min_owd_us
+                          : pacer->epoch_min_owd_us;
+      pacer->base_owd_us = min2;
+      pacer->prev_epoch_min_owd_us = pacer->epoch_min_owd_us;
       pacer->epoch_min_owd_us = owd_us;
       pacer->epoch_samples = 0U;
     }

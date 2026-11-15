@@ -70,8 +70,8 @@ MUTANTS = [
     (
         "nextgen-sliding-fec-xor-broken",
         "src/nextgen.c",
-        "acc = nextgen_payload_xor(acc, rx->payloads[idx]);",
-        "acc = repair->xor_payload; /* broken xor */",
+        "rhs ^= gf256_mul_u32(rx->payloads[idx].raw, c);",
+        "rhs ^= 0U; /* broken gf256 */",
     ),
 ]
 

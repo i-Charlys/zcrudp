@@ -207,6 +207,7 @@ typedef struct {
   uint32_t inflight_bytes;
   uint32_t base_owd_us;
   uint32_t epoch_min_owd_us;
+  uint32_t prev_epoch_min_owd_us;
   uint32_t smooth_owd_us;
   uint32_t prev_smooth_owd_us;
   uint32_t target_queue_us;
