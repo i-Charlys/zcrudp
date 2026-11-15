@@ -359,6 +359,38 @@ static void test_sliding_fec_multi_loss_rlnc(void) {
   assert(p13.type == 7U && p13.flags == 2U && p13.value == 13U * 111U);
 }
 
+/* 8. Silent blackhole watchdog (portshift-style no-reply ECMP rotation & failover) */
+static void test_multipath_blackhole_watchdog(void) {
+  rudp_multipath_s mp;
+  uint8_t ids[RUDP_MAX_PATHS];
+  uint32_t ent[RUDP_MAX_PATHS];
+
+  assert(rudp_multipath_init(&mp, 0x9999U, RUDP_MP_PRIMARY_FAILOVER) == RUDP_OK);
+  assert(rudp_multipath_add_path(&mp, 0U, 10U, 100U) == RUDP_OK);
+  assert(rudp_multipath_add_path(&mp, 1U, 10U, 200U) == RUDP_OK);
+  assert(rudp_multipath_check_blackhole(NULL, 1000U, 4U, 3000U) == RUDP_ERR_INVALID_ARG);
+  assert(rudp_multipath_check_blackhole(&mp, 1000U, 0U, 3000U) == RUDP_ERR_INVALID_ARG);
+
+  uint32_t orig_ent = 0U;
+  for (int i = 0; i < 4; ++i) {
+    assert(rudp_multipath_select_paths(&mp, 0U, 128U, ids, ent) == 1);
+    assert(ids[0] == 0U);
+    orig_ent = ent[0];
+  }
+  /* First check at t=10000 arms silence baseline (0 false positive!) */
+  assert(rudp_multipath_check_blackhole(&mp, 10000U, 4U, 3000U) == 0);
+  assert(mp.paths[0].degraded == 0U);
+  /* Before 3000 ms elapsed: still healthy */
+  assert(rudp_multipath_check_blackhole(&mp, 12500U, 4U, 3000U) == 0);
+  assert(mp.paths[0].degraded == 0U);
+  /* At 3000 ms silence with >= 4 unacked packets: rotates flow_hint & fails over to path 1 */
+  assert(rudp_multipath_check_blackhole(&mp, 13000U, 4U, 3000U) == 1);
+  assert(mp.paths[0].degraded == 1U && mp.paths[0].flow_hint == 101U);
+  assert(rudp_calc_entropy(0x9999U, 0U, mp.paths[0].flow_hint) != orig_ent);
+  assert(rudp_multipath_select_paths(&mp, 0U, 128U, ids, ent) == 1);
+  assert(ids[0] == 1U);
+}
+
 int main(void) {
   test_page_pool_and_packet_plan();
   test_shared_metadata_pool();
@@ -367,6 +399,7 @@ int main(void) {
   test_multipath_scheduler();
   test_owd_pacer_pudica_prague();
   test_sliding_fec_multi_loss_rlnc();
+  test_multipath_blackhole_watchdog();
   printf("ALL PHASE 7 NEXTGEN TESTS PASSED!\n");
   return 0;
 }

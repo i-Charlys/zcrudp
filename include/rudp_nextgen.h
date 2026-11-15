@@ -298,10 +298,12 @@ typedef struct {
   uint32_t weight;
   int32_t current_weight;
   uint32_t tx_bytes;
+  uint32_t tx_since_feedback;
   uint32_t last_feedback_ms;
   uint16_t flow_hint;
   uint8_t active;
   uint8_t degraded;
+  uint8_t feedback_seen;
 } rudp_path_state_s;
 
 typedef struct {
@@ -322,6 +324,10 @@ RUDP_EXPORT int rudp_multipath_on_feedback(rudp_multipath_s *mp, uint8_t path_id
 RUDP_EXPORT int rudp_multipath_select_paths(
     rudp_multipath_s *mp, uint8_t channel_id, uint32_t packet_bytes,
     uint8_t out_path_ids[RUDP_MAX_PATHS], uint32_t out_entropy[RUDP_MAX_PATHS]);
+RUDP_EXPORT int rudp_multipath_check_blackhole(rudp_multipath_s *mp,
+                                               uint32_t now_ms,
+                                               uint32_t min_tx_packets,
+                                               uint32_t no_reply_ms);
 
 #ifdef __cplusplus
 }

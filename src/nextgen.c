@@ -1185,6 +1185,8 @@ int rudp_multipath_on_feedback(rudp_multipath_s *mp, uint8_t path_id, uint32_t r
   uint32_t ls = lost ? 1000U : 0U;
   p->loss_permille = (p->loss_permille * 7U + ls) / 8U;
   p->last_feedback_ms = now_ms;
+  p->tx_since_feedback = 0U;
+  p->feedback_seen = 1U;
   p->degraded = (p->loss_permille >= 200U) ? 1U : 0U;
 
   if (mp->mode == RUDP_MP_PRIMARY_FAILOVER &&
@@ -1213,6 +1215,7 @@ int rudp_multipath_select_paths(rudp_multipath_s *mp, uint8_t channel_id,
         out_entropy[count] =
             rudp_calc_entropy(mp->session_seed, channel_id, mp->paths[i].flow_hint);
         mp->paths[i].tx_bytes += packet_bytes;
+        mp->paths[i].tx_since_feedback++;
         count++;
       }
     }
@@ -1223,6 +1226,7 @@ int rudp_multipath_select_paths(rudp_multipath_s *mp, uint8_t channel_id,
         out_entropy[0] =
             rudp_calc_entropy(mp->session_seed, channel_id, mp->paths[fb].flow_hint);
         mp->paths[fb].tx_bytes += packet_bytes;
+        mp->paths[fb].tx_since_feedback++;
         count = 1;
       }
     }
@@ -1263,6 +1267,7 @@ int rudp_multipath_select_paths(rudp_multipath_s *mp, uint8_t channel_id,
       out_entropy[0] =
           rudp_calc_entropy(mp->session_seed, channel_id, mp->paths[best].flow_hint);
       mp->paths[best].tx_bytes += packet_bytes;
+      mp->paths[best].tx_since_feedback++;
       return 1;
     }
   }
@@ -1283,5 +1288,42 @@ int rudp_multipath_select_paths(rudp_multipath_s *mp, uint8_t channel_id,
   out_entropy[0] =
       rudp_calc_entropy(mp->session_seed, channel_id, mp->paths[chosen].flow_hint);
   mp->paths[chosen].tx_bytes += packet_bytes;
+  mp->paths[chosen].tx_since_feedback++;
   return 1;
+}
+
+int rudp_multipath_check_blackhole(rudp_multipath_s *mp, uint32_t now_ms,
+                                   uint32_t min_tx_packets,
+                                   uint32_t no_reply_ms) {
+  if (!mp || min_tx_packets == 0U || no_reply_ms == 0U) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  int shifted = 0;
+  for (uint8_t i = 0U; i < RUDP_MAX_PATHS; ++i) {
+    rudp_path_state_s *p = &mp->paths[i];
+    if (!p->active || p->degraded || p->tx_since_feedback == 0U) {
+      continue;
+    }
+    if (!p->feedback_seen) {
+      p->last_feedback_ms = now_ms;
+      p->feedback_seen = 1U;
+      continue;
+    }
+    if (p->tx_since_feedback >= min_tx_packets &&
+        (uint32_t)(now_ms - p->last_feedback_ms) >= no_reply_ms) {
+      p->flow_hint++;
+      p->degraded = 1U;
+      p->tx_since_feedback = 0U;
+      p->last_feedback_ms = now_ms;
+      shifted++;
+    }
+  }
+  if (shifted > 0 && mp->mode == RUDP_MP_PRIMARY_FAILOVER &&
+      (!mp->paths[mp->primary_path].active || mp->paths[mp->primary_path].degraded)) {
+    uint8_t better = multipath_best_healthy(mp, false);
+    if (better < RUDP_MAX_PATHS) {
+      mp->primary_path = better;
+    }
+  }
+  return shifted;
 }
