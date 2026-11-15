@@ -215,6 +215,7 @@ typedef struct {
   uint64_t last_reduce_us;
   uint8_t owd_initialized;
   uint8_t epoch_samples;
+  uint8_t has_reduced;
 } rudp_pacer_s;
 
 RUDP_EXPORT int rudp_pacer_init(rudp_pacer_s *pacer,

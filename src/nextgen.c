@@ -649,8 +649,10 @@ int rudp_pacer_on_owd_sample(rudp_pacer_s *pacer, uint32_t owd_us,
     rtt_guard_us = 10000ULL;
   }
   bool time_advancing = (pacer->last_refill_us > pacer->last_reduce_us);
-  bool can_reduce = (ce_marked != 0U) || !time_advancing ||
-                    ((pacer->last_refill_us - pacer->last_reduce_us) >= rtt_guard_us);
+  bool rtt_guarded =
+      pacer->has_reduced && time_advancing &&
+      ((pacer->last_refill_us - pacer->last_reduce_us) < rtt_guard_us);
+  bool can_reduce = (ce_marked != 0U) || !rtt_guarded;
   bool heavy_cong = (ce_marked != 0U) || (qdelay > pacer->target_queue_us);
   bool early_grad =
       (qdelay > ((pacer->target_queue_us * 3U) / 4U)) && (grad_us > 500);
@@ -679,6 +681,7 @@ int rudp_pacer_on_owd_sample(rudp_pacer_s *pacer, uint32_t owd_us,
       }
       if (ce_marked == 0U) {
         pacer->last_reduce_us = pacer->last_refill_us;
+        pacer->has_reduced = 1U;
       }
     }
   } else if (qdelay <= (pacer->target_queue_us / 2U) && grad_us <= 250) {
