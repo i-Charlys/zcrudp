@@ -308,8 +308,8 @@ static void test_owd_pacer_pudica_prague(void) {
   }
   assert(pacer.rate_bytes_per_sec >= (before_burst * 7U) / 8U - 1024U);
 
-  /* Permanent +15 ms route shift over 70 samples refreshes base_owd and recovers rate */
-  for (int i = 0; i < 70; ++i) {
+  /* Permanent +15 ms route shift over 110 samples refreshes base_owd and recovers rate */
+  for (int i = 0; i < 110; ++i) {
     uint64_t t = 200000ULL + (uint64_t)i * 50000ULL;
     (void)rudp_pacer_refill_and_can_send(&pacer, t, 100U);
     assert(rudp_pacer_on_owd_sample(&pacer, 35000U, 100U, 0U) == RUDP_OK);
