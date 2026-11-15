@@ -254,6 +254,109 @@ static void test_multipath_scheduler(void) {
   assert(rudp_multipath_add_path(&mp, 1U, 1U, 22U) == RUDP_OK);
   int cnt = rudp_multipath_select_paths(&mp, 0U, 64U, ids, ent);
   assert(cnt == 2 && ids[0] == 0U && ids[1] == 1U && ent[0] != ent[1]);
+
+  /* ECF Spray mode: symmetric paths keep 3:1 WRR; asymmetric paths gate slow path */
+  assert(rudp_multipath_init(&mp, 0x5555U, RUDP_MP_ECF_SPRAY) == RUDP_OK);
+  assert(rudp_multipath_add_path(&mp, 0U, 3U, 1U) == RUDP_OK);
+  assert(rudp_multipath_add_path(&mp, 1U, 1U, 2U) == RUDP_OK);
+  c0 = 0;
+  c1 = 0;
+  for (int i = 0; i < 40; ++i) {
+    assert(rudp_multipath_select_paths(&mp, 0U, 100U, ids, ent) == 1);
+    if (ids[0] == 0U) {
+      c0++;
+    } else {
+      c1++;
+    }
+  }
+  assert(c0 == 30 && c1 == 10);
+
+  /* Push path 1 SRTT to ~90 ms while path 0 stays ~16 ms -> ECF gates path 1 */
+  for (int i = 0; i < 32; ++i) {
+    assert(rudp_multipath_on_feedback(&mp, 0U, 16U, false, (uint32_t)(i * 10)) == RUDP_OK);
+    assert(rudp_multipath_on_feedback(&mp, 1U, 95U, false, (uint32_t)(i * 10)) == RUDP_OK);
+  }
+  c0 = 0;
+  c1 = 0;
+  for (int i = 0; i < 20; ++i) {
+    assert(rudp_multipath_select_paths(&mp, 0U, 100U, ids, ent) == 1);
+    if (ids[0] == 0U) {
+      c0++;
+    } else {
+      c1++;
+    }
+  }
+  assert(c0 == 20 && c1 == 0);
+}
+
+/* 6. Pudica / L4S Prague Pacer (route-shift min-filter & per-RTT backoff guard) */
+static void test_owd_pacer_pudica_prague(void) {
+  rudp_pacer_s pacer;
+  assert(rudp_pacer_init(&pacer, 500000U, 20000U, 2000000U, 5000U, 1000ULL) ==
+         RUDP_OK);
+  for (int i = 0; i < 10; ++i) {
+    assert(rudp_pacer_refill_and_can_send(&pacer, 1000ULL + (uint64_t)i * 10000ULL, 100U) ||
+           true);
+    assert(rudp_pacer_on_owd_sample(&pacer, 20000U, 100U, 0U) == RUDP_OK);
+  }
+  /* 8 ACKs within 14 ms (< 2 * base_owd = 40 ms) should trigger at most 1 cut */
+  uint32_t before_burst = pacer.rate_bytes_per_sec;
+  for (int i = 0; i < 8; ++i) {
+    uint64_t t = 110000ULL + (uint64_t)i * 2000ULL;
+    (void)rudp_pacer_refill_and_can_send(&pacer, t, 100U);
+    assert(rudp_pacer_on_owd_sample(&pacer, 28000U, 100U, 0U) == RUDP_OK);
+  }
+  assert(pacer.rate_bytes_per_sec >= (before_burst * 7U) / 8U - 1024U);
+
+  /* Permanent +15 ms route shift over 70 samples refreshes base_owd and recovers rate */
+  for (int i = 0; i < 70; ++i) {
+    uint64_t t = 200000ULL + (uint64_t)i * 50000ULL;
+    (void)rudp_pacer_refill_and_can_send(&pacer, t, 100U);
+    assert(rudp_pacer_on_owd_sample(&pacer, 35000U, 100U, 0U) == RUDP_OK);
+  }
+  assert(pacer.base_owd_us >= 34000U);
+  assert(pacer.rate_bytes_per_sec > 200000U);
+}
+
+/* 7. Cauchy GF(2^8) Sliding FEC recovers 2 consecutive burst drops */
+static void test_sliding_fec_multi_loss_rlnc(void) {
+  rudp_sliding_fec_s tx;
+  rudp_sliding_fec_rx_s rx;
+  assert(rudp_sliding_fec_init(&tx, 8U) == RUDP_OK);
+  assert(rudp_sliding_fec_rx_init(&rx, 8U) == RUDP_OK);
+  for (int i = 0; i < 2; ++i) {
+    assert(rudp_sliding_fec_update_loss(&tx, true) == RUDP_OK);
+  }
+  tx.parity_interval = 4U;
+
+  rudp_sliding_fec_repair_s repairs[4];
+  int rcnt = 0;
+  for (uint16_t s = 10U; s <= 17U; ++s) {
+    tfv_packet_u p = {.type = 7U, .flags = 2U, .value = (uint16_t)(s * 111U)};
+    /* Drop consecutive burst: seq 12 and seq 13 */
+    if (s != 12U && s != 13U) {
+      assert(rudp_sliding_fec_rx_source(&rx, s, p) == RUDP_OK);
+    }
+    rudp_sliding_fec_repair_s rep = {0};
+    int r = rudp_sliding_fec_encode(&tx, s, p, &rep);
+    assert(r >= 0);
+    if (r == 1) {
+      repairs[rcnt++] = rep;
+    }
+  }
+  assert(rcnt == 2);
+  uint16_t rec_seq = 0U;
+  tfv_packet_u rec_pkt = {0};
+  /* First repair sees 2 unknowns -> buffers (0 recovered yet) */
+  assert(rudp_sliding_fec_rx_repair(&rx, &repairs[0], &rec_seq, &rec_pkt) == 0);
+  /* Second repair completes Cauchy GF(2^8) rank -> recovers BOTH seq 12 & seq 13 */
+  assert(rudp_sliding_fec_rx_repair(&rx, &repairs[1], &rec_seq, &rec_pkt) == 2);
+
+  tfv_packet_u p12 = {0}, p13 = {0};
+  assert(rudp_sliding_fec_rx_get(&rx, 12U, &p12));
+  assert(rudp_sliding_fec_rx_get(&rx, 13U, &p13));
+  assert(p12.type == 7U && p12.flags == 2U && p12.value == 12U * 111U);
+  assert(p13.type == 7U && p13.flags == 2U && p13.value == 13U * 111U);
 }
 
 int main(void) {
@@ -262,6 +365,8 @@ int main(void) {
   test_owd_pacer();
   test_sliding_window_fec();
   test_multipath_scheduler();
+  test_owd_pacer_pudica_prague();
+  test_sliding_fec_multi_loss_rlnc();
   printf("ALL PHASE 7 NEXTGEN TESTS PASSED!\n");
   return 0;
 }

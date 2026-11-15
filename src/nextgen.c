@@ -5,12 +5,47 @@
 #define RUDP_NEXTGEN_MTU_BYTES                                                         \
   (RUDP_DEFAULT_MTU + RUDP_WIRE_DATAGRAM_HEADER_SIZE)
 
-static inline tfv_packet_u nextgen_payload_xor(tfv_packet_u a, tfv_packet_u b) {
-  tfv_packet_u r;
-  r.type = (uint8_t)(a.type ^ b.type);
-  r.flags = (uint8_t)(a.flags ^ b.flags);
-  r.value = (uint16_t)(a.value ^ b.value);
-  return r;
+static uint8_t gf256_mul(uint8_t a, uint8_t b) {
+  uint8_t p = 0U;
+  for (unsigned i = 0U; i < 8U; ++i) {
+    uint8_t mask = (uint8_t)(-(int8_t)(b & 1U));
+    p ^= (uint8_t)(a & mask);
+    uint8_t hi = (uint8_t)(a & 0x80U);
+    a = (uint8_t)(a << 1U);
+    if (hi != 0U) {
+      a ^= 0x1DU;
+    }
+    b = (uint8_t)(b >> 1U);
+  }
+  return p;
+}
+
+static uint8_t gf256_inv(uint8_t a) {
+  if (a <= 1U) {
+    return a;
+  }
+  uint8_t acc = 1U;
+  uint8_t p = a;
+  for (unsigned bit = 1U; bit < 8U; ++bit) {
+    p = gf256_mul(p, p);
+    acc = gf256_mul(acc, p);
+  }
+  return acc;
+}
+
+static inline uint32_t gf256_mul_u32(uint32_t v, uint8_t c) {
+  uint32_t out = 0U;
+  for (unsigned b = 0U; b < 4U; ++b) {
+    uint8_t lane = (uint8_t)((v >> (b * 8U)) & 0xFFU);
+    out |= (uint32_t)gf256_mul(lane, c) << (b * 8U);
+  }
+  return out;
+}
+
+static inline uint8_t cauchy_coeff(uint16_t repair_seq, uint16_t src_seq) {
+  uint8_t x = (uint8_t)(repair_seq & 0x7FU);
+  uint8_t y = (uint8_t)(0x80U | (src_seq & 0x7FU));
+  return gf256_inv((uint8_t)(x ^ y));
 }
 
 /* =========================================================================
@@ -581,12 +616,25 @@ int rudp_pacer_on_owd_sample(rudp_pacer_s *pacer, uint32_t owd_us,
 
   if (!pacer->owd_initialized) {
     pacer->base_owd_us = owd_us;
+    pacer->epoch_min_owd_us = owd_us;
     pacer->smooth_owd_us = owd_us;
+    pacer->prev_smooth_owd_us = owd_us;
     pacer->owd_initialized = 1U;
+    pacer->epoch_samples = 0U;
   } else {
     if (owd_us < pacer->base_owd_us) {
       pacer->base_owd_us = owd_us;
     }
+    if (owd_us < pacer->epoch_min_owd_us) {
+      pacer->epoch_min_owd_us = owd_us;
+    }
+    pacer->epoch_samples++;
+    if (pacer->epoch_samples >= 64U) {
+      pacer->base_owd_us = pacer->epoch_min_owd_us;
+      pacer->epoch_min_owd_us = owd_us;
+      pacer->epoch_samples = 0U;
+    }
+    pacer->prev_smooth_owd_us = pacer->smooth_owd_us;
     pacer->smooth_owd_us =
         (uint32_t)(((uint64_t)pacer->smooth_owd_us * 7ULL + owd_us) / 8ULL);
   }
@@ -594,27 +642,46 @@ int rudp_pacer_on_owd_sample(rudp_pacer_s *pacer, uint32_t owd_us,
   uint32_t qdelay = (pacer->smooth_owd_us > pacer->base_owd_us)
                         ? (pacer->smooth_owd_us - pacer->base_owd_us)
                         : 0U;
-  if (ce_marked || qdelay > pacer->target_queue_us) {
-    uint32_t drop = pacer->rate_bytes_per_sec / 8U;
-    if (drop < 1024U) {
-      drop = 1024U;
-    }
-    uint32_t next = (pacer->rate_bytes_per_sec > drop)
-                        ? (pacer->rate_bytes_per_sec - drop)
-                        : pacer->min_rate_bytes_per_sec;
-    if (next < pacer->min_rate_bytes_per_sec) {
-      next = pacer->min_rate_bytes_per_sec;
-    }
-    pacer->rate_bytes_per_sec = next;
+  int32_t grad_us =
+      (int32_t)pacer->smooth_owd_us - (int32_t)pacer->prev_smooth_owd_us;
+  uint64_t rtt_guard_us = (uint64_t)pacer->base_owd_us * 2ULL;
+  if (rtt_guard_us < 10000ULL) {
+    rtt_guard_us = 10000ULL;
+  }
+  bool time_advancing = (pacer->last_refill_us > pacer->last_reduce_us);
+  bool can_reduce = (ce_marked != 0U) || !time_advancing ||
+                    ((pacer->last_refill_us - pacer->last_reduce_us) >= rtt_guard_us);
+  bool heavy_cong = (ce_marked != 0U) || (qdelay > pacer->target_queue_us);
+  bool early_grad =
+      (qdelay > ((pacer->target_queue_us * 3U) / 4U)) && (grad_us > 500);
 
-    uint32_t cwnd_floor = (uint32_t)(2U * RUDP_NEXTGEN_MTU_BYTES);
-    uint32_t c_drop = pacer->cwnd_bytes / 8U;
-    pacer->cwnd_bytes =
-        (pacer->cwnd_bytes > c_drop) ? (pacer->cwnd_bytes - c_drop) : cwnd_floor;
-    if (pacer->cwnd_bytes < cwnd_floor) {
-      pacer->cwnd_bytes = cwnd_floor;
+  if (heavy_cong || early_grad) {
+    if (can_reduce) {
+      uint32_t div = heavy_cong ? 8U : 16U;
+      uint32_t drop = pacer->rate_bytes_per_sec / div;
+      if (drop < 1024U) {
+        drop = 1024U;
+      }
+      uint32_t next = (pacer->rate_bytes_per_sec > drop)
+                          ? (pacer->rate_bytes_per_sec - drop)
+                          : pacer->min_rate_bytes_per_sec;
+      if (next < pacer->min_rate_bytes_per_sec) {
+        next = pacer->min_rate_bytes_per_sec;
+      }
+      pacer->rate_bytes_per_sec = next;
+
+      uint32_t cwnd_floor = (uint32_t)(2U * RUDP_NEXTGEN_MTU_BYTES);
+      uint32_t c_drop = pacer->cwnd_bytes / div;
+      pacer->cwnd_bytes =
+          (pacer->cwnd_bytes > c_drop) ? (pacer->cwnd_bytes - c_drop) : cwnd_floor;
+      if (pacer->cwnd_bytes < cwnd_floor) {
+        pacer->cwnd_bytes = cwnd_floor;
+      }
+      if (ce_marked == 0U) {
+        pacer->last_reduce_us = pacer->last_refill_us;
+      }
     }
-  } else if (qdelay <= (pacer->target_queue_us / 2U)) {
+  } else if (qdelay <= (pacer->target_queue_us / 2U) && grad_us <= 250) {
     uint32_t gain = pacer->rate_bytes_per_sec / 16U;
     if (gain < 1024U) {
       gain = 1024U;
@@ -749,8 +816,7 @@ int rudp_sliding_fec_encode(rudp_sliding_fec_s *fec, uint16_t seq,
     return 0;
   }
 
-  /* Collect contiguous run ending at seq up to window_w */
-  tfv_packet_u acc = {.raw = 0U};
+  /* Collect contiguous run ending at seq up to window_w and encode via Cauchy GF(2^8) */
   uint8_t span = 0U;
   uint16_t base = seq;
   for (uint8_t back = 0U; back < fec->window_w; ++back) {
@@ -759,7 +825,6 @@ int rudp_sliding_fec_encode(rudp_sliding_fec_s *fec, uint16_t seq,
     if (!fec->present[idx] || fec->seqs[idx] != cand_seq) {
       break;
     }
-    acc = nextgen_payload_xor(acc, fec->payloads[idx]);
     base = cand_seq;
     span++;
   }
@@ -767,12 +832,19 @@ int rudp_sliding_fec_encode(rudp_sliding_fec_s *fec, uint16_t seq,
     *out_repair = (rudp_sliding_fec_repair_s){0};
     return 0;
   }
+  uint32_t acc_raw = 0U;
+  for (uint8_t k = 0U; k < span; ++k) {
+    uint16_t cand_seq = (uint16_t)(base + k);
+    size_t idx = (size_t)(cand_seq % RUDP_SLIDING_FEC_MAX_W);
+    uint8_t c = cauchy_coeff(seq, cand_seq);
+    acc_raw ^= gf256_mul_u32(fec->payloads[idx].raw, c);
+  }
   fec->since_last_repair = 0U;
   *out_repair = (rudp_sliding_fec_repair_s){
       .base_seq = base,
       .span = span,
       .valid = 1U,
-      .xor_payload = acc,
+      .xor_payload = {.raw = acc_raw},
   };
   return 1;
 }
@@ -799,6 +871,181 @@ int rudp_sliding_fec_rx_source(rudp_sliding_fec_rx_s *rx, uint16_t seq,
   return RUDP_OK;
 }
 
+static void fec_rx_store_recovered(rudp_sliding_fec_rx_s *rx, uint16_t seq,
+                                   uint32_t raw, int *recovered_total,
+                                   uint16_t *out_recovered_seq,
+                                   tfv_packet_u *out_recovered_payload) {
+  size_t mod = (size_t)(RUDP_SLIDING_FEC_MAX_W * 2U);
+  size_t idx = (size_t)(seq % mod);
+  if (rx->present[idx] && rx->seqs[idx] == seq) {
+    return;
+  }
+  tfv_packet_u pkt = {.raw = raw};
+  rx->seqs[idx] = seq;
+  rx->payloads[idx] = pkt;
+  rx->present[idx] = 1U;
+  if (*recovered_total == 0) {
+    if (out_recovered_seq) {
+      *out_recovered_seq = seq;
+    }
+    if (out_recovered_payload) {
+      *out_recovered_payload = pkt;
+    }
+  }
+  (*recovered_total)++;
+}
+
+static bool fec_rx_solve_pending(rudp_sliding_fec_rx_s *rx, int *recovered_total,
+                                 uint16_t *out_recovered_seq,
+                                 tfv_packet_u *out_recovered_payload) {
+  size_t mod = (size_t)(RUDP_SLIDING_FEC_MAX_W * 2U);
+  bool any_new = false;
+  bool progress = true;
+
+  while (progress) {
+    progress = false;
+    uint16_t col_seqs[16];
+    uint8_t num_cols = 0U;
+    uint8_t mat[RUDP_SLIDING_FEC_MAX_W][16];
+    uint32_t rhs_vec[RUDP_SLIDING_FEC_MAX_W];
+    uint8_t num_rows = 0U;
+    memset(mat, 0, sizeof(mat));
+
+    for (uint8_t e = 0U; e < RUDP_SLIDING_FEC_MAX_W; ++e) {
+      rudp_sliding_fec_eq_s *eq = &rx->pending_eqs[e];
+      if (!eq->valid) {
+        continue;
+      }
+      uint16_t repair_seq = (uint16_t)(eq->base_seq + eq->span - 1U);
+      uint32_t rhs = eq->rhs_raw;
+      uint8_t missing = 0U;
+      uint16_t miss_seq = 0U;
+      uint8_t miss_coeff = 0U;
+
+      for (uint8_t k = 0U; k < eq->span; ++k) {
+        uint16_t seq = (uint16_t)(eq->base_seq + k);
+        size_t idx = (size_t)(seq % mod);
+        uint8_t c = cauchy_coeff(repair_seq, seq);
+        if (rx->present[idx] && rx->seqs[idx] == seq) {
+          rhs ^= gf256_mul_u32(rx->payloads[idx].raw, c);
+        } else {
+          missing++;
+          miss_seq = seq;
+          miss_coeff = c;
+        }
+      }
+      if (missing == 0U) {
+        eq->valid = 0U;
+        continue;
+      }
+      if (missing == 1U) {
+        uint32_t rec_raw = gf256_mul_u32(rhs, gf256_inv(miss_coeff));
+        fec_rx_store_recovered(rx, miss_seq, rec_raw, recovered_total,
+                               out_recovered_seq, out_recovered_payload);
+        eq->valid = 0U;
+        any_new = true;
+        progress = true;
+        continue;
+      }
+      /* Add row to local GF(2^8) elimination matrix */
+      if (num_rows < RUDP_SLIDING_FEC_MAX_W) {
+        bool overflow_cols = false;
+        for (uint8_t k = 0U; k < eq->span; ++k) {
+          uint16_t seq = (uint16_t)(eq->base_seq + k);
+          size_t idx = (size_t)(seq % mod);
+          if (rx->present[idx] && rx->seqs[idx] == seq) {
+            continue;
+          }
+          uint8_t col_idx = num_cols;
+          for (uint8_t c = 0U; c < num_cols; ++c) {
+            if (col_seqs[c] == seq) {
+              col_idx = c;
+              break;
+            }
+          }
+          if (col_idx == num_cols) {
+            if (num_cols >= 16U) {
+              overflow_cols = true;
+              break;
+            }
+            col_seqs[num_cols++] = seq;
+          }
+          mat[num_rows][col_idx] = cauchy_coeff(repair_seq, seq);
+        }
+        if (!overflow_cols) {
+          rhs_vec[num_rows++] = rhs;
+        } else {
+          memset(mat[num_rows], 0, sizeof(mat[num_rows]));
+        }
+      }
+    }
+
+    if (progress || num_rows < 2U || num_cols == 0U) {
+      continue;
+    }
+
+    /* Bounded RREF Gaussian elimination over GF(2^8) */
+    uint8_t piv_row = 0U;
+    for (uint8_t c = 0U; c < num_cols && piv_row < num_rows; ++c) {
+      uint8_t sel = num_rows;
+      for (uint8_t r = piv_row; r < num_rows; ++r) {
+        if (mat[r][c] != 0U) {
+          sel = r;
+          break;
+        }
+      }
+      if (sel == num_rows) {
+        continue;
+      }
+      if (sel != piv_row) {
+        for (uint8_t j = 0U; j < num_cols; ++j) {
+          uint8_t tmp = mat[piv_row][j];
+          mat[piv_row][j] = mat[sel][j];
+          mat[sel][j] = tmp;
+        }
+        uint32_t tr = rhs_vec[piv_row];
+        rhs_vec[piv_row] = rhs_vec[sel];
+        rhs_vec[sel] = tr;
+      }
+      uint8_t inv_piv = gf256_inv(mat[piv_row][c]);
+      for (uint8_t j = 0U; j < num_cols; ++j) {
+        mat[piv_row][j] = gf256_mul(mat[piv_row][j], inv_piv);
+      }
+      rhs_vec[piv_row] = gf256_mul_u32(rhs_vec[piv_row], inv_piv);
+      for (uint8_t r = 0U; r < num_rows; ++r) {
+        if (r != piv_row && mat[r][c] != 0U) {
+          uint8_t factor = mat[r][c];
+          for (uint8_t j = 0U; j < num_cols; ++j) {
+            mat[r][j] ^= gf256_mul(factor, mat[piv_row][j]);
+          }
+          rhs_vec[r] ^= gf256_mul_u32(rhs_vec[piv_row], factor);
+        }
+      }
+      piv_row++;
+    }
+
+    for (uint8_t r = 0U; r < num_rows; ++r) {
+      uint8_t nz = 0U;
+      uint8_t nz_col = 0U;
+      for (uint8_t c = 0U; c < num_cols; ++c) {
+        if (mat[r][c] != 0U) {
+          nz++;
+          nz_col = c;
+        }
+      }
+      if (nz == 1U) {
+        uint8_t inv_c = gf256_inv(mat[r][nz_col]);
+        uint32_t rec_raw = gf256_mul_u32(rhs_vec[r], inv_c);
+        fec_rx_store_recovered(rx, col_seqs[nz_col], rec_raw, recovered_total,
+                               out_recovered_seq, out_recovered_payload);
+        any_new = true;
+        progress = true;
+      }
+    }
+  }
+  return any_new;
+}
+
 int rudp_sliding_fec_rx_repair(rudp_sliding_fec_rx_s *rx,
                                const rudp_sliding_fec_repair_s *repair,
                                uint16_t *out_recovered_seq,
@@ -808,37 +1055,65 @@ int rudp_sliding_fec_rx_repair(rudp_sliding_fec_rx_s *rx,
     return RUDP_ERR_INVALID_ARG;
   }
   size_t mod = (size_t)(RUDP_SLIDING_FEC_MAX_W * 2U);
+  uint16_t repair_seq = (uint16_t)(repair->base_seq + repair->span - 1U);
   uint8_t missing = 0U;
   uint16_t miss_seq = 0U;
-  tfv_packet_u acc = repair->xor_payload;
+  uint8_t miss_coeff = 0U;
+  uint32_t rhs = repair->xor_payload.raw;
 
   for (uint8_t k = 0U; k < repair->span; ++k) {
     uint16_t seq = (uint16_t)(repair->base_seq + k);
     size_t idx = (size_t)(seq % mod);
+    uint8_t c = cauchy_coeff(repair_seq, seq);
     if (rx->present[idx] && rx->seqs[idx] == seq) {
-      acc = nextgen_payload_xor(acc, rx->payloads[idx]);
+      rhs ^= gf256_mul_u32(rx->payloads[idx].raw, c);
     } else {
       missing++;
       miss_seq = seq;
-      if (missing > 1U) {
-        return 0;
-      }
+      miss_coeff = c;
     }
   }
   if (missing == 0U) {
     return 0;
   }
-  size_t miss_idx = (size_t)(miss_seq % mod);
-  rx->seqs[miss_idx] = miss_seq;
-  rx->payloads[miss_idx] = acc;
-  rx->present[miss_idx] = 1U;
-  if (out_recovered_seq) {
-    *out_recovered_seq = miss_seq;
+
+  int recovered_total = 0;
+  if (missing == 1U) {
+    uint32_t rec_raw = gf256_mul_u32(rhs, gf256_inv(miss_coeff));
+    fec_rx_store_recovered(rx, miss_seq, rec_raw, &recovered_total,
+                           out_recovered_seq, out_recovered_payload);
+    (void)fec_rx_solve_pending(rx, &recovered_total, out_recovered_seq,
+                               out_recovered_payload);
+    return recovered_total;
   }
-  if (out_recovered_payload) {
-    *out_recovered_payload = acc;
+
+  /* Buffer multi-unknown equation and attempt joint GF(2^8) solve */
+  rx->pending_eqs[rx->eq_cursor] = (rudp_sliding_fec_eq_s){
+      .base_seq = repair->base_seq,
+      .span = repair->span,
+      .valid = 1U,
+      .rhs_raw = repair->xor_payload.raw,
+  };
+  rx->eq_cursor = (uint8_t)((rx->eq_cursor + 1U) % RUDP_SLIDING_FEC_MAX_W);
+  (void)fec_rx_solve_pending(rx, &recovered_total, out_recovered_seq,
+                             out_recovered_payload);
+  return recovered_total;
+}
+
+bool rudp_sliding_fec_rx_get(const rudp_sliding_fec_rx_s *rx, uint16_t seq,
+                             tfv_packet_u *out_payload) {
+  if (!rx || rx->window_w < 2U) {
+    return false;
   }
-  return 1;
+  size_t mod = (size_t)(RUDP_SLIDING_FEC_MAX_W * 2U);
+  size_t idx = (size_t)(seq % mod);
+  if (!rx->present[idx] || rx->seqs[idx] != seq) {
+    return false;
+  }
+  if (out_payload) {
+    *out_payload = rx->payloads[idx];
+  }
+  return true;
 }
 
 /* =========================================================================
@@ -846,7 +1121,7 @@ int rudp_sliding_fec_rx_repair(rudp_sliding_fec_rx_s *rx,
  * ========================================================================= */
 
 int rudp_multipath_init(rudp_multipath_s *mp, uint16_t session_seed, uint8_t mode) {
-  if (!mp || mode > RUDP_MP_REDUNDANT) {
+  if (!mp || mode > RUDP_MP_ECF_SPRAY) {
     return RUDP_ERR_INVALID_ARG;
   }
   memset(mp, 0, sizeof(*mp));
@@ -946,7 +1221,7 @@ int rudp_multipath_select_paths(rudp_multipath_s *mp, uint8_t channel_id,
     return count;
   }
 
-  if (mp->mode == RUDP_MP_WEIGHTED_SPRAY) {
+  if (mp->mode == RUDP_MP_WEIGHTED_SPRAY || mp->mode == RUDP_MP_ECF_SPRAY) {
     int32_t total_w = 0;
     uint8_t best = RUDP_MAX_PATHS;
     for (uint8_t i = 0U; i < RUDP_MAX_PATHS; ++i) {
@@ -962,7 +1237,20 @@ int rudp_multipath_select_paths(rudp_multipath_s *mp, uint8_t channel_id,
       }
     }
     if (best < RUDP_MAX_PATHS) {
-      mp->paths[best].current_weight -= total_w;
+      if (mp->mode == RUDP_MP_ECF_SPRAY) {
+        uint8_t fast = multipath_best_healthy(mp, false);
+        if (fast < RUDP_MAX_PATHS && fast != best &&
+            (mp->paths[best].srtt_ms / 2U) >
+                ((mp->paths[fast].srtt_ms / 2U) + (mp->paths[fast].srtt_ms / 4U))) {
+          /* Undo credit deduction on gated slow path; route via fastest path */
+          mp->paths[best].current_weight -= total_w;
+          best = fast;
+        } else {
+          mp->paths[best].current_weight -= total_w;
+        }
+      } else {
+        mp->paths[best].current_weight -= total_w;
+      }
       out_path_ids[0] = best;
       out_entropy[0] =
           rudp_calc_entropy(mp->session_seed, channel_id, mp->paths[best].flow_hint);

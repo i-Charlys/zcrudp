@@ -50,6 +50,7 @@ extern "C" {
 #define RUDP_MP_PRIMARY_FAILOVER 0U
 #define RUDP_MP_WEIGHTED_SPRAY 1U
 #define RUDP_MP_REDUNDANT 2U
+#define RUDP_MP_ECF_SPRAY 3U
 
 /* =========================================================================
  * 1. Registered Page Pool & Portable Packet Plan (12-byte extent ABI)
@@ -205,11 +206,15 @@ typedef struct {
   uint32_t cwnd_bytes;
   uint32_t inflight_bytes;
   uint32_t base_owd_us;
+  uint32_t epoch_min_owd_us;
   uint32_t smooth_owd_us;
+  uint32_t prev_smooth_owd_us;
   uint32_t target_queue_us;
   uint64_t token_fp; /**< Q16 bytes */
   uint64_t last_refill_us;
+  uint64_t last_reduce_us;
   uint8_t owd_initialized;
+  uint8_t epoch_samples;
 } rudp_pacer_s;
 
 RUDP_EXPORT int rudp_pacer_init(rudp_pacer_s *pacer,
@@ -249,10 +254,19 @@ typedef struct {
 } rudp_sliding_fec_s;
 
 typedef struct {
+  uint16_t base_seq;
+  uint8_t span;
+  uint8_t valid;
+  uint32_t rhs_raw;
+} rudp_sliding_fec_eq_s;
+
+typedef struct {
   tfv_packet_u payloads[RUDP_SLIDING_FEC_MAX_W * 2U];
   uint16_t seqs[RUDP_SLIDING_FEC_MAX_W * 2U];
   uint8_t present[RUDP_SLIDING_FEC_MAX_W * 2U];
   uint8_t window_w;
+  uint8_t eq_cursor;
+  rudp_sliding_fec_eq_s pending_eqs[RUDP_SLIDING_FEC_MAX_W];
 } rudp_sliding_fec_rx_s;
 
 RUDP_EXPORT int rudp_sliding_fec_init(rudp_sliding_fec_s *fec, uint8_t window_w);
@@ -268,6 +282,9 @@ RUDP_EXPORT int rudp_sliding_fec_rx_repair(rudp_sliding_fec_rx_s *rx,
                                            const rudp_sliding_fec_repair_s *repair,
                                            uint16_t *out_recovered_seq,
                                            tfv_packet_u *out_recovered_payload);
+RUDP_EXPORT bool rudp_sliding_fec_rx_get(const rudp_sliding_fec_rx_s *rx,
+                                         uint16_t seq,
+                                         tfv_packet_u *out_payload);
 
 /* =========================================================================
  * 5. Multipath Transport Scheduler (Failover, Spray, Redundant)
