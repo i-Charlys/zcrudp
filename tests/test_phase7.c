@@ -561,10 +561,13 @@ static void test_nextgen_hardening(void) {
   assert(rudp_pacer_init(&pacer, 1000000U, 20000U, 2000000U, 5000U, 1000ULL) ==
          RUDP_OK);
   assert(rudp_pacer_on_owd_sample(&pacer, 10000U, 1000U, 0U) == RUDP_OK);
-  assert(rudp_pacer_on_owd_sample(&pacer, 25000U, 1000U, 0U) == RUDP_OK);
+  for (int i = 0; i < 16 && !pacer.has_reduced; ++i) {
+    assert(rudp_pacer_on_owd_sample(&pacer, 30000U, 1000U, 0U) == RUDP_OK);
+  }
+  assert(pacer.has_reduced == 1U);
   uint32_t after_first_reduce = pacer.rate_bytes_per_sec;
   for (int i = 0; i < 5; ++i) {
-    assert(rudp_pacer_on_owd_sample(&pacer, 25000U, 1000U, 0U) == RUDP_OK);
+    assert(rudp_pacer_on_owd_sample(&pacer, 30000U, 1000U, 0U) == RUDP_OK);
   }
   assert(pacer.rate_bytes_per_sec == after_first_reduce);
 
