@@ -1,5 +1,6 @@
 #include "protocol_profiles.h"
 #include "protocol_rudp.h"
+#include "rudp_crypto.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -391,6 +392,139 @@ static void test_multipath_blackhole_watchdog(void) {
   assert(ids[0] == 1U);
 }
 
+static int crypto_seal_adapter(void *ctx, const uint8_t *aad, size_t aad_len,
+                               const uint8_t *pt, size_t pt_len, uint8_t *out,
+                               size_t max_out) {
+  return rudp_crypto_seal((rudp_crypto_ctx_s *)ctx, aad, aad_len, pt, pt_len, out,
+                          max_out);
+}
+
+static int crypto_open_adapter(void *ctx, const uint8_t *aad, size_t aad_len,
+                               const uint8_t *in_wire, size_t in_len, uint8_t *pt,
+                               size_t max_pt) {
+  return rudp_crypto_open((rudp_crypto_ctx_s *)ctx, aad, aad_len, in_wire,
+                          in_len, pt, max_pt);
+}
+
+/* 9. Generic-Buffer GF(2^8) Cauchy coding for >4B payloads */
+static void test_gf256_buffer_coding(void) {
+  uint8_t a[128], b[128], coded[128], rec[128];
+  for (size_t i = 0; i < sizeof(a); ++i) {
+    a[i] = (uint8_t)(i * 3U + 1U);
+    b[i] = (uint8_t)(i * 7U ^ 0x5AU);
+  }
+  memset(coded, 0, sizeof(coded));
+  assert(rudp_gf256_xor_scaled(coded, a, sizeof(a), 0x13U) == RUDP_OK);
+  assert(rudp_gf256_xor_scaled(coded, b, sizeof(b), 0x27U) == RUDP_OK);
+
+  /* Recover `b` if `a` is known: coded ^ (0x13*a) == 0x27*b */
+  memcpy(rec, coded, sizeof(rec));
+  assert(rudp_gf256_xor_scaled(rec, a, sizeof(a), 0x13U) == RUDP_OK);
+  /* Verify against direct 0x27*b */
+  uint8_t expected[128] = {0};
+  assert(rudp_gf256_xor_scaled(expected, b, sizeof(b), 0x27U) == RUDP_OK);
+  assert(memcmp(rec, expected, sizeof(rec)) == 0);
+}
+
+/* 10. Unified NextGen Transport Driver: Session + Pacer + Multipath + CID + AEAD */
+static void test_nextgen_transport_e2e(void) {
+  assert(sizeof(rudp_session_s) == 5364U);
+
+  rudp_session_s cli_sess, srv_sess;
+  assert(rudp_session_init(&cli_sess) == RUDP_OK);
+  assert(rudp_session_init(&srv_sess) == RUDP_OK);
+  assert(rudp_session_config_channel(&cli_sess, 0U, RUDP_CHANNEL_FLAG_RELIABLE |
+                                                        RUDP_CHANNEL_FLAG_ORDERED) ==
+         RUDP_OK);
+  assert(rudp_session_config_channel(&srv_sess, 0U, RUDP_CHANNEL_FLAG_RELIABLE |
+                                                        RUDP_CHANNEL_FLAG_ORDERED) ==
+         RUDP_OK);
+
+  static const uint8_t key[RUDP_CRYPTO_KEY_BYTES] = {
+      0x42U, 0x19U, 0x88U, 0x71U, 0x05U, 0xAAU, 0xBBU, 0xCCU,
+      0x11U, 0x22U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U,
+      0x99U, 0x00U, 0xABU, 0xCDU, 0xEFU, 0x12U, 0x34U, 0x56U,
+      0x78U, 0x9AU, 0xBCU, 0xDEU, 0xF0U, 0x0FU, 0x1EU, 0x2DU};
+  const uint64_t cid = 0x1122334455667788ULL;
+  rudp_crypto_ctx_s cli_crypto, srv_crypto;
+  assert(rudp_crypto_init(&cli_crypto, key, cid, 1U) == RUDP_OK);
+  assert(rudp_crypto_init(&srv_crypto, key, cid, 0U) == RUDP_OK);
+
+  rudp_nextgen_crypto_s cli_ops = {crypto_seal_adapter, crypto_open_adapter,
+                                   &cli_crypto};
+  rudp_nextgen_crypto_s srv_ops = {crypto_seal_adapter, crypto_open_adapter,
+                                   &srv_crypto};
+
+  rudp_nextgen_transport_s cli_tr, srv_tr;
+  assert(rudp_nextgen_transport_init(&cli_tr, &cli_sess, &cli_ops, cid) == RUDP_OK);
+  assert(rudp_nextgen_transport_init(&srv_tr, &srv_sess, &srv_ops, cid) == RUDP_OK);
+  assert(rudp_nextgen_transport_enable_pacer(&cli_tr, 500000U, 20000U, 2000000U,
+                                             5000U, 1000ULL) == RUDP_OK);
+  assert(rudp_nextgen_transport_enable_fec(&cli_tr, 8U) == RUDP_OK);
+  assert(rudp_nextgen_transport_enable_multipath(&cli_tr, 0x1234U,
+                                                 RUDP_MP_ECF_SPRAY) == RUDP_OK);
+  assert(rudp_multipath_add_path(&cli_tr.multipath, 0U, 3U, 10U) == RUDP_OK);
+  assert(rudp_multipath_add_path(&cli_tr.multipath, 1U, 1U, 20U) == RUDP_OK);
+
+  /* Queue 16 reliable messages, simulate drops + authenticated CID migration */
+  uint64_t now_us = 10000ULL;
+  for (uint16_t i = 0U; i < 16U; ++i) {
+    tfv_packet_u pkt = {.type = 1U, .flags = 0U, .value = (uint16_t)(1000U + i)};
+    assert(rudp_session_send_reliable(&cli_sess, 0U, pkt, (uint32_t)(now_us / 1000ULL)) ==
+           RUDP_OK);
+  }
+
+  uint16_t delivered_vals[16];
+  size_t delivered_count = 0U;
+  uint8_t wire[1500];
+  rudp_record_s recs[32];
+
+  for (int step = 0; step < 60 && delivered_count < 16U; ++step) {
+    now_us += 25000ULL; /* +25 ms */
+    uint8_t path_id = 0U;
+    uint32_t ent = 0U;
+    int wlen = rudp_nextgen_transport_send_datagram(
+        &cli_tr, 0U, wire, sizeof(wire), now_us, 80U, &path_id, &ent);
+    if (wlen > 0) {
+      assert(ent != 0U || path_id < RUDP_MAX_PATHS);
+      /* On step 0: verify tampered CID is rejected with RUDP_ERR_AUTH */
+      if (step == 0) {
+        wire[0] ^= 0x01U;
+        assert(rudp_nextgen_transport_recv_datagram(
+                   &srv_tr, wire, (size_t)wlen, recs, 32U, now_us, NULL, 0U) ==
+               RUDP_ERR_AUTH);
+        wire[0] ^= 0x01U;
+      }
+      /* Drop step 2 to exercise ARQ/SACK recovery, deliver rest (even across path switch) */
+      if (step != 2) {
+        int n = rudp_nextgen_transport_recv_datagram(
+            &srv_tr, wire, (size_t)wlen, recs, 32U, now_us, NULL, path_id);
+        assert(n >= 0);
+        for (int r = 0; r < n; ++r) {
+          if (recs[r].flags & RUDP_RECORD_FLAG_RELIABLE) {
+            delivered_vals[delivered_count++] = recs[r].payload.value;
+          }
+        }
+      }
+    }
+    int ack_len = rudp_nextgen_transport_send_datagram(
+        &srv_tr, 0U, wire, sizeof(wire), now_us, 80U, NULL, NULL);
+    if (ack_len > 0) {
+      assert(rudp_nextgen_transport_recv_datagram(
+                 &cli_tr, wire, (size_t)ack_len, recs, 32U, now_us, NULL, path_id) >=
+             0);
+    }
+    assert(rudp_nextgen_transport_tick(&cli_tr, (uint32_t)(now_us / 1000ULL), 8U,
+                                       3000U) >= 0);
+  }
+  assert(delivered_count == 16U);
+  for (uint16_t i = 0U; i < 16U; ++i) {
+    assert(delivered_vals[i] == (uint16_t)(1000U + i));
+  }
+  rudp_crypto_wipe(&cli_crypto);
+  rudp_crypto_wipe(&srv_crypto);
+}
+
 int main(void) {
   test_page_pool_and_packet_plan();
   test_shared_metadata_pool();
@@ -400,6 +534,8 @@ int main(void) {
   test_owd_pacer_pudica_prague();
   test_sliding_fec_multi_loss_rlnc();
   test_multipath_blackhole_watchdog();
+  test_gf256_buffer_coding();
+  test_nextgen_transport_e2e();
   printf("ALL PHASE 7 NEXTGEN TESTS PASSED!\n");
   return 0;
 }

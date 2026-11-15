@@ -1327,3 +1327,242 @@ int rudp_multipath_check_blackhole(rudp_multipath_s *mp, uint32_t now_ms,
   }
   return shifted;
 }
+
+/* =========================================================================
+ * 6. Generic-Buffer GF(2^8) Cauchy Coding & Unified NextGen Transport Driver
+ * ========================================================================= */
+
+int rudp_gf256_xor_scaled(uint8_t *dst, const uint8_t *src, size_t len,
+                          uint8_t coeff) {
+  if (!dst || !src) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  if (coeff == 0U || len == 0U) {
+    return RUDP_OK;
+  }
+  if (coeff == 1U) {
+    for (size_t i = 0U; i < len; ++i) {
+      dst[i] ^= src[i];
+    }
+    return RUDP_OK;
+  }
+  for (size_t i = 0U; i < len; ++i) {
+    dst[i] ^= gf256_mul(src[i], coeff);
+  }
+  return RUDP_OK;
+}
+
+static void nextgen_write_u64_le(uint8_t out[8], uint64_t v) {
+  for (unsigned i = 0U; i < 8U; ++i) {
+    out[i] = (uint8_t)((v >> (i * 8U)) & 0xFFU);
+  }
+}
+
+static uint64_t nextgen_read_u64_le(const uint8_t in[8]) {
+  uint64_t v = 0ULL;
+  for (unsigned i = 0U; i < 8U; ++i) {
+    v |= ((uint64_t)in[i]) << (i * 8U);
+  }
+  return v;
+}
+
+int rudp_nextgen_transport_init(rudp_nextgen_transport_s *t,
+                                rudp_session_s *session,
+                                const rudp_nextgen_crypto_s *crypto,
+                                uint64_t connection_id) {
+  if (!t || !session) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  if (crypto && (!crypto->seal || !crypto->open)) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  memset(t, 0, sizeof(*t));
+  t->session = session;
+  t->connection_id = connection_id;
+  t->use_cid = (connection_id != 0ULL) ? 1U : 0U;
+  if (crypto) {
+    t->crypto = *crypto;
+    t->use_crypto = 1U;
+  }
+  return RUDP_OK;
+}
+
+int rudp_nextgen_transport_enable_pacer(rudp_nextgen_transport_s *t,
+                                        uint32_t initial_bps, uint32_t min_bps,
+                                        uint32_t max_bps,
+                                        uint32_t target_queue_us,
+                                        uint64_t now_us) {
+  if (!t) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  int ret = rudp_pacer_init(&t->pacer, initial_bps, min_bps, max_bps,
+                            target_queue_us, now_us);
+  if (ret == RUDP_OK) {
+    t->use_pacer = 1U;
+  }
+  return ret;
+}
+
+int rudp_nextgen_transport_enable_fec(rudp_nextgen_transport_s *t,
+                                      uint8_t window_w) {
+  if (!t) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  int ret = rudp_sliding_fec_init(&t->fec_tx, window_w);
+  if (ret != RUDP_OK) {
+    return ret;
+  }
+  ret = rudp_sliding_fec_rx_init(&t->fec_rx, window_w);
+  if (ret == RUDP_OK) {
+    t->use_fec = 1U;
+  }
+  return ret;
+}
+
+int rudp_nextgen_transport_enable_multipath(rudp_nextgen_transport_s *t,
+                                            uint16_t session_seed,
+                                            uint8_t mode) {
+  if (!t) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  int ret = rudp_multipath_init(&t->multipath, session_seed, mode);
+  if (ret == RUDP_OK) {
+    t->use_multipath = 1U;
+  }
+  return ret;
+}
+
+int rudp_nextgen_transport_send_datagram(
+    rudp_nextgen_transport_s *t, uint8_t primary_ack_channel, uint8_t *out_buf,
+    size_t max_len, uint64_t now_us, uint32_t timeout_ms, uint8_t *out_path_id,
+    uint32_t *out_entropy) {
+  if (!t || !t->session || !out_buf) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  size_t cid_len = t->use_cid ? RUDP_NEXTGEN_CID_WIRE_BYTES : 0U;
+  if (max_len < cid_len + RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+    return RUDP_ERR_BUFFER_FULL;
+  }
+  if (t->use_pacer &&
+      !rudp_pacer_refill_and_can_send(&t->pacer, now_us, RUDP_NEXTGEN_MTU_BYTES)) {
+    return 0;
+  }
+
+  uint8_t raw_buf[RUDP_NEXTGEN_MTU_BYTES + 64U];
+  uint32_t now_ms = (uint32_t)(now_us / 1000ULL);
+  int pt_len = rudp_session_build_datagram(
+      t->session, primary_ack_channel, raw_buf, sizeof(raw_buf), now_ms, timeout_ms);
+  if (pt_len <= 0) {
+    return pt_len;
+  }
+
+  if (t->use_cid) {
+    nextgen_write_u64_le(out_buf, t->connection_id);
+  }
+
+  size_t total_len = 0U;
+  if (t->use_crypto) {
+    const uint8_t *aad = t->use_cid ? out_buf : NULL;
+    int sealed = t->crypto.seal(t->crypto.ctx, aad, cid_len, raw_buf,
+                                (size_t)pt_len, out_buf + cid_len,
+                                max_len - cid_len);
+    if (sealed < 0) {
+      return sealed;
+    }
+    total_len = cid_len + (size_t)sealed;
+  } else {
+    if (max_len - cid_len < (size_t)pt_len) {
+      return RUDP_ERR_BUFFER_FULL;
+    }
+    memcpy(out_buf + cid_len, raw_buf, (size_t)pt_len);
+    total_len = cid_len + (size_t)pt_len;
+  }
+
+  if (t->use_pacer) {
+    (void)rudp_pacer_consume(&t->pacer, (uint32_t)total_len);
+  }
+  if (t->use_multipath) {
+    uint8_t pids[RUDP_MAX_PATHS];
+    uint32_t ents[RUDP_MAX_PATHS];
+    int sel = rudp_multipath_select_paths(&t->multipath, primary_ack_channel,
+                                          (uint32_t)total_len, pids, ents);
+    if (sel > 0) {
+      if (out_path_id) {
+        *out_path_id = pids[0];
+      }
+      if (out_entropy) {
+        *out_entropy = ents[0];
+      }
+    }
+  }
+  return (int)total_len;
+}
+
+int rudp_nextgen_transport_recv_datagram(
+    rudp_nextgen_transport_s *t, const uint8_t *in_buf, size_t in_len,
+    rudp_record_s *out_delivered, size_t max_delivered, uint64_t now_us,
+    rudp_stats_s *stats, uint8_t rx_path_id) {
+  if (!t || !t->session || !in_buf) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  size_t cid_len = t->use_cid ? RUDP_NEXTGEN_CID_WIRE_BYTES : 0U;
+  if (in_len < cid_len + RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  if (t->use_cid) {
+    uint64_t pkt_cid = nextgen_read_u64_le(in_buf);
+    if (pkt_cid != t->connection_id) {
+      return RUDP_ERR_AUTH;
+    }
+  }
+
+  uint8_t pt_buf[RUDP_NEXTGEN_MTU_BYTES + 128U];
+  const uint8_t *pt = in_buf + cid_len;
+  size_t pt_len = in_len - cid_len;
+
+  if (t->use_crypto) {
+    const uint8_t *aad = t->use_cid ? in_buf : NULL;
+    int opened = t->crypto.open(t->crypto.ctx, aad, cid_len, in_buf + cid_len,
+                                in_len - cid_len, pt_buf, sizeof(pt_buf));
+    if (opened < 0) {
+      return opened;
+    }
+    pt = pt_buf;
+    pt_len = (size_t)opened;
+  }
+
+  uint32_t now_ms = (uint32_t)(now_us / 1000ULL);
+  int ret = rudp_session_process_datagram_ex(t->session, pt, pt_len, out_delivered,
+                                             max_delivered, true, now_ms, stats);
+  if (ret >= 0) {
+    uint32_t srtt_scaled = t->session->channels[0].srtt_scaled;
+    if (srtt_scaled > 0U) {
+      uint32_t srtt_ms = (srtt_scaled + 7U) >> 3;
+      uint32_t owd_us = (srtt_ms > 0U ? srtt_ms : 1U) * 500U;
+      if (t->use_pacer) {
+        (void)rudp_pacer_on_owd_sample(&t->pacer, owd_us, (uint32_t)in_len, 0U);
+      }
+      if (t->use_multipath && rx_path_id < RUDP_MAX_PATHS) {
+        (void)rudp_multipath_on_feedback(&t->multipath, rx_path_id, srtt_ms,
+                                         false, now_ms);
+      }
+      if (t->use_fec) {
+        (void)rudp_sliding_fec_update_loss(&t->fec_tx, false);
+      }
+    }
+  }
+  return ret;
+}
+
+int rudp_nextgen_transport_tick(rudp_nextgen_transport_s *t, uint32_t now_ms,
+                                uint32_t min_tx_packets,
+                                uint32_t no_reply_ms) {
+  if (!t || !t->session) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  if (t->use_multipath && min_tx_packets > 0U && no_reply_ms > 0U) {
+    return rudp_multipath_check_blackhole(&t->multipath, now_ms, min_tx_packets,
+                                          no_reply_ms);
+  }
+  return 0;
+}

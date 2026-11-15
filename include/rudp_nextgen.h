@@ -15,6 +15,7 @@
 
 #include "rudp_config.h"
 #include "rudp_io.h"
+#include "rudp_session.h"
 #include "rudp_types.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -328,6 +329,71 @@ RUDP_EXPORT int rudp_multipath_check_blackhole(rudp_multipath_s *mp,
                                                uint32_t now_ms,
                                                uint32_t min_tx_packets,
                                                uint32_t no_reply_ms);
+
+/* =========================================================================
+ * 6. Generic-Buffer GF(2^8) Cauchy Coding & Unified NextGen Transport Driver
+ * ========================================================================= */
+
+/** XORs `src[0..len)` scaled by `coeff` in GF(2^8) into `dst[0..len)`. */
+RUDP_EXPORT int rudp_gf256_xor_scaled(uint8_t *dst, const uint8_t *src,
+                                      size_t len, uint8_t coeff);
+
+/** Optional AEAD seal/open hooks (compatible with rudp_crypto_seal/open). */
+typedef struct {
+  int (*seal)(void *ctx, const uint8_t *aad, size_t aad_len, const uint8_t *pt,
+              size_t pt_len, uint8_t *out_wire, size_t max_out_len);
+  int (*open)(void *ctx, const uint8_t *aad, size_t aad_len,
+              const uint8_t *in_wire, size_t in_wire_len, uint8_t *out_pt,
+              size_t max_pt_len);
+  void *ctx;
+} rudp_nextgen_crypto_s;
+
+#define RUDP_NEXTGEN_CID_WIRE_BYTES 8U
+
+/**
+ * @brief Opt-in unified transport driver wiring `rudp_session_s` (5,364 B ABI
+ *        preserved) with Pudica/L4S pacer, Cauchy GF(2^8) FEC, Multipath ECF +
+ *        blackhole watchdog, 64-bit Connection ID migration, and optional AEAD.
+ */
+typedef struct {
+  rudp_session_s *session;
+  rudp_nextgen_crypto_s crypto;
+  rudp_pacer_s pacer;
+  rudp_sliding_fec_s fec_tx;
+  rudp_sliding_fec_rx_s fec_rx;
+  rudp_multipath_s multipath;
+  uint64_t connection_id;
+  uint32_t prev_tx_acked[RUDP_MAX_CHANNELS];
+  uint8_t use_pacer;
+  uint8_t use_fec;
+  uint8_t use_multipath;
+  uint8_t use_cid;
+  uint8_t use_crypto;
+} rudp_nextgen_transport_s;
+
+RUDP_EXPORT int rudp_nextgen_transport_init(rudp_nextgen_transport_s *t,
+                                            rudp_session_s *session,
+                                            const rudp_nextgen_crypto_s *crypto,
+                                            uint64_t connection_id);
+RUDP_EXPORT int rudp_nextgen_transport_enable_pacer(
+    rudp_nextgen_transport_s *t, uint32_t initial_bps, uint32_t min_bps,
+    uint32_t max_bps, uint32_t target_queue_us, uint64_t now_us);
+RUDP_EXPORT int rudp_nextgen_transport_enable_fec(rudp_nextgen_transport_s *t,
+                                                  uint8_t window_w);
+RUDP_EXPORT int rudp_nextgen_transport_enable_multipath(
+    rudp_nextgen_transport_s *t, uint16_t session_seed, uint8_t mode);
+RUDP_EXPORT int rudp_nextgen_transport_send_datagram(
+    rudp_nextgen_transport_s *t, uint8_t primary_ack_channel, uint8_t *out_buf,
+    size_t max_len, uint64_t now_us, uint32_t timeout_ms, uint8_t *out_path_id,
+    uint32_t *out_entropy);
+RUDP_EXPORT int rudp_nextgen_transport_recv_datagram(
+    rudp_nextgen_transport_s *t, const uint8_t *in_buf, size_t in_len,
+    rudp_record_s *out_delivered, size_t max_delivered, uint64_t now_us,
+    rudp_stats_s *stats, uint8_t rx_path_id);
+RUDP_EXPORT int rudp_nextgen_transport_tick(rudp_nextgen_transport_s *t,
+                                            uint32_t now_ms,
+                                            uint32_t min_tx_packets,
+                                            uint32_t no_reply_ms);
 
 #ifdef __cplusplus
 }
