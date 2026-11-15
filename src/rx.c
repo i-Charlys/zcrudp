@@ -6,7 +6,7 @@ static void rx_hist_advance(rudp_channel_s *chan) {
     hist++;
     chan->has_unreliable_seq =
         (uint8_t)((chan->has_unreliable_seq & RUDP_UNREL_HAS_SEQ_MASK) |
-                  (hist << RUDP_RX_HIST_SHIFT));
+                  ((unsigned)hist << RUDP_RX_HIST_SHIFT));
   }
 }
 

@@ -24,7 +24,7 @@ int rudp_unpack_datagram_header(const uint8_t *in_buf, size_t in_len,
   }
 
   *out_header = (rudp_datagram_header_s){
-      .ack = ((uint16_t)in_buf[0] << 8) | in_buf[1],
+      .ack = (uint16_t)(((uint16_t)in_buf[0] << 8) | in_buf[1]),
       .ack_channel = in_buf[2],
       .count = in_buf[3],
   };
@@ -62,12 +62,12 @@ int rudp_unpack_record(const uint8_t *in_buf, size_t in_len,
   *out_record = (rudp_record_s){
       .channel_id = in_buf[0],
       .flags = in_buf[1],
-      .seq_num = ((uint16_t)in_buf[2] << 8) | in_buf[3],
+      .seq_num = (uint16_t)(((uint16_t)in_buf[2] << 8) | in_buf[3]),
       .payload =
           {
               .type = in_buf[4],
               .flags = in_buf[5],
-              .value = ((uint16_t)in_buf[6] << 8) | in_buf[7],
+              .value = (uint16_t)(((uint16_t)in_buf[6] << 8) | in_buf[7]),
           },
   };
 
@@ -160,8 +160,8 @@ int rudp_unpack_header(const uint8_t *in_buf, size_t in_len,
   }
 
   *out_header = (rudp_header_s){
-      .seq_num = ((uint16_t)in_buf[0] << 8) | in_buf[1],
-      .ack = ((uint16_t)in_buf[2] << 8) | in_buf[3],
+      .seq_num = (uint16_t)(((uint16_t)in_buf[0] << 8) | in_buf[1]),
+      .ack = (uint16_t)(((uint16_t)in_buf[2] << 8) | in_buf[3]),
   };
 
   return RUDP_OK;
@@ -189,7 +189,7 @@ int rudp_unpack_payload(const uint8_t *in_buf, size_t in_len,
   *out_packet = (tfv_packet_u){
       .type = in_buf[0],
       .flags = in_buf[1],
-      .value = ((uint16_t)in_buf[2] << 8) | in_buf[3],
+      .value = (uint16_t)(((uint16_t)in_buf[2] << 8) | in_buf[3]),
   };
 
   return RUDP_OK;
