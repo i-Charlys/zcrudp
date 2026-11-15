@@ -424,6 +424,23 @@ static void test_gf256_buffer_coding(void) {
   uint8_t expected[128] = {0};
   assert(rudp_gf256_xor_scaled(expected, b, sizeof(b), 0x27U) == RUDP_OK);
   assert(memcmp(rec, expected, sizeof(rec)) == 0);
+
+  /* Exercise both small-buffer (<64B) and LUT-unrolled (>=64B) paths */
+  static const size_t lens[] = {0U, 1U, 3U, 15U, 63U, 64U, 65U, 1200U};
+  uint8_t big_src[1200], big_dst[1200];
+  for (size_t k = 0; k < sizeof(big_src); ++k) {
+    big_src[k] = (uint8_t)(k * 17U + 5U);
+  }
+  for (size_t li = 0; li < sizeof(lens) / sizeof(lens[0]); ++li) {
+    size_t n = lens[li];
+    memset(big_dst, 0xA5, sizeof(big_dst));
+    assert(rudp_gf256_xor_scaled(big_dst, big_src, n, 0xE3U) == RUDP_OK);
+    /* Self-inverse XOR with same coeff restores original 0xA5 pattern */
+    assert(rudp_gf256_xor_scaled(big_dst, big_src, n, 0xE3U) == RUDP_OK);
+    for (size_t k = 0; k < n; ++k) {
+      assert(big_dst[k] == 0xA5U);
+    }
+  }
 }
 
 /* 10. Unified NextGen Transport Driver: Session + Pacer + Multipath + CID + AEAD */

@@ -1346,8 +1346,44 @@ int rudp_gf256_xor_scaled(uint8_t *dst, const uint8_t *src, size_t len,
     }
     return RUDP_OK;
   }
-  for (size_t i = 0U; i < len; ++i) {
-    dst[i] ^= gf256_mul(src[i], coeff);
+
+  /* Build 4-bit split-nibble tables (0 bytes .rodata, ~30 calls) */
+  uint8_t lo[16];
+  uint8_t hi[16];
+  lo[0] = 0U;
+  hi[0] = 0U;
+  for (uint8_t n = 1U; n < 16U; ++n) {
+    lo[n] = gf256_mul(n, coeff);
+    hi[n] = gf256_mul((uint8_t)(n << 4U), coeff);
+  }
+
+  if (len < 64U) {
+    for (size_t i = 0U; i < len; ++i) {
+      uint8_t x = src[i];
+      dst[i] ^= (uint8_t)(lo[x & 0x0FU] ^ hi[x >> 4U]);
+    }
+    return RUDP_OK;
+  }
+
+  /* Expand into 256-byte L1 stack LUT for 1-lookup/byte unrolled XOR */
+  uint8_t tbl[256];
+  for (unsigned h = 0U; h < 16U; ++h) {
+    uint8_t hv = hi[h];
+    uint8_t *row = &tbl[h << 4U];
+    for (unsigned l = 0U; l < 16U; ++l) {
+      row[l] = (uint8_t)(hv ^ lo[l]);
+    }
+  }
+
+  size_t i = 0U;
+  for (; i + 4U <= len; i += 4U) {
+    dst[i + 0U] ^= tbl[src[i + 0U]];
+    dst[i + 1U] ^= tbl[src[i + 1U]];
+    dst[i + 2U] ^= tbl[src[i + 2U]];
+    dst[i + 3U] ^= tbl[src[i + 3U]];
+  }
+  for (; i < len; ++i) {
+    dst[i] ^= tbl[src[i]];
   }
   return RUDP_OK;
 }
