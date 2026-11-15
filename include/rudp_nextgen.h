@@ -269,6 +269,8 @@ typedef struct {
   uint8_t present[RUDP_SLIDING_FEC_MAX_W * 2U];
   uint8_t window_w;
   uint8_t eq_cursor;
+  uint8_t has_seq;
+  uint16_t max_seq;
   rudp_sliding_fec_eq_s pending_eqs[RUDP_SLIDING_FEC_MAX_W];
 } rudp_sliding_fec_rx_s;
 

@@ -34,10 +34,25 @@ static uint8_t gf256_inv(uint8_t a) {
 }
 
 static inline uint32_t gf256_mul_u32(uint32_t v, uint8_t c) {
+  if (c == 0U || v == 0U) {
+    return 0U;
+  }
+  if (c == 1U) {
+    return v;
+  }
+  uint8_t lo[16];
+  uint8_t hi[16];
+  lo[0] = 0U;
+  hi[0] = 0U;
+  for (uint8_t k = 1U; k < 16U; ++k) {
+    lo[k] = gf256_mul(k, c);
+    hi[k] = gf256_mul((uint8_t)(k << 4U), c);
+  }
   uint32_t out = 0U;
   for (unsigned b = 0U; b < 4U; ++b) {
     uint8_t lane = (uint8_t)((v >> (b * 8U)) & 0xFFU);
-    out |= (uint32_t)gf256_mul(lane, c) << (b * 8U);
+    uint8_t prod = (uint8_t)(lo[lane & 0x0FU] ^ hi[lane >> 4U]);
+    out |= (uint32_t)prod << (b * 8U);
   }
   return out;
 }
@@ -653,7 +668,7 @@ int rudp_pacer_on_owd_sample(rudp_pacer_s *pacer, uint32_t owd_us,
   if (rtt_guard_us < 10000ULL) {
     rtt_guard_us = 10000ULL;
   }
-  bool time_advancing = (pacer->last_refill_us > pacer->last_reduce_us);
+  bool time_advancing = (pacer->last_refill_us >= pacer->last_reduce_us);
   bool rtt_guarded =
       pacer->has_reduced && time_advancing &&
       ((pacer->last_refill_us - pacer->last_reduce_us) < rtt_guard_us);
@@ -866,12 +881,28 @@ int rudp_sliding_fec_rx_init(rudp_sliding_fec_rx_s *rx, uint8_t window_w) {
   return RUDP_OK;
 }
 
+static inline bool fec_seq_after(uint16_t a, uint16_t b) {
+  return (int16_t)(a - b) > 0;
+}
+
 int rudp_sliding_fec_rx_source(rudp_sliding_fec_rx_s *rx, uint16_t seq,
                                tfv_packet_u payload) {
   if (!rx || rx->window_w < 2U) {
     return RUDP_ERR_INVALID_ARG;
   }
   size_t mod = (size_t)(RUDP_SLIDING_FEC_MAX_W * 2U);
+  if (!rx->has_seq) {
+    rx->max_seq = seq;
+    rx->has_seq = 1U;
+  } else {
+    if (fec_seq_after(rx->max_seq, seq) &&
+        (uint16_t)(rx->max_seq - seq) >= (uint16_t)mod) {
+      return RUDP_OK;
+    }
+    if (fec_seq_after(seq, rx->max_seq)) {
+      rx->max_seq = seq;
+    }
+  }
   size_t idx = (size_t)(seq % mod);
   rx->seqs[idx] = seq;
   rx->payloads[idx] = payload;
@@ -884,6 +915,16 @@ static void fec_rx_store_recovered(rudp_sliding_fec_rx_s *rx, uint16_t seq,
                                    uint16_t *out_recovered_seq,
                                    tfv_packet_u *out_recovered_payload) {
   size_t mod = (size_t)(RUDP_SLIDING_FEC_MAX_W * 2U);
+  if (rx->has_seq && fec_seq_after(rx->max_seq, seq) &&
+      (uint16_t)(rx->max_seq - seq) >= (uint16_t)mod) {
+    return;
+  }
+  if (!rx->has_seq) {
+    rx->max_seq = seq;
+    rx->has_seq = 1U;
+  } else if (fec_seq_after(seq, rx->max_seq)) {
+    rx->max_seq = seq;
+  }
   size_t idx = (size_t)(seq % mod);
   if (rx->present[idx] && rx->seqs[idx] == seq) {
     return;
@@ -922,6 +963,11 @@ static bool fec_rx_solve_pending(rudp_sliding_fec_rx_s *rx, int *recovered_total
     for (uint8_t e = 0U; e < RUDP_SLIDING_FEC_MAX_W; ++e) {
       rudp_sliding_fec_eq_s *eq = &rx->pending_eqs[e];
       if (!eq->valid) {
+        continue;
+      }
+      if (rx->has_seq && fec_seq_after(rx->max_seq, eq->base_seq) &&
+          (uint16_t)(rx->max_seq - eq->base_seq) >= (uint16_t)mod) {
+        eq->valid = 0U;
         continue;
       }
       uint16_t repair_seq = (uint16_t)(eq->base_seq + eq->span - 1U);
@@ -1234,14 +1280,15 @@ int rudp_multipath_select_paths(rudp_multipath_s *mp, uint8_t channel_id,
   }
 
   if (mp->mode == RUDP_MP_WEIGHTED_SPRAY || mp->mode == RUDP_MP_ECF_SPRAY) {
-    int32_t total_w = 0;
+    int64_t total_w = 0;
     uint8_t best = RUDP_MAX_PATHS;
+    uint32_t max_w = (uint32_t)(INT32_MAX / RUDP_MAX_PATHS);
     for (uint8_t i = 0U; i < RUDP_MAX_PATHS; ++i) {
       rudp_path_state_s *p = &mp->paths[i];
       if (!p->active || p->degraded) {
         continue;
       }
-      int32_t w = (int32_t)p->weight;
+      int32_t w = (int32_t)(p->weight > max_w ? max_w : p->weight);
       p->current_weight += w;
       total_w += w;
       if (best == RUDP_MAX_PATHS || p->current_weight > mp->paths[best].current_weight) {
@@ -1255,13 +1302,13 @@ int rudp_multipath_select_paths(rudp_multipath_s *mp, uint8_t channel_id,
             (mp->paths[best].srtt_ms / 2U) >
                 ((mp->paths[fast].srtt_ms / 2U) + (mp->paths[fast].srtt_ms / 4U))) {
           /* Undo credit deduction on gated slow path; route via fastest path */
-          mp->paths[best].current_weight -= total_w;
+          mp->paths[best].current_weight -= (int32_t)total_w;
           best = fast;
         } else {
-          mp->paths[best].current_weight -= total_w;
+          mp->paths[best].current_weight -= (int32_t)total_w;
         }
       } else {
-        mp->paths[best].current_weight -= total_w;
+        mp->paths[best].current_weight -= (int32_t)total_w;
       }
       out_path_ids[0] = best;
       out_entropy[0] =
@@ -1301,7 +1348,19 @@ int rudp_multipath_check_blackhole(rudp_multipath_s *mp, uint32_t now_ms,
   int shifted = 0;
   for (uint8_t i = 0U; i < RUDP_MAX_PATHS; ++i) {
     rudp_path_state_s *p = &mp->paths[i];
-    if (!p->active || p->degraded || p->tx_since_feedback == 0U) {
+    if (!p->active) {
+      continue;
+    }
+    if (p->degraded) {
+      if (p->feedback_seen &&
+          (uint32_t)(now_ms - p->last_feedback_ms) >= (no_reply_ms * 2U)) {
+        p->degraded = 0U;
+        p->tx_since_feedback = 0U;
+        p->last_feedback_ms = now_ms;
+      }
+      continue;
+    }
+    if (p->tx_since_feedback == 0U) {
       continue;
     }
     if (!p->feedback_seen) {
@@ -1479,8 +1538,10 @@ int rudp_nextgen_transport_send_datagram(
   if (max_len < cid_len + RUDP_WIRE_DATAGRAM_HEADER_SIZE) {
     return RUDP_ERR_BUFFER_FULL;
   }
+  size_t wire_overhead = cid_len + (t->use_crypto ? 32U : 0U);
   if (t->use_pacer &&
-      !rudp_pacer_refill_and_can_send(&t->pacer, now_us, RUDP_NEXTGEN_MTU_BYTES)) {
+      !rudp_pacer_refill_and_can_send(
+          &t->pacer, now_us, (uint32_t)(RUDP_NEXTGEN_MTU_BYTES + wire_overhead))) {
     return 0;
   }
 
@@ -1523,6 +1584,13 @@ int rudp_nextgen_transport_send_datagram(
     int sel = rudp_multipath_select_paths(&t->multipath, primary_ack_channel,
                                           (uint32_t)total_len, pids, ents);
     if (sel > 0) {
+      /* Single-datagram output only emits on pids[0]; revert extra redundant charges */
+      for (int k = 1; k < sel; ++k) {
+        t->multipath.paths[pids[k]].tx_bytes -= (uint32_t)total_len;
+        if (t->multipath.paths[pids[k]].tx_since_feedback > 0U) {
+          t->multipath.paths[pids[k]].tx_since_feedback--;
+        }
+      }
       if (out_path_id) {
         *out_path_id = pids[0];
       }
@@ -1571,20 +1639,62 @@ int rudp_nextgen_transport_recv_datagram(
   int ret = rudp_session_process_datagram_ex(t->session, pt, pt_len, out_delivered,
                                              max_delivered, true, now_ms, stats);
   if (ret >= 0) {
-    uint32_t srtt_scaled = t->session->channels[0].srtt_scaled;
-    if (srtt_scaled > 0U) {
-      uint32_t srtt_ms = (srtt_scaled + 7U) >> 3;
+    uint32_t acked_pkts = 0U;
+    bool any_inflight = false;
+    uint32_t min_srtt_scaled = 0U;
+    bool saw_loss = false;
+    for (uint8_t c = 0U; c < RUDP_MAX_CHANNELS; ++c) {
+      const rudp_channel_s *ch = &t->session->channels[c];
+      if (ch->ctx.state != RUDP_STATE_CONNECTED) {
+        continue;
+      }
+      uint16_t cur_tail = ch->ctx.tail;
+      uint16_t prev_tail = (uint16_t)t->prev_tx_acked[c];
+      uint16_t delta = (uint16_t)(cur_tail - prev_tail);
+      if (delta > 0U && delta <= RUDP_WINDOW_SIZE) {
+        acked_pkts += delta;
+      }
+      t->prev_tx_acked[c] = cur_tail;
+      if (ch->ctx.head != ch->ctx.tail) {
+        any_inflight = true;
+      }
+      if (ch->srtt_scaled > 0U &&
+          (min_srtt_scaled == 0U || ch->srtt_scaled < min_srtt_scaled)) {
+        min_srtt_scaled = ch->srtt_scaled;
+      }
+      if (ch->ctx.duplicate_ack_count >= 3U) {
+        saw_loss = true;
+      }
+    }
+
+    uint32_t acked_bytes = 0U;
+    if (t->use_pacer) {
+      if (!any_inflight) {
+        acked_bytes = t->pacer.inflight_bytes;
+      } else if (acked_pkts > 0U) {
+        uint64_t est = (uint64_t)acked_pkts * RUDP_WIRE_RECORD_SIZE + cid_len +
+                       RUDP_WIRE_DATAGRAM_HEADER_SIZE +
+                       (t->use_crypto ? 16U : 0U);
+        acked_bytes = (est > t->pacer.inflight_bytes) ? t->pacer.inflight_bytes
+                                                      : (uint32_t)est;
+      }
+    }
+
+    if (min_srtt_scaled > 0U) {
+      uint32_t srtt_ms = (min_srtt_scaled + 7U) >> 3;
       uint32_t owd_us = (srtt_ms > 0U ? srtt_ms : 1U) * 500U;
       if (t->use_pacer) {
-        (void)rudp_pacer_on_owd_sample(&t->pacer, owd_us, (uint32_t)in_len, 0U);
+        (void)rudp_pacer_on_owd_sample(&t->pacer, owd_us, acked_bytes, 0U);
       }
       if (t->use_multipath && rx_path_id < RUDP_MAX_PATHS) {
         (void)rudp_multipath_on_feedback(&t->multipath, rx_path_id, srtt_ms,
-                                         false, now_ms);
+                                         saw_loss, now_ms);
       }
       if (t->use_fec) {
-        (void)rudp_sliding_fec_update_loss(&t->fec_tx, false);
+        (void)rudp_sliding_fec_update_loss(&t->fec_tx, saw_loss);
       }
+    } else if (t->use_pacer && !any_inflight) {
+      t->pacer.inflight_bytes = 0U;
     }
   }
   return ret;

@@ -377,8 +377,11 @@ static void capture_channel_snapshot(const rudp_session_s *session,
   plan->valid = 0U;
 }
 
-static void snapshot_slot_in_plan(rudp_tx_plan_s *plan, uint8_t c, uint16_t curr,
+static bool snapshot_slot_in_plan(rudp_tx_plan_s *plan, uint8_t c, uint16_t curr,
                                   const rudp_slot_s *slot) {
+  if ((size_t)plan->record_count >= RUDP_MAX_RECORDS_PER_DATAGRAM) {
+    return false;
+  }
   uint8_t idx = plan->record_count++;
   plan->slot_idx[idx] = curr;
   plan->channel_id[idx] = c;
@@ -387,6 +390,7 @@ static void snapshot_slot_in_plan(rudp_tx_plan_s *plan, uint8_t c, uint16_t curr
   plan->prev_fast_retransmit[idx] = slot->fast_retransmit;
   plan->prev_slot_state[idx] = slot->state;
   plan->prev_timestamp[idx] = slot->timestamp;
+  return true;
 }
 
 static int pack_sack_records(const rudp_channel_s *chan, uint8_t channel_id,
@@ -505,10 +509,10 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
     capture_channel_snapshot(session, plan);
   }
 
-  /* Only scan upfront for TX eligibility in the rare case where secondary ACKs could
-   * fill the entire datagram and starve urgent data (sec_ack_pending_count >= cap_records). */
+  /* Only scan upfront for TX eligibility when secondary ACKs (including optional
+   * extended SACKs) could fill the entire datagram and starve urgent data. */
   size_t ack_budget = cap_records;
-  if (any_tx_window_nonempty && sec_ack_pending_count >= cap_records &&
+  if (any_tx_window_nonempty && (sec_ack_pending_count * 2U) >= cap_records &&
       cap_records >= 1U) {
     for (uint8_t c = 0; c < RUDP_MAX_CHANNELS; ++c) {
       if (channel_has_eligible_slot(&session->channels[c], now, timeout) ||
@@ -629,6 +633,9 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
       }
 
       while (curr != chan->ctx.head && count < cap_records) {
+        if (plan && (size_t)plan->record_count >= RUDP_MAX_RECORDS_PER_DATAGRAM) {
+          break;
+        }
         rudp_slot_s *slot = &chan->ctx.tx_buffer[curr];
         if (slot->state == RUDP_SLOT_SACKED) {
           rem_sacked--;
@@ -651,95 +658,96 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
             uint16_t pair_base = (uint16_t)(slot->frame.header.seq_num & ~(uint16_t)1U);
             /* On FEC K=2 channels, never pack both members of a pair into the same
              * UDP datagram so a single datagram drop never destroys both A and B. */
-            if (is_fec_chan && fec_touched_pair && pair_base == fec_touched_base) {
-              break;
-            }
-
-            if (!is_first_send && slot->retries >= RUDP_MAX_RETRIES) {
-              chan->ctx.state = RUDP_STATE_DISCONNECTED;
-              if (plan) {
-                plan->valid = 0U;
-              }
-              return RUDP_ERR_DISCONNECTED;
-            }
-
-            rudp_record_s rec = {.channel_id = c,
-                                 .flags = RUDP_RECORD_FLAG_RELIABLE,
-                                 .seq_num = slot->frame.header.seq_num,
-                                 .payload = slot->frame.packet};
-
-            size_t offset =
-                RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)count * RUDP_WIRE_RECORD_SIZE);
-            int ret = rudp_pack_record(&rec, out_buf + offset, effective_max - offset);
-            if (ret != RUDP_WIRE_RECORD_SIZE) {
-              if (plan) {
-                rudp_session_cancel_datagram(session, plan);
-                plan->valid = 0U;
-              }
-              return ret;
-            }
-
-            if (plan) {
-              snapshot_slot_in_plan(plan, c, curr, slot);
-            }
-
-            if (is_first_send) {
-              if (chan->rto_min_ms > 0U && chan->srtt_scaled == 0U) {
-                uint8_t cb = next_chan_backoff;
-                if (cb > rudp_slot_backoff(slot)) {
-                  rudp_slot_set_backoff(slot, cb);
+            if (!(is_fec_chan && fec_touched_pair && pair_base == fec_touched_base)) {
+              if (!is_first_send && slot->retries >= RUDP_MAX_RETRIES) {
+                if (plan) {
+                  rudp_session_cancel_datagram(session, plan);
+                  plan->valid = 0U;
                 }
-              } else {
-                rudp_slot_set_backoff(slot, 0U);
+                chan->ctx.state = RUDP_STATE_DISCONNECTED;
+                return RUDP_ERR_DISCONNECTED;
               }
-              slot->tx_count = 1U;
-              slot->timestamp = now;
-              rudp_slot_set_fast_state(slot, RUDP_FAST_RETRANSMIT_OFF);
-            } else {
-              if (!is_fast && !is_probe) {
-                if (!cleared_recovery) {
-                  cleared_recovery = true;
-                  uint16_t clear = chan->ctx.tail;
-                  while (clear != chan->ctx.head) {
-                    if (rudp_slot_fast_state(&chan->ctx.tx_buffer[clear]) ==
-                        RUDP_FAST_RETRANSMIT_IN_RECOVERY) {
-                      if (plan) {
-                        snapshot_slot_in_plan(plan, c, clear,
-                                              &chan->ctx.tx_buffer[clear]);
+
+              rudp_record_s rec = {.channel_id = c,
+                                   .flags = RUDP_RECORD_FLAG_RELIABLE,
+                                   .seq_num = slot->frame.header.seq_num,
+                                   .payload = slot->frame.packet};
+
+              size_t offset =
+                  RUDP_WIRE_DATAGRAM_HEADER_SIZE + ((size_t)count * RUDP_WIRE_RECORD_SIZE);
+              int ret = rudp_pack_record(&rec, out_buf + offset, effective_max - offset);
+              if (ret != RUDP_WIRE_RECORD_SIZE) {
+                if (plan) {
+                  rudp_session_cancel_datagram(session, plan);
+                  plan->valid = 0U;
+                }
+                return ret;
+              }
+
+              if (plan) {
+                (void)snapshot_slot_in_plan(plan, c, curr, slot);
+              }
+
+              if (is_first_send) {
+                if (chan->rto_min_ms > 0U && chan->srtt_scaled == 0U) {
+                  uint8_t cb = next_chan_backoff;
+                  if (cb > rudp_slot_backoff(slot)) {
+                    rudp_slot_set_backoff(slot, cb);
+                  }
+                } else {
+                  rudp_slot_set_backoff(slot, 0U);
+                }
+                slot->tx_count = 1U;
+                slot->timestamp = now;
+                rudp_slot_set_fast_state(slot, RUDP_FAST_RETRANSMIT_OFF);
+              } else {
+                if (!is_fast && !is_probe) {
+                  if (!cleared_recovery) {
+                    cleared_recovery = true;
+                    uint16_t clear = chan->ctx.tail;
+                    while (clear != chan->ctx.head) {
+                      if (clear != curr &&
+                          rudp_slot_fast_state(&chan->ctx.tx_buffer[clear]) ==
+                              RUDP_FAST_RETRANSMIT_IN_RECOVERY) {
+                        if (plan &&
+                            !snapshot_slot_in_plan(plan, c, clear,
+                                                   &chan->ctx.tx_buffer[clear])) {
+                          break;
+                        }
+                        rudp_slot_set_fast_state(&chan->ctx.tx_buffer[clear],
+                                                 RUDP_FAST_RETRANSMIT_OFF);
                       }
-                      rudp_slot_set_fast_state(&chan->ctx.tx_buffer[clear],
-                                               RUDP_FAST_RETRANSMIT_OFF);
+                      clear = (uint16_t)((clear + 1U) & (RUDP_WINDOW_SIZE - 1U));
                     }
-                    clear = (uint16_t)((clear + 1U) & (RUDP_WINDOW_SIZE - 1U));
+                  }
+                  uint8_t b = rudp_slot_backoff(slot);
+                  if (chan->srtt_scaled == 0U && orig_chan_backoff > b) {
+                    b = orig_chan_backoff;
+                  }
+                  if (b < 15U) {
+                    b++;
+                    rudp_slot_set_backoff(slot, b);
+                  }
+                  if (chan->rto_min_ms > 0U && b > next_chan_backoff) {
+                    next_chan_backoff = b;
                   }
                 }
-                uint8_t b = rudp_slot_backoff(slot);
-                if (chan->srtt_scaled == 0U && orig_chan_backoff > b) {
-                  b = orig_chan_backoff;
+                slot->retries++;
+                if (slot->tx_count < UINT8_MAX) {
+                  slot->tx_count++;
                 }
-                if (b < 15U) {
-                  b++;
-                  rudp_slot_set_backoff(slot, b);
-                }
-                if (chan->rto_min_ms > 0U && b > next_chan_backoff) {
-                  next_chan_backoff = b;
-                }
+                slot->timestamp = now;
+                rudp_slot_set_fast_state(slot, RUDP_FAST_RETRANSMIT_OFF);
               }
-              slot->retries++;
-              if (slot->tx_count < UINT8_MAX) {
-                slot->tx_count++;
-              }
-              slot->timestamp = now;
-              rudp_slot_set_fast_state(slot, RUDP_FAST_RETRANSMIT_OFF);
-            }
 
-            if (is_fec_chan) {
-              fec_touched_pair = true;
-              fec_touched_base = pair_base;
+              if (is_fec_chan) {
+                fec_touched_pair = true;
+                fec_touched_base = pair_base;
+              }
+              lead_channel = c;
+              lead_set = true;
+              count++;
             }
-            lead_channel = c;
-            lead_set = true;
-            count++;
           }
         } else if (slot->state == RUDP_SLOT_UNRELIABLE) {
           rem_inflight--;
@@ -812,8 +820,8 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
                 }
                 return ret;
               }
-              if (plan) {
-                snapshot_slot_in_plan(plan, c, curr, odd);
+              if (plan && !snapshot_slot_in_plan(plan, c, curr, odd)) {
+                break;
               }
               odd->fast_retransmit |= RUDP_SLOT_FLAG_FEC_SENT;
               if (!lead_set) {

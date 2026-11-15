@@ -342,6 +342,7 @@ int rudp_session_process_datagram_ex(rudp_session_s *session, const uint8_t *in_
   }
 
   uint8_t ack_record_seen[RUDP_MAX_CHANNELS] = {0};
+  uint16_t first_ack_seq[RUDP_MAX_CHANNELS] = {0};
   int delivered_count = 0;
 
   for (uint8_t i = 0; i < header.count; i++) {
@@ -362,7 +363,13 @@ int rudp_session_process_datagram_ex(rudp_session_s *session, const uint8_t *in_
       /* Allow primary SACK (offsets 1..32) and one extended SACK (offsets 33..63)
        * per channel per datagram; only the first counts duplicate ACKs. */
       if (ack_record_seen[rec.channel_id] < 2U) {
-        uint8_t seen = ack_record_seen[rec.channel_id]++;
+        uint8_t seen = ack_record_seen[rec.channel_id];
+        if (seen == 0U) {
+          first_ack_seq[rec.channel_id] = rec.seq_num;
+        } else if (rec.seq_num != (uint16_t)(first_ack_seq[rec.channel_id] + 32U)) {
+          continue;
+        }
+        ack_record_seen[rec.channel_id]++;
         bool allow_sack_rtt =
             !(rec.channel_id == header.ack_channel && hdr_tail_advanced);
         session_ack_and_sack(chan, rec.seq_num, rudp_payload_to_mask(rec.payload),

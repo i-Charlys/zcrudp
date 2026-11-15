@@ -542,6 +542,65 @@ static void test_nextgen_transport_e2e(void) {
   rudp_crypto_wipe(&srv_crypto);
 }
 
+/* 11. Hardening: FEC RX aliasing, pacer burst guard, non-zero channel inflight drain */
+static void test_nextgen_hardening(void) {
+  /* A. Sliding FEC RX: stale seq=0 must not overwrite seq=16 */
+  rudp_sliding_fec_rx_s rx;
+  assert(rudp_sliding_fec_rx_init(&rx, 8U) == RUDP_OK);
+  for (uint16_t s = 0U; s <= 16U; ++s) {
+    tfv_packet_u p = {.raw = 0x1000U + s};
+    assert(rudp_sliding_fec_rx_source(&rx, s, p) == RUDP_OK);
+  }
+  tfv_packet_u stale = {.raw = 0xDEADU};
+  assert(rudp_sliding_fec_rx_source(&rx, 0U, stale) == RUDP_OK);
+  tfv_packet_u got = {.raw = 0U};
+  assert(rudp_sliding_fec_rx_get(&rx, 16U, &got) && got.raw == 0x1010U);
+
+  /* B. Pacer rtt_guard_us must hold when last_refill_us == last_reduce_us */
+  rudp_pacer_s pacer;
+  assert(rudp_pacer_init(&pacer, 1000000U, 20000U, 2000000U, 5000U, 1000ULL) ==
+         RUDP_OK);
+  assert(rudp_pacer_on_owd_sample(&pacer, 10000U, 1000U, 0U) == RUDP_OK);
+  assert(rudp_pacer_on_owd_sample(&pacer, 25000U, 1000U, 0U) == RUDP_OK);
+  uint32_t after_first_reduce = pacer.rate_bytes_per_sec;
+  for (int i = 0; i < 5; ++i) {
+    assert(rudp_pacer_on_owd_sample(&pacer, 25000U, 1000U, 0U) == RUDP_OK);
+  }
+  assert(pacer.rate_bytes_per_sec == after_first_reduce);
+
+  /* C. Non-zero channel traffic drains pacer.inflight_bytes to 0 */
+  rudp_session_s cli_s, srv_s;
+  assert(rudp_session_init(&cli_s) == RUDP_OK);
+  assert(rudp_session_init(&srv_s) == RUDP_OK);
+  assert(rudp_session_config_channel(&cli_s, 1U, RUDP_CHANNEL_FLAG_RELIABLE |
+                                                     RUDP_CHANNEL_FLAG_ORDERED) ==
+         RUDP_OK);
+  assert(rudp_session_config_channel(&srv_s, 1U, RUDP_CHANNEL_FLAG_RELIABLE |
+                                                     RUDP_CHANNEL_FLAG_ORDERED) ==
+         RUDP_OK);
+  rudp_nextgen_transport_s cli_t, srv_t;
+  assert(rudp_nextgen_transport_init(&cli_t, &cli_s, NULL, 0x42ULL) == RUDP_OK);
+  assert(rudp_nextgen_transport_init(&srv_t, &srv_s, NULL, 0x42ULL) == RUDP_OK);
+  assert(rudp_nextgen_transport_enable_pacer(&cli_t, 500000U, 20000U, 2000000U,
+                                            5000U, 1000ULL) == RUDP_OK);
+  tfv_packet_u pkt = {.raw = 0xCAFEBABEU};
+  assert(rudp_session_send_reliable(&cli_s, 1U, pkt, 1U) == RUDP_OK);
+  uint8_t wire[1600];
+  rudp_record_s recs[16];
+  int wlen = rudp_nextgen_transport_send_datagram(&cli_t, 1U, wire, sizeof(wire),
+                                                  1000ULL, 80U, NULL, NULL);
+  assert(wlen > 0);
+  assert(cli_t.pacer.inflight_bytes > 0U);
+  assert(rudp_nextgen_transport_recv_datagram(&srv_t, wire, (size_t)wlen, recs,
+                                             16U, 2000ULL, NULL, 0U) == 1);
+  int alen = rudp_nextgen_transport_send_datagram(&srv_t, 1U, wire, sizeof(wire),
+                                                  2000ULL, 80U, NULL, NULL);
+  assert(alen > 0);
+  assert(rudp_nextgen_transport_recv_datagram(&cli_t, wire, (size_t)alen, recs,
+                                             16U, 3000ULL, NULL, 0U) == 0);
+  assert(cli_t.pacer.inflight_bytes == 0U);
+}
+
 int main(void) {
   test_page_pool_and_packet_plan();
   test_shared_metadata_pool();
@@ -553,6 +612,7 @@ int main(void) {
   test_multipath_blackhole_watchdog();
   test_gf256_buffer_coding();
   test_nextgen_transport_e2e();
+  test_nextgen_hardening();
   printf("ALL PHASE 7 NEXTGEN TESTS PASSED!\n");
   return 0;
 }
