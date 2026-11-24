@@ -153,11 +153,8 @@ int rudp_rx_accept(rudp_channel_s *channel, const rudp_record_s *record,
     }
 
     if (channel->rx_present[slot / 8] & mask) {
-      /* Duplicate ahead-of-order segment already buffered: trigger duplicate ACK. */
-      if (!xtp_sreq || fastnak || want_ack) {
         channel->ack_pending = 1;
         channel->chan_backoff |= RUDP_CHAN_FLAG_GAP_ACK_PENDING;
-      }
     } else {
       channel->rx_buffer[slot] = record->payload;
       channel->rx_present[slot / 8] |= mask;
