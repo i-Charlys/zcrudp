@@ -1580,8 +1580,8 @@ static void test_strict_pass1_validation_and_ack_only_null_out(void) {
     assert(rudp_session_process_datagram(&s, dgram, 12, out, 2) == RUDP_ERR_INVALID_ARG);
     assert(memcmp(&before, &s, sizeof(s)) == 0);
 
-    /* Unknown flag bit (0x08) and odd-seq FEC parity must fail Pass 1 atomically. */
-    rec.flags = 0x08U;
+    /* Unknown flag bit (0x40) and odd-seq FEC parity must fail Pass 1 atomically. */
+    rec.flags = 0x40U;
     assert(rudp_pack_record(&rec, dgram + 4, sizeof(dgram) - 4) == 8);
     assert(rudp_session_process_datagram(&s, dgram, 12, out, 2) == RUDP_ERR_INVALID_ARG);
     assert(memcmp(&before, &s, sizeof(s)) == 0);

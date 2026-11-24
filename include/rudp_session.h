@@ -108,6 +108,28 @@ RUDP_EXPORT int rudp_session_send_reliable(rudp_session_s *session, uint8_t chan
                                            tfv_packet_u payload, uint32_t now);
 
 /**
+ * @brief PR-SCTP partial reliability: abandons leading in-flight/SACKed reliable
+ *        slots strictly before @p up_to_seq and stages a single 8-byte
+ *        FORWARD-SEQ control record so the receiver advances its cumulative
+ *        window and unblocks in-order delivery without disconnecting.
+ *
+ * @return Number of abandoned slots (>= 0), or negative RUDP_ERR_* code.
+ */
+RUDP_EXPORT int rudp_session_abandon_reliable(rudp_session_s *session, uint8_t channel_id,
+                                              uint16_t up_to_seq, uint8_t reason);
+
+/**
+ * @brief PR-SCTP TTL / max-retry sweep: abandons leading contiguous slots at the
+ *        TX tail whose age >= @p max_age_ms or retries >= @p max_retries (0 disables
+ *        a bound) and stages a FORWARD-SEQ record.
+ *
+ * @return Number of abandoned slots (>= 0), or negative RUDP_ERR_* code.
+ */
+RUDP_EXPORT int rudp_session_expire_reliable(rudp_session_s *session, uint8_t channel_id,
+                                             uint32_t now, uint32_t max_age_ms,
+                                             uint8_t max_retries);
+
+/**
  * @brief Transaction snapshot for two-phase prepare / commit / cancel egress.
  *        Slot backoff and FEC-emitted state are packed inside `prev_fast_retransmit`.
  */

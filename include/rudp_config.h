@@ -43,6 +43,8 @@
 #define RUDP_SLOT_SACKED 2
 /** Unreliable update staged for intra-tick bundling; freed immediately on build */
 #define RUDP_SLOT_UNRELIABLE 3
+/** PR-SCTP FORWARD-SEQ control record staged in TX ring; freed immediately on build */
+#define RUDP_SLOT_FWD_SEQ 4
 
 /** Low-nibble fast-recovery state in rudp_slot_s::fast_retransmit */
 #define RUDP_FAST_STATE_MASK 0x0FU
@@ -76,9 +78,25 @@
 #define RUDP_RECORD_FLAG_ACK (1U << 1)
 /** Optional K=2 XOR parity record (seq_num = even pair base, payload = A ^ B) */
 #define RUDP_RECORD_FLAG_FEC_PARITY (1U << 2)
+/** PR-SCTP FORWARD-SEQ record (seq_num = new_cum_seq, payload = reason + dropped_count) */
+#define RUDP_RECORD_FLAG_FWD_SEQ (1U << 3)
+/** XTP SACK/Status Request flag requesting an immediate ACK at receiver */
+#define RUDP_RECORD_FLAG_SREQ (1U << 4)
+/** XTP Delivery Request flag requesting an ACK once delivered to the application */
+#define RUDP_RECORD_FLAG_DREQ (1U << 5)
+/** DCCP-style RLE Ack Vector + ECN modifier combined with RUDP_RECORD_FLAG_ACK */
+#define RUDP_RECORD_FLAG_ACK_VEC (1U << 7)
 /** Mask of defined wire record flag bits */
 #define RUDP_RECORD_VALID_FLAGS_MASK                                                   \
-  (RUDP_RECORD_FLAG_RELIABLE | RUDP_RECORD_FLAG_ACK | RUDP_RECORD_FLAG_FEC_PARITY)
+  (RUDP_RECORD_FLAG_RELIABLE | RUDP_RECORD_FLAG_ACK | RUDP_RECORD_FLAG_FEC_PARITY |    \
+   RUDP_RECORD_FLAG_FWD_SEQ | RUDP_RECORD_FLAG_SREQ | RUDP_RECORD_FLAG_DREQ |          \
+   RUDP_RECORD_FLAG_ACK_VEC)
+
+/** PR-SCTP abandonment reasons encoded in FORWARD-SEQ payload.type */
+#define RUDP_FWD_SEQ_REASON_TTL 1U
+#define RUDP_FWD_SEQ_REASON_RETRIES 2U
+#define RUDP_FWD_SEQ_REASON_RING_FULL 3U
+#define RUDP_FWD_SEQ_REASON_MANUAL 4U
 
 /** Peer is disconnected or timed out */
 #define RUDP_STATE_DISCONNECTED 0
@@ -117,6 +135,14 @@
 #define RUDP_CHANNEL_HINT_EXTERNAL_AEAD RUDP_CHANNEL_FLAG_ENCRYPTED
 /** Enables opt-in K=2 XOR forward error correction in separate UDP loss domains */
 #define RUDP_CHANNEL_FLAG_FEC_K2 (1U << 3)
+/** Enables PR-SCTP timed/bounded partial reliability (FORWARD-SEQ) on channel */
+#define RUDP_CHANNEL_FLAG_PR_SCTP (1U << 4)
+/** Enables XTP SREQ/DREQ burst-tail ACK suppression on channel */
+#define RUDP_CHANNEL_FLAG_XTP_SREQ (1U << 5)
+/** Enables XTP FASTNAK immediate gap reporting when out-of-order data arrives */
+#define RUDP_CHANNEL_FLAG_FASTNAK (1U << 6)
+/** Enables DCCP RLE Ack Vector + ECN feedback decoding on channel */
+#define RUDP_CHANNEL_FLAG_ACK_VEC (1U << 7)
 
 #ifndef RUDP_DEFAULT_MTU
 /** Safe default UDP datagram payload limit preventing IP fragmentation */

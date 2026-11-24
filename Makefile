@@ -5,7 +5,7 @@ ASAN_CFLAGS = -Iinclude -Wall -Wextra -std=c11 -pedantic -Werror -g -fsanitize=a
 BUILD_DIR = build
 SRC = src/codec.c src/reliability.c src/session.c src/session_tx.c src/session_rx.c src/rx.c src/io.c src/crypto.c
 PROFILES_SRC = src/stream.c src/scalar.c src/motion.c src/nextgen.c
-BINS = $(BUILD_DIR)/test_rudp $(BUILD_DIR)/test_tfv $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max $(BUILD_DIR)/test_phase4 $(BUILD_DIR)/test_phase5 $(BUILD_DIR)/test_phase6 $(BUILD_DIR)/test_phase7
+BINS = $(BUILD_DIR)/test_rudp $(BUILD_DIR)/test_tfv $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max $(BUILD_DIR)/test_phase4 $(BUILD_DIR)/test_phase5 $(BUILD_DIR)/test_phase6 $(BUILD_DIR)/test_phase7 $(BUILD_DIR)/test_phase8
 
 .PHONY: all clean test test_rudp test_tfv test_window asan demo bench bench-report test-tools
 
@@ -90,6 +90,9 @@ $(BUILD_DIR)/test_phase6: $(PROFILES_SRC) tests/test_phase6.c tests/fuzz_rudp.c 
 $(BUILD_DIR)/test_phase7: $(PROFILES_SRC) tests/test_phase7.c include/protocol_profiles.h $(SRC) $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase7.c -o $@
 
+$(BUILD_DIR)/test_phase8: $(PROFILES_SRC) tests/test_phase8.c include/protocol_profiles.h $(SRC) $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase8.c -o $@
+
 .PHONY: bindings test-bindings
 $(BUILD_DIR)/libzcrudp.so: $(SRC) $(PROFILES_SRC) $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -fPIC -shared $(SRC) $(PROFILES_SRC) -o $@
@@ -119,6 +122,7 @@ test_window: $(BUILD_DIR)/test_window_min $(BUILD_DIR)/test_window_max
 	./$(BUILD_DIR)/test_window_max
 
 test: all test-bindings
+	./$(BUILD_DIR)/test_phase8
 	./$(BUILD_DIR)/test_phase7
 	./$(BUILD_DIR)/test_phase6
 	./$(BUILD_DIR)/test_phase5
@@ -131,6 +135,8 @@ test: all test-bindings
 asan: | $(BUILD_DIR)
 	$(CC) $(ASAN_CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase7.c -o $(BUILD_DIR)/test_phase7_asan
 	./$(BUILD_DIR)/test_phase7_asan
+	$(CC) $(ASAN_CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase8.c -o $(BUILD_DIR)/test_phase8_asan
+	./$(BUILD_DIR)/test_phase8_asan
 	$(CC) $(ASAN_CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase6.c tests/fuzz_rudp.c -o $(BUILD_DIR)/test_phase6_asan
 	./$(BUILD_DIR)/test_phase6_asan
 	$(CC) $(ASAN_CFLAGS) $(SRC) $(PROFILES_SRC) tests/test_phase5.c -o $(BUILD_DIR)/test_phase5_asan

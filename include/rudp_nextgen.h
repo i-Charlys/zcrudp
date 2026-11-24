@@ -397,6 +397,65 @@ RUDP_EXPORT int rudp_nextgen_transport_tick(rudp_nextgen_transport_s *t,
                                             uint32_t min_tx_packets,
                                             uint32_t no_reply_ms);
 
+/* =========================================================================
+ * 7. DCCP-Style RLE Ack Vector + ECN Compression (4 runs / 8B record)
+ * ========================================================================= */
+
+#define RUDP_ACKVEC_RECV 0U
+#define RUDP_ACKVEC_RECV_CE 1U
+#define RUDP_ACKVEC_LOST 2U
+#define RUDP_ACKVEC_LOST_DROPPED 3U
+#define RUDP_ACKVEC_MAX_RUNS 32U
+#define RUDP_ACKVEC_MAX_RUN_LEN 63U
+
+static inline uint8_t rudp_ackvec_entry_make(uint8_t state, uint8_t run_len) {
+  if (run_len == 0U) {
+    return 0U;
+  }
+  if (run_len > RUDP_ACKVEC_MAX_RUN_LEN) {
+    run_len = RUDP_ACKVEC_MAX_RUN_LEN;
+  }
+  return (uint8_t)(((state & 0x03U) << 6) | (run_len & 0x3FU));
+}
+
+static inline uint8_t rudp_ackvec_entry_state(uint8_t entry) {
+  return (uint8_t)((entry >> 6) & 0x03U);
+}
+
+static inline uint8_t rudp_ackvec_entry_len(uint8_t entry) {
+  return (uint8_t)(entry & 0x3FU);
+}
+
+typedef struct {
+  uint8_t runs[RUDP_ACKVEC_MAX_RUNS];
+  uint16_t base_seq;
+  uint16_t run_count;
+  uint16_t total_span;
+  uint8_t initialized;
+} rudp_ackvec_s;
+
+typedef struct {
+  uint16_t start_seq;
+  uint16_t total_span;
+  uint16_t acked_count;
+  uint16_t ecn_ce_count;
+  uint16_t lost_count;
+  uint16_t dropped_count;
+  uint8_t run_count;
+  uint8_t runs[4];
+} rudp_ackvec_summary_s;
+
+RUDP_EXPORT int rudp_ackvec_init(rudp_ackvec_s *vec, uint16_t start_seq);
+RUDP_EXPORT int rudp_ackvec_push_run(rudp_ackvec_s *vec, uint8_t state, uint16_t count);
+RUDP_EXPORT int rudp_ackvec_record(rudp_ackvec_s *vec, uint16_t seq, uint8_t state);
+RUDP_EXPORT int rudp_ackvec_encode_record(const rudp_ackvec_s *vec, uint8_t channel_id,
+                                          uint16_t start_run_idx, rudp_record_s *out_rec,
+                                          uint16_t *out_next_run_idx);
+RUDP_EXPORT int rudp_ackvec_decode_record(const rudp_record_s *rec,
+                                          rudp_ackvec_summary_s *out_summary);
+RUDP_EXPORT int rudp_ackvec_apply_to_pacer(const rudp_record_s *rec, rudp_pacer_s *pacer,
+                                           uint32_t owd_us, uint32_t bytes_per_pkt);
+
 #ifdef __cplusplus
 }
 #endif

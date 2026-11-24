@@ -1712,3 +1712,163 @@ int rudp_nextgen_transport_tick(rudp_nextgen_transport_s *t, uint32_t now_ms,
   }
   return 0;
 }
+
+/* =========================================================================
+ * 7. DCCP-Style RLE Ack Vector + ECN Compression
+ * ========================================================================= */
+
+int rudp_ackvec_init(rudp_ackvec_s *vec, uint16_t start_seq) {
+  if (!vec) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  memset(vec, 0, sizeof(*vec));
+  vec->base_seq = start_seq;
+  vec->initialized = 1U;
+  return RUDP_OK;
+}
+
+int rudp_ackvec_push_run(rudp_ackvec_s *vec, uint8_t state, uint16_t count) {
+  if (!vec || state > RUDP_ACKVEC_LOST_DROPPED) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  if (!vec->initialized) {
+    vec->initialized = 1U;
+  }
+  uint16_t rem = count;
+  while (rem > 0U) {
+    if (vec->run_count > 0U) {
+      uint16_t last_idx = (uint16_t)(vec->run_count - 1U);
+      uint8_t cur_state = rudp_ackvec_entry_state(vec->runs[last_idx]);
+      uint8_t cur_len = rudp_ackvec_entry_len(vec->runs[last_idx]);
+      if (cur_state == state && cur_len < RUDP_ACKVEC_MAX_RUN_LEN) {
+        uint16_t room = (uint16_t)(RUDP_ACKVEC_MAX_RUN_LEN - cur_len);
+        uint16_t add = (rem < room) ? rem : room;
+        vec->runs[last_idx] =
+            rudp_ackvec_entry_make(state, (uint8_t)(cur_len + add));
+        vec->total_span = (uint16_t)(vec->total_span + add);
+        rem = (uint16_t)(rem - add);
+        continue;
+      }
+    }
+    if (vec->run_count == RUDP_ACKVEC_MAX_RUNS) {
+      uint8_t dropped_len = rudp_ackvec_entry_len(vec->runs[0]);
+      vec->base_seq = (uint16_t)(vec->base_seq + dropped_len);
+      vec->total_span = (uint16_t)(vec->total_span - dropped_len);
+      memmove(&vec->runs[0], &vec->runs[1], RUDP_ACKVEC_MAX_RUNS - 1U);
+      vec->run_count--;
+    }
+    uint8_t chunk = (rem > RUDP_ACKVEC_MAX_RUN_LEN) ? (uint8_t)RUDP_ACKVEC_MAX_RUN_LEN
+                                                    : (uint8_t)rem;
+    vec->runs[vec->run_count++] = rudp_ackvec_entry_make(state, chunk);
+    vec->total_span = (uint16_t)(vec->total_span + chunk);
+    rem = (uint16_t)(rem - chunk);
+  }
+  return RUDP_OK;
+}
+
+int rudp_ackvec_record(rudp_ackvec_s *vec, uint16_t seq, uint8_t state) {
+  if (!vec || state > RUDP_ACKVEC_LOST_DROPPED) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  if (!vec->initialized) {
+    vec->base_seq = seq;
+    vec->initialized = 1U;
+  }
+  uint16_t exp = (uint16_t)(vec->base_seq + vec->total_span);
+  uint16_t gap = (uint16_t)(seq - exp);
+  if (gap > 32768U) {
+    return RUDP_ERR_OUT_OF_WINDOW;
+  }
+  if (gap > 0U) {
+    int rc = rudp_ackvec_push_run(vec, RUDP_ACKVEC_LOST, gap);
+    if (rc != RUDP_OK) {
+      return rc;
+    }
+  }
+  return rudp_ackvec_push_run(vec, state, 1U);
+}
+
+int rudp_ackvec_encode_record(const rudp_ackvec_s *vec, uint8_t channel_id,
+                              uint16_t start_run_idx, rudp_record_s *out_rec,
+                              uint16_t *out_next_run_idx) {
+  if (!vec || !out_rec || channel_id >= RUDP_MAX_CHANNELS ||
+      start_run_idx >= vec->run_count) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  uint16_t seq_off = 0U;
+  for (uint16_t i = 0U; i < start_run_idx; ++i) {
+    seq_off = (uint16_t)(seq_off + rudp_ackvec_entry_len(vec->runs[i]));
+  }
+  uint8_t bytes[4] = {0U, 0U, 0U, 0U};
+  uint16_t idx = start_run_idx;
+  for (unsigned k = 0U; k < 4U && idx < vec->run_count; ++k, ++idx) {
+    bytes[k] = vec->runs[idx];
+  }
+  *out_rec = (rudp_record_s){
+      .channel_id = channel_id,
+      .flags = (uint8_t)(RUDP_RECORD_FLAG_ACK | RUDP_RECORD_FLAG_ACK_VEC),
+      .seq_num = (uint16_t)(vec->base_seq + seq_off),
+      .payload =
+          {
+              .type = bytes[0],
+              .flags = bytes[1],
+              .value = (uint16_t)(((uint16_t)bytes[2] << 8) | bytes[3]),
+          },
+  };
+  if (out_next_run_idx) {
+    *out_next_run_idx = idx;
+  }
+  return RUDP_OK;
+}
+
+int rudp_ackvec_decode_record(const rudp_record_s *rec,
+                              rudp_ackvec_summary_s *out_summary) {
+  if (!rec || !out_summary ||
+      (rec->flags & (RUDP_RECORD_FLAG_ACK | RUDP_RECORD_FLAG_ACK_VEC)) !=
+          (RUDP_RECORD_FLAG_ACK | RUDP_RECORD_FLAG_ACK_VEC)) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  memset(out_summary, 0, sizeof(*out_summary));
+  out_summary->start_seq = rec->seq_num;
+  uint8_t bytes[4] = {
+      rec->payload.type,
+      rec->payload.flags,
+      (uint8_t)((rec->payload.value >> 8) & 0xFFU),
+      (uint8_t)(rec->payload.value & 0xFFU),
+  };
+  for (unsigned k = 0U; k < 4U; ++k) {
+    uint8_t len = rudp_ackvec_entry_len(bytes[k]);
+    if (len == 0U) {
+      break;
+    }
+    uint8_t st = rudp_ackvec_entry_state(bytes[k]);
+    out_summary->runs[out_summary->run_count++] = bytes[k];
+    out_summary->total_span = (uint16_t)(out_summary->total_span + len);
+    if (st == RUDP_ACKVEC_RECV) {
+      out_summary->acked_count = (uint16_t)(out_summary->acked_count + len);
+    } else if (st == RUDP_ACKVEC_RECV_CE) {
+      out_summary->acked_count = (uint16_t)(out_summary->acked_count + len);
+      out_summary->ecn_ce_count = (uint16_t)(out_summary->ecn_ce_count + len);
+    } else if (st == RUDP_ACKVEC_LOST) {
+      out_summary->lost_count = (uint16_t)(out_summary->lost_count + len);
+    } else {
+      out_summary->dropped_count = (uint16_t)(out_summary->dropped_count + len);
+    }
+  }
+  return RUDP_OK;
+}
+
+int rudp_ackvec_apply_to_pacer(const rudp_record_s *rec, rudp_pacer_s *pacer,
+                               uint32_t owd_us, uint32_t bytes_per_pkt) {
+  if (!rec || !pacer) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  rudp_ackvec_summary_s s;
+  int rc = rudp_ackvec_decode_record(rec, &s);
+  if (rc != RUDP_OK) {
+    return rc;
+  }
+  uint32_t acked_bytes = (uint32_t)s.acked_count * bytes_per_pkt;
+  uint8_t ce = (s.ecn_ce_count > 0U) ? 1U : 0U;
+  return rudp_pacer_on_owd_sample(pacer, owd_us, acked_bytes, ce);
+}

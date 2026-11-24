@@ -93,7 +93,7 @@ static void inspect_channel_tail_state(const rudp_channel_s *chan, uint32_t now,
         }
       }
       sc.total_in_flight++;
-    } else if (s->state == RUDP_SLOT_UNRELIABLE) {
+    } else if (s->state == RUDP_SLOT_UNRELIABLE || s->state == RUDP_SLOT_FWD_SEQ) {
       if (!sc.has_unsent) {
         sc.has_unsent = true;
         sc.first_unsent_idx = curr;
@@ -291,6 +291,139 @@ int rudp_session_send_reliable(rudp_session_s *session, uint8_t channel_id,
           : 0U;
   rudp_slot_set_backoff(&chan->ctx.tx_buffer[slot_idx], init_backoff);
   return RUDP_OK;
+}
+
+int rudp_session_abandon_reliable(rudp_session_s *session, uint8_t channel_id,
+                                  uint16_t up_to_seq, uint8_t reason) {
+  if (!session || channel_id >= RUDP_MAX_CHANNELS) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  rudp_channel_s *chan = &session->channels[channel_id];
+  if (!(chan->flags & RUDP_CHANNEL_FLAG_RELIABLE)) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  rudp_context_s *ctx = &chan->ctx;
+  if (ctx->state != RUDP_STATE_CONNECTED) {
+    return RUDP_ERR_DISCONNECTED;
+  }
+  if (ctx->tail == ctx->head) {
+    return 0;
+  }
+
+  uint32_t dropped = 0U;
+  uint32_t existing_fwd = 0U;
+  bool have_last = false;
+  uint16_t last_idx = ctx->tail;
+  uint16_t new_cum_seq = ctx->current_seq_num;
+
+  uint16_t curr = ctx->tail;
+  while (curr != ctx->head) {
+    rudp_slot_s *s = &ctx->tx_buffer[curr];
+    if (s->state == RUDP_SLOT_FREE) {
+      curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+      continue;
+    }
+    if (s->state == RUDP_SLOT_FWD_SEQ) {
+      if ((int16_t)(up_to_seq - s->frame.header.seq_num) <= 0) {
+        break;
+      }
+      existing_fwd += s->frame.packet.value;
+      s->state = RUDP_SLOT_FREE;
+      curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+      continue;
+    }
+    if (s->state != RUDP_SLOT_IN_FLIGHT && s->state != RUDP_SLOT_SACKED) {
+      break;
+    }
+    if ((int16_t)(up_to_seq - s->frame.header.seq_num) <= 0) {
+      break;
+    }
+    last_idx = curr;
+    have_last = true;
+    new_cum_seq = (uint16_t)(s->frame.header.seq_num + 1U);
+    dropped++;
+    s->state = RUDP_SLOT_FREE;
+    s->fast_retransmit = RUDP_FAST_RETRANSMIT_OFF;
+    s->tx_count = 0U;
+    s->retries = 0U;
+    curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+  }
+
+  if (!have_last) {
+    return 0;
+  }
+
+  uint32_t total_fwd = dropped + existing_fwd;
+  uint16_t packed_dropped = (total_fwd > UINT16_MAX) ? UINT16_MAX : (uint16_t)total_fwd;
+  rudp_slot_s *ctrl = &ctx->tx_buffer[last_idx];
+  ctrl->frame.header.seq_num = new_cum_seq;
+  ctrl->frame.packet =
+      rudp_tfv_make(reason ? reason : (uint8_t)RUDP_FWD_SEQ_REASON_MANUAL, 0U,
+                    packed_dropped);
+  ctrl->state = RUDP_SLOT_FWD_SEQ;
+  ctrl->tx_count = 0U;
+  ctrl->retries = 0U;
+  ctrl->fast_retransmit = 0U;
+
+  while (ctx->tail != ctx->head && ctx->tx_buffer[ctx->tail].state == RUDP_SLOT_FREE) {
+    ctx->tail = (uint16_t)((ctx->tail + 1U) & (RUDP_WINDOW_SIZE - 1U));
+  }
+  if ((int16_t)(ctx->last_ack_received - new_cum_seq) < 0) {
+    ctx->last_ack_received = new_cum_seq;
+    ctx->duplicate_ack_count = 0U;
+  }
+  return (int)dropped;
+}
+
+int rudp_session_expire_reliable(rudp_session_s *session, uint8_t channel_id,
+                                 uint32_t now, uint32_t max_age_ms,
+                                 uint8_t max_retries) {
+  if (!session || channel_id >= RUDP_MAX_CHANNELS) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  rudp_channel_s *chan = &session->channels[channel_id];
+  if (!(chan->flags & RUDP_CHANNEL_FLAG_RELIABLE)) {
+    return RUDP_ERR_INVALID_ARG;
+  }
+  rudp_context_s *ctx = &chan->ctx;
+  if (ctx->state != RUDP_STATE_CONNECTED) {
+    return RUDP_ERR_DISCONNECTED;
+  }
+  if (ctx->tail == ctx->head || (max_age_ms == 0U && max_retries == 0U)) {
+    return 0;
+  }
+
+  bool have = false;
+  uint16_t up_to_seq = ctx->current_seq_num;
+  uint8_t reason = RUDP_FWD_SEQ_REASON_TTL;
+
+  uint16_t curr = ctx->tail;
+  while (curr != ctx->head) {
+    const rudp_slot_s *s = &ctx->tx_buffer[curr];
+    if (s->state == RUDP_SLOT_FREE || s->state == RUDP_SLOT_FWD_SEQ) {
+      curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+      continue;
+    }
+    if (s->state != RUDP_SLOT_IN_FLIGHT) {
+      break;
+    }
+    bool age_exp = (max_age_ms > 0U && s->tx_count > 0U &&
+                    (uint32_t)(now - s->timestamp) >= max_age_ms);
+    bool retry_exp = (max_retries > 0U && s->retries >= max_retries);
+    if (!age_exp && !retry_exp) {
+      break;
+    }
+    have = true;
+    up_to_seq = (uint16_t)(s->frame.header.seq_num + 1U);
+    reason = retry_exp ? (uint8_t)RUDP_FWD_SEQ_REASON_RETRIES
+                       : (uint8_t)RUDP_FWD_SEQ_REASON_TTL;
+    curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+  }
+
+  if (!have) {
+    return 0;
+  }
+  return rudp_session_abandon_reliable(session, channel_id, up_to_seq, reason);
 }
 
 int rudp_session_send_unreliable(rudp_session_s *session, uint8_t channel_id,
@@ -632,6 +765,7 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
         }
       }
 
+      int last_rel_rec_idx = -1;
       while (curr != chan->ctx.head && count < cap_records) {
         if (plan && (size_t)plan->record_count >= RUDP_MAX_RECORDS_PER_DATAGRAM) {
           break;
@@ -746,13 +880,17 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
               }
               lead_channel = c;
               lead_set = true;
+              last_rel_rec_idx = (int)count;
               count++;
             }
           }
-        } else if (slot->state == RUDP_SLOT_UNRELIABLE) {
+        } else if (slot->state == RUDP_SLOT_UNRELIABLE || slot->state == RUDP_SLOT_FWD_SEQ) {
+          uint8_t rec_flags = (slot->state == RUDP_SLOT_FWD_SEQ)
+                                  ? (uint8_t)RUDP_RECORD_FLAG_FWD_SEQ
+                                  : (uint8_t)RUDP_RECORD_FLAG_UNRELIABLE;
           rem_inflight--;
           rudp_record_s rec = {.channel_id = c,
-                               .flags = RUDP_RECORD_FLAG_UNRELIABLE,
+                               .flags = rec_flags,
                                .seq_num = slot->frame.header.seq_num,
                                .payload = slot->frame.packet};
           size_t offset =
@@ -779,6 +917,14 @@ static int build_datagram_internal(rudp_session_s *session, uint8_t primary_ack_
           count++;
         }
         curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+      }
+
+      if (last_rel_rec_idx >= 0 && (chan->flags & RUDP_CHANNEL_FLAG_XTP_SREQ) != 0U &&
+          curr == chan->ctx.head) {
+        size_t rec_off = RUDP_WIRE_DATAGRAM_HEADER_SIZE +
+                         ((size_t)last_rel_rec_idx * RUDP_WIRE_RECORD_SIZE);
+        out_buf[rec_off + 1U] |=
+            (uint8_t)(RUDP_RECORD_FLAG_SREQ | RUDP_RECORD_FLAG_DREQ);
       }
 
       if (chan->rto_min_ms > 0U &&

@@ -46,6 +46,8 @@ static inline tfv_packet_u rudp_payload_xor(tfv_packet_u a, tfv_packet_u b) {
 uint32_t rudp_rx_sack_mask_offset(const rudp_channel_s *chan, uint16_t base_offset);
 uint32_t rudp_rx_sack_mask(const rudp_channel_s *chan);
 int rudp_rx_drain(rudp_channel_s *chan, rudp_record_s *out, size_t capacity);
+int rudp_rx_advance_seq(rudp_channel_s *chan, uint16_t new_cum_seq,
+                        rudp_record_s *out, size_t capacity);
 int rudp_rx_accept(rudp_channel_s *channel, const rudp_record_s *record,
                    rudp_record_s *out, size_t capacity, bool *out_out_of_window);
 int rudp_rx_accept_fec(rudp_channel_s *chan, const rudp_record_s *parity_rec,

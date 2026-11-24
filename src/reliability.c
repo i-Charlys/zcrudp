@@ -106,7 +106,8 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
   uint16_t first_rel = scan_tail;
   while (first_rel != ctx->head &&
          (ctx->tx_buffer[first_rel].state == RUDP_SLOT_FREE ||
-          ctx->tx_buffer[first_rel].state == RUDP_SLOT_UNRELIABLE)) {
+          ctx->tx_buffer[first_rel].state == RUDP_SLOT_UNRELIABLE ||
+          ctx->tx_buffer[first_rel].state == RUDP_SLOT_FWD_SEQ)) {
     first_rel = (uint16_t)((first_rel + 1U) & (RUDP_WINDOW_SIZE - 1U));
   }
   if (first_rel == ctx->head) {
@@ -130,7 +131,8 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
     uint16_t check = first_rel;
     while (check != ctx->head) {
       const rudp_slot_s *s = &ctx->tx_buffer[check];
-      if (s->state == RUDP_SLOT_FREE || s->state == RUDP_SLOT_UNRELIABLE) {
+      if (s->state == RUDP_SLOT_FREE || s->state == RUDP_SLOT_UNRELIABLE ||
+          s->state == RUDP_SLOT_FWD_SEQ) {
         check = (uint16_t)((check + 1U) & (RUDP_WINDOW_SIZE - 1U));
         continue;
       }
@@ -155,7 +157,8 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
   uint16_t curr = first_rel;
   while (curr != ctx->head) {
     rudp_slot_s *s = &ctx->tx_buffer[curr];
-    if (s->state == RUDP_SLOT_FREE || s->state == RUDP_SLOT_UNRELIABLE) {
+    if (s->state == RUDP_SLOT_FREE || s->state == RUDP_SLOT_UNRELIABLE ||
+        s->state == RUDP_SLOT_FWD_SEQ) {
       curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
       continue;
     }
@@ -184,6 +187,7 @@ int rudp_recv_ack_ex(rudp_context_s *ctx, uint16_t ack_num, bool count_duplicate
     while (scan != ctx->head &&
            (ctx->tx_buffer[scan].state == RUDP_SLOT_FREE ||
             ctx->tx_buffer[scan].state == RUDP_SLOT_UNRELIABLE ||
+            ctx->tx_buffer[scan].state == RUDP_SLOT_FWD_SEQ ||
             ctx->tx_buffer[scan].state == RUDP_SLOT_SACKED)) {
       scan = (uint16_t)((scan + 1U) & (RUDP_WINDOW_SIZE - 1U));
     }

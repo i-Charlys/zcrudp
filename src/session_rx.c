@@ -43,7 +43,8 @@ static uint16_t find_first_reliable_slot(const rudp_context_s *ctx) {
   uint16_t curr = ctx->tail;
   while (curr != ctx->head &&
          (ctx->tx_buffer[curr].state == RUDP_SLOT_FREE ||
-          ctx->tx_buffer[curr].state == RUDP_SLOT_UNRELIABLE)) {
+          ctx->tx_buffer[curr].state == RUDP_SLOT_UNRELIABLE ||
+          ctx->tx_buffer[curr].state == RUDP_SLOT_FWD_SEQ)) {
     curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
   }
   return curr;
@@ -225,6 +226,95 @@ static void session_ack_and_sack(rudp_channel_s *chan, uint16_t ack, uint32_t sa
   }
 }
 
+static void session_apply_ack_vec(rudp_channel_s *chan, const rudp_record_s *rec,
+                                  rudp_stats_s *stats) {
+  rudp_context_s *ctx = &chan->ctx;
+  if (ctx->state != RUDP_STATE_CONNECTED) {
+    return;
+  }
+  uint8_t runs[4] = {
+      rec->payload.type,
+      rec->payload.flags,
+      (uint8_t)((rec->payload.value >> 8) & 0xFFU),
+      (uint8_t)(rec->payload.value & 0xFFU),
+  };
+
+  /* Pass A: Validate span & check every RECV/RECV_CE seq is not unsent/future */
+  uint32_t span = 0U;
+  for (unsigned r = 0U; r < 4U; ++r) {
+    uint8_t rlen = (uint8_t)(runs[r] & 0x3FU);
+    if (rlen == 0U) {
+      break;
+    }
+    uint8_t st = (uint8_t)((runs[r] >> 6) & 0x03U);
+    if (st <= 1U) {
+      for (uint8_t k = 0U; k < rlen; ++k) {
+        uint16_t seq = (uint16_t)(rec->seq_num + span + k);
+        if ((int16_t)(seq - ctx->current_seq_num) >= 0) {
+          if (stats) {
+            rudp_stat_inc(&stats->rx_ack_rejected);
+          }
+          return;
+        }
+      }
+    }
+    span += rlen;
+  }
+  if (span == 0U) {
+    return;
+  }
+
+  /* Pass B: Apply SACK markings for RECV / RECV_CE runs */
+  uint32_t off = 0U;
+  for (unsigned r = 0U; r < 4U; ++r) {
+    uint8_t rlen = (uint8_t)(runs[r] & 0x3FU);
+    if (rlen == 0U) {
+      break;
+    }
+    uint8_t st = (uint8_t)((runs[r] >> 6) & 0x03U);
+    if (st <= 1U) {
+      for (uint8_t k = 0U; k < rlen; ++k) {
+        uint16_t seq = (uint16_t)(rec->seq_num + off + k);
+        uint16_t curr = ctx->tail;
+        while (curr != ctx->head) {
+          rudp_slot_s *s = &ctx->tx_buffer[curr];
+          if ((s->state == RUDP_SLOT_IN_FLIGHT || s->state == RUDP_SLOT_SACKED) &&
+              s->frame.header.seq_num == seq && s->tx_count > 0U) {
+            if (s->state == RUDP_SLOT_IN_FLIGHT) {
+              s->state = RUDP_SLOT_SACKED;
+              rudp_slot_set_fast_state(s, RUDP_FAST_RETRANSMIT_OFF);
+              if (stats) {
+                rudp_stat_inc(&stats->rx_sack_blocks);
+              }
+            }
+            break;
+          }
+          curr = (uint16_t)((curr + 1U) & (RUDP_WINDOW_SIZE - 1U));
+        }
+      }
+    }
+    off += rlen;
+  }
+
+  /* FACK fast-retransmit trigger across the TX window */
+  uint16_t first_rel = find_first_reliable_slot(ctx);
+  uint16_t sacked_above = 0U;
+  uint16_t cur = ctx->head;
+  while (cur != ctx->tail) {
+    cur = (uint16_t)((cur - 1U) & (RUDP_WINDOW_SIZE - 1U));
+    rudp_slot_s *s = &ctx->tx_buffer[cur];
+    if (s->state == RUDP_SLOT_SACKED) {
+      sacked_above++;
+    } else if (s->state == RUDP_SLOT_IN_FLIGHT && s->tx_count > 0U &&
+               s->retries == 0U && sacked_above >= 3U) {
+      rudp_slot_set_fast_state(s, RUDP_FAST_RETRANSMIT_PENDING);
+      if (cur == first_rel && ctx->duplicate_ack_count < 3U) {
+        ctx->duplicate_ack_count = 3U;
+      }
+    }
+  }
+}
+
 int rudp_session_process_datagram_ex(rudp_session_s *session, const uint8_t *in_buf,
                                      size_t in_len, rudp_record_s *out_delivered,
                                      size_t max_delivered, bool timed, uint32_t now,
@@ -274,35 +364,56 @@ int rudp_session_process_datagram_ex(rudp_session_s *session, const uint8_t *in_
       }
       return RUDP_ERR_INVALID_ARG;
     }
-    if (rec.flags != RUDP_RECORD_FLAG_UNRELIABLE &&
-        rec.flags != RUDP_RECORD_FLAG_RELIABLE && rec.flags != RUDP_RECORD_FLAG_ACK &&
-        rec.flags != RUDP_RECORD_FLAG_FEC_PARITY) {
+    if ((rec.flags & ~RUDP_RECORD_VALID_FLAGS_MASK) != 0U) {
       if (stats) {
         rudp_stat_inc(&stats->rx_malformed);
       }
       return RUDP_ERR_INVALID_ARG;
     }
-    if ((rec.flags == RUDP_RECORD_FLAG_RELIABLE ||
-         rec.flags == RUDP_RECORD_FLAG_FEC_PARITY) &&
+    bool is_ack = (rec.flags & RUDP_RECORD_FLAG_ACK) != 0U;
+    bool is_rel = (rec.flags & RUDP_RECORD_FLAG_RELIABLE) != 0U;
+    bool is_fec = (rec.flags & RUDP_RECORD_FLAG_FEC_PARITY) != 0U;
+    bool is_fwd = (rec.flags & RUDP_RECORD_FLAG_FWD_SEQ) != 0U;
+    bool is_ack_vec = (rec.flags & RUDP_RECORD_FLAG_ACK_VEC) != 0U;
+    bool has_req = (rec.flags & (RUDP_RECORD_FLAG_SREQ | RUDP_RECORD_FLAG_DREQ)) != 0U;
+    unsigned kind_count =
+        (unsigned)is_ack + (unsigned)is_rel + (unsigned)is_fec + (unsigned)is_fwd;
+    bool valid_flags = false;
+    if (is_ack) {
+      valid_flags = (kind_count == 1U) && !has_req;
+    } else if (is_rel) {
+      valid_flags = (kind_count == 1U) && !is_ack_vec;
+    } else if (is_fec) {
+      valid_flags = (rec.flags == RUDP_RECORD_FLAG_FEC_PARITY);
+    } else if (is_fwd) {
+      valid_flags = (rec.flags == RUDP_RECORD_FLAG_FWD_SEQ);
+    } else {
+      valid_flags = (rec.flags & ~(uint8_t)RUDP_RECORD_FLAG_SREQ) == 0U;
+    }
+    if (!valid_flags) {
+      if (stats) {
+        rudp_stat_inc(&stats->rx_malformed);
+      }
+      return RUDP_ERR_INVALID_ARG;
+    }
+    if ((is_rel || is_fec || is_fwd) &&
         !(session->channels[rec.channel_id].flags & RUDP_CHANNEL_FLAG_RELIABLE)) {
       if (stats) {
         rudp_stat_inc(&stats->rx_malformed);
       }
       return RUDP_ERR_INVALID_ARG;
     }
-    if (rec.flags == RUDP_RECORD_FLAG_FEC_PARITY && (rec.seq_num & 1U) != 0U) {
+    if (is_fec && (rec.seq_num & 1U) != 0U) {
       if (stats) {
         rudp_stat_inc(&stats->rx_malformed);
       }
       return RUDP_ERR_INVALID_ARG;
     }
-    if (rec.flags != RUDP_RECORD_FLAG_ACK) {
+    if (!is_ack) {
       needs_delivery = true;
     }
 #if RUDP_EXTERNAL_RX_STORAGE
-    if ((rec.flags == RUDP_RECORD_FLAG_RELIABLE ||
-         rec.flags == RUDP_RECORD_FLAG_FEC_PARITY) &&
-        !session->channels[rec.channel_id].rx_present) {
+    if ((is_rel || is_fec || is_fwd) && !session->channels[rec.channel_id].rx_present) {
       if (stats) {
         rudp_stat_inc(&stats->rx_malformed);
       }
@@ -359,10 +470,12 @@ int rudp_session_process_datagram_ex(rudp_session_s *session, const uint8_t *in_
       rudp_touch(&chan->ctx, now);
     }
 
-    if (rec.flags == RUDP_RECORD_FLAG_ACK) {
-      /* Allow primary SACK (offsets 1..32) and one extended SACK (offsets 33..63)
-       * per channel per datagram; only the first counts duplicate ACKs. */
-      if (ack_record_seen[rec.channel_id] < 2U) {
+    if ((rec.flags & RUDP_RECORD_FLAG_ACK) != 0U) {
+      if ((rec.flags & RUDP_RECORD_FLAG_ACK_VEC) != 0U) {
+        session_apply_ack_vec(chan, &rec, stats);
+      } else if (ack_record_seen[rec.channel_id] < 2U) {
+        /* Allow primary SACK (offsets 1..32) and one extended SACK (offsets 33..63)
+         * per channel per datagram; only the first counts duplicate ACKs. */
         uint8_t seen = ack_record_seen[rec.channel_id];
         if (seen == 0U) {
           first_ack_seq[rec.channel_id] = rec.seq_num;
@@ -376,13 +489,17 @@ int rudp_session_process_datagram_ex(rudp_session_s *session, const uint8_t *in_
                              seen == 0U, timed, now, allow_sack_rtt, seen > 0U,
                              stats);
       }
-    } else if (rec.flags == RUDP_RECORD_FLAG_RELIABLE) {
+    } else if ((rec.flags & RUDP_RECORD_FLAG_RELIABLE) != 0U) {
       bool oow = false;
       delivered_count += rudp_rx_accept(chan, &rec, out_delivered + delivered_count,
                                         max_delivered - (size_t)delivered_count, &oow);
       if (oow && stats) {
         rudp_stat_inc(&stats->rx_out_of_window);
       }
+    } else if (rec.flags == RUDP_RECORD_FLAG_FWD_SEQ) {
+      delivered_count += rudp_rx_advance_seq(
+          chan, rec.seq_num, out_delivered + delivered_count,
+          max_delivered - (size_t)delivered_count);
     } else if (rec.flags == RUDP_RECORD_FLAG_FEC_PARITY) {
       bool recovered = false;
       delivered_count += rudp_rx_accept_fec(chan, &rec, out_delivered + delivered_count,
@@ -392,6 +509,10 @@ int rudp_session_process_datagram_ex(rudp_session_s *session, const uint8_t *in_
         rudp_stat_inc(&stats->rx_fec_recoveries);
       }
     } else {
+      if ((rec.flags & RUDP_RECORD_FLAG_SREQ) != 0U) {
+        chan->ack_pending = 1U;
+      }
+      rec.flags = RUDP_RECORD_FLAG_UNRELIABLE;
       /* Unreliable delivery via 16-bit anti-rollback filter + outage resync */
       if (!(chan->has_unreliable_seq & RUDP_UNREL_HAS_SEQ_MASK)) {
         if ((size_t)delivered_count < max_delivered) {

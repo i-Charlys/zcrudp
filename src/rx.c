@@ -61,10 +61,37 @@ int rudp_rx_drain(rudp_channel_s *chan, rudp_record_s *out, size_t capacity) {
     chan->ctx.expected_seq_num++;
     count++;
     chan->rx_present[slot / 8] &= (uint8_t)~mask;
-    chan->ack_pending = 1;
+    if (!(chan->flags & RUDP_CHANNEL_FLAG_XTP_SREQ)) {
+      chan->ack_pending = 1;
+    }
     rx_hist_advance(chan);
   }
   return count;
+}
+
+int rudp_rx_advance_seq(rudp_channel_s *chan, uint16_t new_cum_seq,
+                        rudp_record_s *out, size_t capacity) {
+  if (!chan) {
+    return 0;
+  }
+#if RUDP_EXTERNAL_RX_STORAGE
+  if (!chan->rx_present) {
+    return 0;
+  }
+#endif
+  uint16_t dist = (uint16_t)(new_cum_seq - chan->ctx.expected_seq_num);
+  if (dist == 0U || dist >= RUDP_WINDOW_SIZE) {
+    return 0;
+  }
+  for (uint16_t k = 0U; k < dist; ++k) {
+    uint16_t seq = (uint16_t)(chan->ctx.expected_seq_num + k);
+    uint16_t slot = seq & (RUDP_WINDOW_SIZE - 1U);
+    chan->rx_present[slot / 8U] &= (uint8_t)~(1U << (slot & 7U));
+  }
+  chan->ctx.expected_seq_num = new_cum_seq;
+  chan->ack_pending = 1U;
+  chan->chan_backoff &= (uint8_t)~RUDP_CHAN_FLAG_GAP_ACK_PENDING;
+  return rudp_rx_drain(chan, out, capacity);
 }
 
 int rudp_rx_accept(rudp_channel_s *channel, const rudp_record_s *record,
@@ -72,6 +99,12 @@ int rudp_rx_accept(rudp_channel_s *channel, const rudp_record_s *record,
   if (out_out_of_window) {
     *out_out_of_window = false;
   }
+  bool xtp_sreq = (channel->flags & RUDP_CHANNEL_FLAG_XTP_SREQ) != 0U;
+  bool fastnak = (channel->flags & RUDP_CHANNEL_FLAG_FASTNAK) != 0U;
+  bool sreq = (record->flags & RUDP_RECORD_FLAG_SREQ) != 0U;
+  bool dreq = (record->flags & RUDP_RECORD_FLAG_DREQ) != 0U;
+  bool want_ack = sreq || dreq;
+
   uint16_t distance = (uint16_t)(record->seq_num - channel->ctx.expected_seq_num);
   if (distance < RUDP_WINDOW_SIZE) {
     uint16_t slot = record->seq_num & (RUDP_WINDOW_SIZE - 1);
@@ -82,8 +115,10 @@ int rudp_rx_accept(rudp_channel_s *channel, const rudp_record_s *record,
        * deduplicate via rx_present, and slide cumulative expected_seq_num across
        * contiguous delivered slots. */
       if (channel->rx_present[slot / 8] & mask) {
-        channel->ack_pending = 1;
-        channel->chan_backoff |= RUDP_CHAN_FLAG_GAP_ACK_PENDING;
+        if (!xtp_sreq || fastnak || want_ack) {
+          channel->ack_pending = 1;
+          channel->chan_backoff |= RUDP_CHAN_FLAG_GAP_ACK_PENDING;
+        }
         return 0;
       }
       if (capacity == 0U) {
@@ -97,8 +132,11 @@ int rudp_rx_accept(rudp_channel_s *channel, const rudp_record_s *record,
           .seq_num = record->seq_num,
           .payload = record->payload,
       };
-      channel->ack_pending = 1;
-      if (distance > 0U) {
+      if (!xtp_sreq || want_ack) {
+        channel->ack_pending = 1;
+      }
+      if (distance > 0U && (!xtp_sreq || fastnak || want_ack)) {
+        channel->ack_pending = 1;
         channel->chan_backoff |= RUDP_CHAN_FLAG_GAP_ACK_PENDING;
       }
       while (1) {
@@ -116,23 +154,29 @@ int rudp_rx_accept(rudp_channel_s *channel, const rudp_record_s *record,
 
     if (channel->rx_present[slot / 8] & mask) {
       /* Duplicate ahead-of-order segment already buffered: trigger duplicate ACK. */
-      channel->ack_pending = 1;
-      channel->chan_backoff |= RUDP_CHAN_FLAG_GAP_ACK_PENDING;
+      if (!xtp_sreq || fastnak || want_ack) {
+        channel->ack_pending = 1;
+        channel->chan_backoff |= RUDP_CHAN_FLAG_GAP_ACK_PENDING;
+      }
     } else {
       channel->rx_buffer[slot] = record->payload;
       channel->rx_present[slot / 8] |= mask;
     }
-    if (distance) {
+    if (distance && (!xtp_sreq || fastnak || want_ack)) {
       channel->ack_pending = 1;
       channel->chan_backoff |= RUDP_CHAN_FLAG_GAP_ACK_PENDING;
     }
-    return rudp_rx_drain(channel, out, capacity);
+    int drained = rudp_rx_drain(channel, out, capacity);
+    if (sreq || (dreq && drained > 0)) {
+      channel->ack_pending = 1;
+    }
+    return drained;
   }
 
   if (out_out_of_window) {
     *out_out_of_window = true;
   }
-  if (distance > 32768U) {
+  if (distance > 32768U && (!xtp_sreq || fastnak || want_ack)) {
     channel->ack_pending = 1;
     channel->chan_backoff |= RUDP_CHAN_FLAG_GAP_ACK_PENDING;
   }
